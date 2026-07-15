@@ -17,7 +17,8 @@ The app is modified **in place**. The utility:
 - signs nested app/XPC/plugin bundles inside-out after their Mach-O files;
 - signs the main executable and outer app with Hardened Runtime and the same
   `disable-library-validation` entitlement as Studio;
-- requests a secure timestamp and finishes with strict deep verification.
+- requests a secure timestamp, deletes the temporary keychain, and only then
+  finishes with strict deep verification so success is keychain-independent.
 
 Requirements:
 

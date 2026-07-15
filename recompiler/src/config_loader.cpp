@@ -101,8 +101,9 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             }
         }
     }
-    if (!cfg.contains("runtime")) return rt;
-    const toml::value& runtime = toml::find(cfg, "runtime");
+    const toml::value empty_runtime(toml::table{});
+    const toml::value& runtime = cfg.contains("runtime")
+        ? toml::find(cfg, "runtime") : empty_runtime;
     if (runtime.contains("language"))  // [runtime].language convenience alias
         rt.language = toml::find<std::string>(runtime, "language");
 
@@ -297,6 +298,18 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
     // Optional [controller] block — game-declared input defaults.
     if (cfg.contains("controller")) {
         const toml::value& ct = toml::find(cfg, "controller");
+        if (ct.contains("p1_device")) {
+            rt.default_p1_device = toml::find<std::string>(ct, "p1_device");
+            if (rt.default_p1_device.empty())
+                throw std::runtime_error("[controller] p1_device must not be empty");
+            rt.has_p1_device = true;
+        }
+        if (ct.contains("p2_device")) {
+            rt.default_p2_device = toml::find<std::string>(ct, "p2_device");
+            if (rt.default_p2_device.empty())
+                throw std::runtime_error("[controller] p2_device must not be empty");
+            rt.has_p2_device = true;
+        }
         // Legacy boolean form (true->analog, false->digital), read first so the
         // new string `*_mode` keys win when both are present.
         if (ct.contains("default_analog")) {

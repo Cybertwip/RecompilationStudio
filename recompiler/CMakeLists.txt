@@ -206,3 +206,21 @@ target_include_directories(l2_structural_test PRIVATE
     lib/fmt/include
 )
 target_link_libraries(l2_structural_test PRIVATE fmt rabbitizer)
+
+# Runtime config regression: packaged [controller] device defaults must reach
+# RuntimeConfig so launcher-less Studio exports can activate auto/GIP routing.
+add_executable(config_loader_controller_test
+    tests/config_loader_controller_test.cpp
+    src/config_loader.cpp
+    src/ps1_exe_parser.cpp
+)
+target_include_directories(config_loader_controller_test PRIVATE
+    include
+    src
+    lib/fmt/include
+    lib/toml11
+)
+target_link_libraries(config_loader_controller_test PRIVATE fmt)
+
+enable_testing()
+add_test(NAME config_loader_controller COMMAND config_loader_controller_test)

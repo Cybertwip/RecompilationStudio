@@ -196,17 +196,25 @@ int transfer_in(UsbConnection& connection, uint8_t* data, int capacity,
 
 int transfer_out(UsbConnection& connection, const uint8_t* data, int size,
                  int* transferred, unsigned timeout_ms) {
-    uint8_t* mutable_data = const_cast<uint8_t*>(data);
+    if (!data || size <= 0) return LIBUSB_ERROR_INVALID_PARAM;
+
+    /* libusb's synchronous OUT API takes a mutable buffer. Passing our static
+     * protocol packets through const_cast placed signed __TEXT,__const pages in
+     * the IOKit transfer path. On hardened-runtime macOS builds that page can be
+     * dirtied while the transfer is wired, and AMFI then terminates the process
+     * with "Code Signature Invalid" on the next read. Always give libusb an
+     * owned writable buffer; the wire bytes remain identical. */
+    std::vector<uint8_t> transfer_data(data, data + size);
     if (connection.transfer_type_out == LIBUSB_TRANSFER_TYPE_INTERRUPT) {
         return libusb_interrupt_transfer(connection.handle,
                                          connection.endpoint_out,
-                                         mutable_data, size, transferred,
+                                         transfer_data.data(), size, transferred,
                                          timeout_ms);
     }
     if (connection.transfer_type_out == LIBUSB_TRANSFER_TYPE_BULK) {
         return libusb_bulk_transfer(connection.handle,
                                     connection.endpoint_out,
-                                    mutable_data, size, transferred,
+                                    transfer_data.data(), size, transferred,
                                     timeout_ms);
     }
     return LIBUSB_ERROR_NOT_SUPPORTED;

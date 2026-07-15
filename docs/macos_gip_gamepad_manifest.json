@@ -8,7 +8,9 @@
     "launcher_integration": "runtime/launcher/launcher.cpp",
     "test": "runtime/tests/gip_gamepad_protocol_test.cpp",
     "studio_export": "studio/src/PipelineWorker.cpp",
-    "studio_proof": "docs/macos_gip_studio_export_proof.json"
+    "studio_proof": "docs/macos_gip_studio_export_proof.json",
+    "hardened_runtime_test": "tools/test_macos_gip_hardened",
+    "runtime_integration_proof": "docs/macos_gip_runtime_integration_proof.json"
   },
   "reference": {
     "controller": "../PowerEngineV3/PowerEngine/Tools/andamiro/fiesta/andamiro_engine/controller.py",
@@ -25,7 +27,8 @@
       "bulk"
     ],
     "read_buffer_minimum": 64,
-    "reader": "one reconnecting background thread per selected direct-USB controller"
+    "reader": "one reconnecting background thread per selected direct-USB controller",
+    "outbound_buffer": "Every synchronous USB OUT transfer uses an owned writable copy; signed static protocol storage is never passed to IOKit/libusb."
   },
   "supported_devices": {
     "vendor_wildcards": [
@@ -107,6 +110,7 @@
     "binary_proof": "nm -gU must contain open/get_state/close GIP symbols",
     "linkage_proof": "otool -L must not contain a dynamic libusb dependency",
     "embedded_proof": "Contents/Resources/PSXRecomp-Proof.zip:macos_gip_controller.json",
-    "runtime_device": "p1_device = auto (SDL preferred, GIP fallback)"
+    "runtime_device": "packaged p1_device = auto is loaded by RuntimeConfig; SDL remains preferred and GIP is the fallback",
+    "hardened_runtime": "verified by tools/test_macos_gip_hardened with physical hardware"
   }
 }

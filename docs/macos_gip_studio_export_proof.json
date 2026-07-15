@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "artifact": "PSXRecomp Studio macOS GIP export proof",
   "date": "2026-07-15",
   "studio_ui": {
@@ -28,7 +28,8 @@
     "dist_bundle_updated": true,
     "libusb_version": "1.0.30",
     "static_libusb_archive_present": true,
-    "studio_ctest": "2/2 passed"
+    "studio_ctest": "2/2 passed",
+    "keychain_independent_export_verification": "implemented; temporary keychain is removed before the final delivered-app codesign check"
   },
   "existing_export_observations": [
     {
@@ -41,8 +42,22 @@
       "gip_symbols": true,
       "dynamic_libusb_dependency": false,
       "result": "runtime backend present; re-export adds visible Studio selection and embedded proof"
+    },
+    {
+      "app": "Metal Slug X",
+      "gip_symbols": true,
+      "packaged_p1_device": "auto",
+      "pre_fix_live_worker": false,
+      "result": "old runtime ignored packaged device default; re-export required after runtime integration fix"
     }
   ],
   "new_full_signed_game_export_executed": false,
-  "scope_note": "The exporter, UI, generated CMake contract, dependency gates, symbol verifier, tests, and distributable Studio bundle were verified. A new game app was not re-exported because the full pipeline requires the user's selected disc, BIOS, Ghidra project, and signing certificate workflow."
+  "scope_note": "Studio export inputs and the existing Metal Slug X bundle were inspected directly. Runtime config loading and hardened USB hardware were independently verified; a replacement game app still requires re-export with the user certificate password.",
+  "runtime_integration": {
+    "packaged_controller_defaults_loaded": true,
+    "hardened_runtime_usb_transfer_safe": true,
+    "config_loader_test": "passed",
+    "hardened_hardware_test": "20/20 passed",
+    "proof": "docs/macos_gip_runtime_integration_proof.json"
+  }
 }

@@ -1531,7 +1531,8 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("hardened_runtime"), true },
     { QStringLiteral("disable_library_validation"), true },
     { QStringLiteral("secure_timestamp"), true },
-    { QStringLiteral("verification"), QStringLiteral("codesign --verify --deep --strict passed before final seal") },
+    { QStringLiteral("keychain_independent_verification"), true },
+    { QStringLiteral("verification"), QStringLiteral("codesign --verify --deep --strict passed before final seal and after temporary-keychain removal") },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("signature_verification.json")),
                  signingProof, error) ||
@@ -1652,14 +1653,15 @@ void PipelineWorker::run(PipelineRequest request) {
       emit logLine(QStringLiteral("Warning: delivery staging app remains at %1").arg(deliveryApp));
     removeTree(failedContents, false);
   }
+  cleanupKeychain();
+  emit logLine(QStringLiteral("Temporary signing keychain removed; verifying delivered app independently."));
   if (!runCommand(QStringLiteral("/usr/bin/codesign"),
                   { QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"),
                     QStringLiteral("--verbose=4"), outputApp },
-                  workspace, QStringLiteral("codesign --verify --deep --strict <delivered app>"), 60000)) {
-    fail(QStringLiteral("The delivered app failed final signature verification."), workspace);
+                  workspace, QStringLiteral("codesign --verify --deep --strict <delivered app after keychain removal>"), 60000)) {
+    fail(QStringLiteral("The delivered app signature depends on the temporary keychain or is otherwise invalid."), workspace);
     return;
   }
-  cleanupKeychain();
   emit logLine(QStringLiteral("Signed app created: %1").arg(outputApp));
   QDir(workspace).removeRecursively();
   emit completed(outputApp);

@@ -254,6 +254,14 @@ struct RuntimeConfig {
     bool                  audio_spu_hq = false;
 
     // ---- [controller] block — game-declared input defaults ----
+    // p1_device/p2_device: packaged device routing defaults. Per-install
+    // settings.toml values still override these. "auto" means SDL first with
+    // the macOS direct-USB GIP backend as fallback when it is compiled.
+    bool                  has_p1_device = false;
+    std::string           default_p1_device = "keyboard";
+    bool                  has_p2_device = false;
+    std::string           default_p2_device = "none";
+
     // default_mode: the pad input mode this game ships with (see PadMode):
     // "hybrid" (default) auto-switches DualShock/digital from the player's
     // input, "analog" pins DualShock (0x73), "digital" pins a digital pad

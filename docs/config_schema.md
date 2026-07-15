@@ -106,6 +106,24 @@ controller    = "digital"       # "digital" or "dualshock"
 memcard_dir   = "."             # memcard files location, relative to project root
 ```
 
+## Controller block
+
+Game bundles can declare device-routing defaults as well as the emulated pad
+mode. Per-install `settings.toml` values override these defaults.
+
+```toml
+[controller]
+p1_device = "auto"       # none | keyboard | auto | SDL GUID | gip: selector
+p2_device = "none"
+default_mode = "digital" # hybrid | analog | digital
+deadzone = 12000
+allow_hybrid = false
+lock_mode = false
+```
+
+On a macOS build with `PSX_MACOS_GIP_GAMEPAD=ON`, `auto` tries SDL first and
+then starts the direct libusb GIP reader when SDL exposes no controller.
+
 Reserved future fields:
 - `default_disc_path` — game runtimes can pre-mount a disc
 - `default_game_root` — for sibling-junction setups

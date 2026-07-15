@@ -3265,6 +3265,10 @@ int main(int argc, char** argv) {
             g_auto_skip_fmv    = gc.runtime.video_auto_skip_fmv ? 1 : 0;
             /* [controller] game-declared input defaults (settings.toml/launcher
              * still override below). */
+            if (gc.runtime.has_p1_device)
+                p1_device = gc.runtime.default_p1_device;
+            if (gc.runtime.has_p2_device)
+                p2_device = gc.runtime.default_p2_device;
             if (gc.runtime.has_default_mode) {
                 p1_mode = gc.runtime.default_p1_mode;
                 p2_mode = gc.runtime.default_p2_mode;

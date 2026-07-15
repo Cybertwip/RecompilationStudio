@@ -135,6 +135,13 @@ KEYCHAIN_PASSWORD="$(/usr/bin/uuidgen)$(/usr/bin/uuidgen)"
 NORMALIZED_PASSWORD="$(/usr/bin/uuidgen)$(/usr/bin/uuidgen)"
 KEYCHAIN_CREATED=0
 
+destroy_keychain() {
+    if [[ $KEYCHAIN_CREATED -eq 1 ]]; then
+        /usr/bin/security delete-keychain "$KEYCHAIN" >/dev/null 2>&1
+        KEYCHAIN_CREATED=0
+    fi
+}
+
 cleanup() {
     local status=$?
     trap - EXIT HUP INT TERM
@@ -145,9 +152,7 @@ cleanup() {
     PFX_PASSWORD=""
     NORMALIZED_PASSWORD=""
     KEYCHAIN_PASSWORD=""
-    if [[ $KEYCHAIN_CREATED -eq 1 ]]; then
-        /usr/bin/security delete-keychain "$KEYCHAIN" >/dev/null 2>&1
-    fi
+    destroy_keychain
     /bin/chmod -R u+rwX "$WORKSPACE" >/dev/null 2>&1
     /bin/rm -rf "$WORKSPACE"
     exit "$status"
@@ -324,9 +329,11 @@ PLIST
 
     # Match Studio's final-seal pass after all nested content is known-good.
     sign_path "$PACKAGE" "app bundle (final seal)" 1
+    log "removing temporary keychain before final verification"
+    destroy_keychain
     /usr/bin/codesign --verify --deep --strict --verbose=4 "$PACKAGE"
 
-    log "signature verified: $PACKAGE"
+    log "keychain-independent signature verified: $PACKAGE"
 else
     # .dmg path: simple outer signature (contents should already be signed).
     # Clear resource forks / Finder info that often prevent codesign of DMGs.
@@ -361,8 +368,10 @@ else
     log "signing disk image ($IDENTIFIER)"
     /usr/bin/codesign "${arguments[@]}"
 
+    log "removing temporary keychain before final verification"
+    destroy_keychain
     log "verifying disk image"
     /usr/bin/codesign --verify --verbose=4 "$PACKAGE"
 
-    log "signature verified: $PACKAGE"
+    log "keychain-independent signature verified: $PACKAGE"
 fi

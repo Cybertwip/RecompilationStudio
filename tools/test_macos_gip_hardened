@@ -1,0 +1,69 @@
+#!/bin/bash
+# Exercise the direct Xbox GIP backend under the same Hardened Runtime policy
+# used by PSXRecomp Studio exports. Requires a physically connected controller.
+
+set -euo pipefail
+IFS=$'\n\t'
+
+if [[ "$(/usr/bin/uname -s)" != "Darwin" ]]; then
+    printf 'test_macos_gip_hardened: macOS is required.\n' >&2
+    exit 1
+fi
+
+SCRIPT_DIR=$(cd -P "$(/usr/bin/dirname "$0")" && pwd)
+ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd)
+BINARY=${1:-"$ROOT/runtime/build/gip_gamepad_protocol_test"}
+PROOF=${2:-"$ROOT/docs/macos_gip_gamepad_proof.json"}
+
+[[ -x "$BINARY" ]] || {
+    printf 'test_macos_gip_hardened: test binary not found: %s\n' "$BINARY" >&2
+    exit 1
+}
+
+TMP_ROOT=${TMPDIR:-/tmp}
+TMP_ROOT=${TMP_ROOT%/}
+WORKSPACE=$(/usr/bin/mktemp -d "$TMP_ROOT/psxrecomp-gip-hardened.XXXXXX")
+cleanup() {
+    /bin/rm -rf "$WORKSPACE"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+SIGNED="$WORKSPACE/gip_gamepad_protocol_test"
+ENTITLEMENTS="$WORKSPACE/App.entitlements"
+/bin/cp "$BINARY" "$SIGNED"
+cat > "$ENTITLEMENTS" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict></plist>
+PLIST
+
+/usr/bin/codesign --force --sign - --options runtime \
+    --entitlements "$ENTITLEMENTS" "$SIGNED"
+/usr/bin/codesign --verify --strict --verbose=4 "$SIGNED"
+"$SIGNED" "$PROOF" --hardware
+
+/usr/bin/python3 - "$PROOF" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["schema"] = 2
+data["execution"] = {
+    "hardened_runtime": True,
+    "signature": "ad-hoc test identity",
+    "entitlements": ["com.apple.security.cs.disable-library-validation"],
+    "codesign_verification": "strict passed",
+    "hardware_command_exit_code": 0,
+    "outbound_transfer_storage": "owned writable copy"
+}
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+
+printf 'Hardened-runtime GIP hardware proof passed: %s\n' "$PROOF"

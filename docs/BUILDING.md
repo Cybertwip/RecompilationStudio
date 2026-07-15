@@ -108,6 +108,22 @@ On Windows with MSVC or plain MinGW makefiles, swap `-G Ninja` for your generato
 | `PSX_ENABLE_VULKAN` | OFF | Build the experimental Vulkan renderer |
 | `PSX_BUILD_COSIM` | OFF | Build the first-divergence co-sim oracle target |
 
+### Verify macOS wired Xbox/PDP support
+
+The normal protocol test can probe a connected controller, but Studio exports
+run with Hardened Runtime enabled. Use the wrapper below to copy and ad-hoc sign
+the test with that same runtime policy before performing the USB handshake:
+
+```sh
+cmake --build runtime/build --target gip_gamepad_protocol_test
+./tools/test_macos_gip_hardened \
+    runtime/build/gip_gamepad_protocol_test \
+    docs/macos_gip_gamepad_proof.json
+```
+
+A passing run enumerates the supported device, completes the GIP power/auth
+sequence, reads a coherent state snapshot, and writes the hardware proof JSON.
+
 ## Build and run a game
 
 From the **game's** repository (not this one). Each game repo links this

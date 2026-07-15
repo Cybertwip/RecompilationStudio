@@ -103,11 +103,16 @@ Game Name.app/
 requires the static libusb archive, passes `PSX_MACOS_GIP_GAMEPAD=ON` explicitly
 to the generated project, and rejects the export unless the finished executable
 contains the native GIP symbols and has no dynamic libusb dependency. Player 1
-uses `p1_device = "auto"`, so SDL controllers remain preferred and the direct USB
-backend activates when SDL cannot expose the wired device.
+uses `p1_device = "auto"`; the runtime loads that packaged default before
+per-install `settings.toml` overrides, so SDL controllers remain preferred and
+the direct USB backend activates when SDL cannot expose the wired device. USB
+OUT packets are copied to writable storage before entering libusb, which keeps
+the backend compatible with the Hardened Runtime signature used by Studio.
 
 The proof archive contains `macos_gip_controller.json` and records whether the
-backend was requested, compiled, statically linked, and symbol-verified.
+backend was requested, compiled, statically linked, and symbol-verified. The
+physical hardened-runtime regression is reproduced by
+`tools/test_macos_gip_hardened`.
 
 Writable state is not placed in the signed app bundle. Settings, input maps,
 memory cards, and overlay caches live under:

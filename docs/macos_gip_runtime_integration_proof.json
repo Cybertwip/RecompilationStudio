@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "artifact": "macOS Xbox GIP runtime integration proof",
+  "date": "2026-07-15",
+  "reported_export": {
+    "app": "/Users/cybertwip/Desktop/Metal Slug X.app",
+    "packaged_p1_device": "auto",
+    "gip_symbols_present": true,
+    "dynamic_libusb_dependency": false,
+    "sdl_joysticks_visible": 0,
+    "codesign_verify_deep_strict_after_temporary_keychain_removal": false
+  },
+  "pre_fix_observations": {
+    "live_process_sample": "no gamepad_worker thread existed",
+    "config_root_cause": "RuntimeConfig parsed controller modes but not packaged p1_device/p2_device, so Release retained its keyboard default",
+    "hardened_runtime_regression": "After directly opening GIP in a hardened test, macOS terminated the process with SIGKILL (Code Signature Invalid)",
+    "hardened_runtime_fault": "libusb_interrupt_transfer reached static GIP packet bytes in signed __TEXT,__const after the page was dirtied through a const_cast OUT buffer",
+    "signing_verification_gap": "Studio reported success while its temporary certificate keychain still existed; the delivered app later failed independent codesign verification."
+  },
+  "fixes": [
+    {
+      "file": "recompiler/src/config_loader.h",
+      "change": "RuntimeConfig carries packaged p1_device/p2_device defaults"
+    },
+    {
+      "file": "recompiler/src/config_loader.cpp",
+      "change": "top-level controller defaults are parsed, including configs without a runtime block"
+    },
+    {
+      "file": "runtime/src/main.cpp",
+      "change": "game.toml device defaults are applied before per-install settings.toml overrides"
+    },
+    {
+      "file": "runtime/src/gip_gamepad.cpp",
+      "change": "every synchronous USB OUT transfer uses owned writable storage"
+    },
+    {
+      "file": "studio/src/PipelineWorker.cpp",
+      "change": "removes the temporary signing keychain before the final delivered-app verification"
+    },
+    {
+      "file": "tools/signer",
+      "change": "removes its temporary signing keychain before final app/DMG verification"
+    }
+  ],
+  "verification": {
+    "config_loader_controller_test": "passed",
+    "runtime_protocol_ctest": "passed",
+    "hardened_runtime_hardware_checks": "20/20 passed",
+    "enumerated_supported_devices": 1,
+    "hardware_connected": true,
+    "hardware_state_read": true,
+    "runtime_main_object_compile": "passed",
+    "full_framework_runtime_link": "not applicable to this checkout because generated/SCPH1001_full.c is absent; Studio exports supply generated BIOS/game sources",
+    "studio_ctest": "2/2 passed",
+    "installed_studio_bundle": "dist/PSXRecomp Studio.app passes codesign --verify --deep --strict",
+    "standalone_signer_post_keychain_smoke": "passed"
+  },
+  "proof_dependencies": [
+    "docs/macos_gip_gamepad_proof.json",
+    "docs/macos_gip_gamepad_manifest.json",
+    "docs/macos_gip_studio_export_proof.json"
+  ],
+  "delivery_requirement": "Existing exported apps contain the old runtime and must be re-exported after this fix."
+}

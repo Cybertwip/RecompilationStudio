@@ -15,7 +15,9 @@
     "disable_library_validation_entitlement": true,
     "secure_timestamp_default": true,
     "strict_deep_verification": true,
-    "signs_in_place": true
+    "signs_in_place": true,
+    "temporary_keychain_removed_before_final_verification": true,
+    "keychain_independent_final_verification": true
   },
   "verification": {
     "bash_syntax": "passed",
@@ -36,6 +38,11 @@
     "paths_with_spaces": {
       "app_path": "passed",
       "certificate_path": "passed",
+      "codesign_verify_deep_strict": "passed"
+    },
+    "post_keychain_removal_smoke_test": {
+      "fixture": "minimal app",
+      "identity": "explicit ad-hoc test fallback",
       "codesign_verify_deep_strict": "passed"
     }
   },

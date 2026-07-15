@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "feature": "macOS direct USB Xbox Game Input Protocol controller backend",
+  "implementation": {
+    "header": "runtime/include/gip_gamepad.h",
+    "source": "runtime/src/gip_gamepad.cpp",
+    "runtime_integration": "runtime/src/main.cpp",
+    "launcher_integration": "runtime/launcher/launcher.cpp",
+    "test": "runtime/tests/gip_gamepad_protocol_test.cpp",
+    "studio_export": "studio/src/PipelineWorker.cpp",
+    "studio_proof": "docs/macos_gip_studio_export_proof.json"
+  },
+  "reference": {
+    "controller": "../PowerEngineV3/PowerEngine/Tools/andamiro/fiesta/andamiro_engine/controller.py",
+    "protocol": "../PowerEngineV3/PowerEngine/Tools/andamiro/fiesta/andamiro_engine/protocol.py",
+    "state": "../PowerEngineV3/PowerEngine/Tools/andamiro/fiesta/andamiro_engine/state.py",
+    "paths_relative_to": "repository root"
+  },
+  "transport": {
+    "platform": "macOS",
+    "library": "libusb-1.0",
+    "interface": 0,
+    "accepted_endpoint_types": [
+      "interrupt",
+      "bulk"
+    ],
+    "read_buffer_minimum": 64,
+    "reader": "one reconnecting background thread per selected direct-USB controller"
+  },
+  "supported_devices": {
+    "vendor_wildcards": [
+      {
+        "vendor_id": "0x0E6F",
+        "description": "PDP Xbox GIP controllers"
+      }
+    ],
+    "exact_ids": [
+      {
+        "vendor_id": "0x045E",
+        "product_id": "0x02D1",
+        "name": "Microsoft Xbox One Controller"
+      },
+      {
+        "vendor_id": "0x045E",
+        "product_id": "0x02DD",
+        "name": "Microsoft Xbox One Controller (FW 2015)"
+      },
+      {
+        "vendor_id": "0x045E",
+        "product_id": "0x02E3",
+        "name": "Microsoft Xbox One Elite Controller"
+      },
+      {
+        "vendor_id": "0x045E",
+        "product_id": "0x0B00",
+        "name": "Microsoft Xbox One Elite 2 Controller"
+      },
+      {
+        "vendor_id": "0x045E",
+        "product_id": "0x0B12",
+        "name": "Microsoft Xbox Series X|S Controller"
+      },
+      {
+        "vendor_id": "0x24C6",
+        "product_id": "0x541A",
+        "name": "PowerA Xbox One Controller"
+      },
+      {
+        "vendor_id": "0x24C6",
+        "product_id": "0x542A",
+        "name": "PowerA Xbox One Spectra"
+      }
+    ]
+  },
+  "initialization_sequence": [
+    "read up to 50 packets waiting for command 0x02 ANNOUNCE and ACK requested packets",
+    "send 05 20 00 01 00 power packet",
+    "drain and ACK setup replies",
+    "send extended power packet 05 20 00 0F 06 00 00 00 00 00 00 55 53",
+    "drain and ACK setup replies",
+    "send PDP LED packet 0A 20 00 03 00 01 14",
+    "send PDP authentication packet 06 20 00 02 01 00",
+    "send PDP authentication packet 06 20 00 02 02 00",
+    "drain and ACK remaining setup replies"
+  ],
+  "input_packets": {
+    "0x20": {
+      "minimum_bytes": 18,
+      "buttons": "little-endian uint16 at bytes 4..5",
+      "triggers": "little-endian uint16 at bytes 6..9, range 0..1023",
+      "sticks": "little-endian int16 LX/LY/RX/RY at bytes 10..17",
+      "vertical_axis_rule": "invert LY and RY to SDL negative-up/positive-down convention"
+    },
+    "0x07": {
+      "minimum_bytes": 5,
+      "guide": "bit 0 of byte 4"
+    }
+  },
+  "settings_selector": "gip:<vendor>:<product>:<bus>:<physical-port-path>",
+  "fallback": "gip:auto selects the first supported direct-USB controller; a saved selector may fall back to the same VID/PID after a port move",
+  "non_macos_behavior": "the backend is not compiled and existing SDL controller handling is unchanged",
+  "studio_export": {
+    "ui_option": "Enable wired Xbox/PDP controllers on macOS",
+    "default": true,
+    "cmake_option": "PSX_MACOS_GIP_GAMEPAD",
+    "dependency_gate": "pkg-config libusb-1.0 plus libusb-1.0.a required when enabled",
+    "binary_proof": "nm -gU must contain open/get_state/close GIP symbols",
+    "linkage_proof": "otool -L must not contain a dynamic libusb dependency",
+    "embedded_proof": "Contents/Resources/PSXRecomp-Proof.zip:macos_gip_controller.json",
+    "runtime_device": "p1_device = auto (SDL preferred, GIP fallback)"
+  }
+}

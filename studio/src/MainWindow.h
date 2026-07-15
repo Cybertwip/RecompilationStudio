@@ -1,0 +1,111 @@
+#pragma once
+
+#include "PipelineTypes.h"
+
+#include <QMainWindow>
+
+class QCheckBox;
+class QFrame;
+class QGridLayout;
+class QLabel;
+class QLineEdit;
+class QPlainTextEdit;
+class QProgressBar;
+class QPushButton;
+class QResizeEvent;
+class QScrollArea;
+class QThread;
+class QVBoxLayout;
+class QWidget;
+
+namespace oclero::qlementine {
+class ThemeManager;
+}
+
+namespace psxstudio {
+
+class PipelineWorker;
+
+class MainWindow final : public QMainWindow {
+  Q_OBJECT
+
+public:
+  explicit MainWindow(QWidget* parent = nullptr);
+  ~MainWindow() override;
+
+signals:
+  void runRequested(psxstudio::PipelineRequest request);
+
+protected:
+  void resizeEvent(QResizeEvent* event) override;
+
+private slots:
+  void chooseDisc();
+  void chooseBios();
+  void chooseIcon();
+  void chooseOutputDirectory();
+  void chooseCertificate();
+  void chooseGhidraHome();
+  void chooseBiosInitialSplash();
+  void chooseBiosHandoffImage();
+  void updateBiosPatchControls();
+  void startBuild();
+  void cancelBuild();
+  void revealOutput();
+  void toggleTheme();
+  void onCompleted(const QString& appPath);
+  void onFailed(const QString& message, const QString& workspacePath);
+  void setBusy(bool busy);
+  void updateBuildButton();
+
+private:
+  QLineEdit* addPathRow(QWidget* parent,
+                        QVBoxLayout* layout,
+                        const QString& label,
+                        const QString& placeholder,
+                        const char* slot);
+  QString detectGhidraHome() const;
+  void loadSettings();
+  void saveSettings() const;
+  void applyTheme();
+  void reflowForms();
+  PipelineRequest requestFromUi(bool overwrite) const;
+
+  QLineEdit* discEdit_{ nullptr };
+  QLineEdit* biosEdit_{ nullptr };
+  QLineEdit* iconEdit_{ nullptr };
+  QLineEdit* titleEdit_{ nullptr };
+  QLineEdit* outputEdit_{ nullptr };
+  QLineEdit* certificateEdit_{ nullptr };
+  QLineEdit* certificatePasswordEdit_{ nullptr };
+  QLineEdit* ghidraEdit_{ nullptr };
+  QCheckBox* biosPatchEnabled_{ nullptr };
+  QLineEdit* biosInitialSplashEdit_{ nullptr };
+  QLineEdit* biosHandoffImageEdit_{ nullptr };
+  QCheckBox* biosMuteAudio_{ nullptr };
+  QCheckBox* biosRemovePsGlyph_{ nullptr };
+  QCheckBox* skipBiosBoot_{ nullptr };
+  QCheckBox* macosGipGamepad_{ nullptr };
+  QLabel* stageLabel_{ nullptr };
+  QProgressBar* progressBar_{ nullptr };
+  QPlainTextEdit* logView_{ nullptr };
+  QPushButton* buildButton_{ nullptr };
+  QPushButton* cancelButton_{ nullptr };
+  QPushButton* revealButton_{ nullptr };
+  QPushButton* themeButton_{ nullptr };
+  QFrame* inputCard_{ nullptr };
+  QFrame* toolsCard_{ nullptr };
+  QFrame* brandingCard_{ nullptr };
+  QFrame* statusCard_{ nullptr };
+  QWidget* formsContainer_{ nullptr };
+  QScrollArea* formsScroll_{ nullptr };
+  QGridLayout* formsLayout_{ nullptr };
+  oclero::qlementine::ThemeManager* themeManager_{ nullptr };
+  QStringList selectedBins_;
+  QString outputAppPath_;
+  bool formsAreColumns_{ false };
+  QThread* workerThread_{ nullptr };
+  PipelineWorker* worker_{ nullptr };
+};
+
+} // namespace psxstudio

@@ -1,0 +1,42 @@
+name: MacOS
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+  pull_request:
+    branches:
+      - master
+      - dev
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          host: mac
+          target: desktop
+          arch: clang_64
+
+      - name: Configure CMake
+        run: cmake --preset macos -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/install
+
+      - name: Build library
+        run: cmake --build --preset macos --target install
+
+      - name: Build tests
+        run: cmake --build --preset macos-test
+
+      - name: Run tests
+        run: ctest --preset macos

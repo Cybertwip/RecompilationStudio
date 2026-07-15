@@ -1,0 +1,34 @@
+baseURL: https://oclero.github.io/qlementine-icons/
+languageCode: en-us
+title: Qlementine Icons
+disableKinds:
+  - taxonomy
+  - sitemap
+buildFuture: true
+params:
+  author: Olivier Cléro
+  email: oclero@pm.me
+  description: Qlementine Icons is a modern and elegant vector icon set, aimed to be used for Qt applications.
+  github: https://github.com/oclero/qlementine-icons
+module:
+  mounts:
+    - source: ../sources/resources/icons
+      target: static/img/icons
+      includeFiles: "/**/**.svg"
+outputs:
+  home:
+    - html
+    - json
+
+minify:
+  tdewolff:
+    js:
+      keepVarNames: false
+    html:
+      keepComments: false
+      keepConditionalComments: false
+      keepDefaultAttrVals: true
+      keepDocumentTags: true
+      keepEndTags: true
+      keepQuotes: true
+      keepWhitespace: false

@@ -1,0 +1,55 @@
+if(IS_ABSOLUTE "${CMAKE_INSTALL_PREFIX}")
+  set(install_prefix "${CMAKE_INSTALL_PREFIX}")
+else()
+  get_filename_component(install_prefix "${CMAKE_INSTALL_PREFIX}" ABSOLUTE)
+endif()
+set(app "${install_prefix}/PSXRecomp Studio.app")
+execute_process(
+  COMMAND "@PSX_STUDIO_MACDEPLOYQT@" "${app}"
+          -no-plugins -no-codesign -always-overwrite
+  WORKING_DIRECTORY "${install_prefix}"
+  COMMAND_ERROR_IS_FATAL ANY
+)
+
+set(plugin_root "@PSX_STUDIO_QT_PLUGINS@")
+set(plugin_dir "${app}/Contents/PlugIns")
+file(MAKE_DIRECTORY "${plugin_dir}/platforms" "${plugin_dir}/iconengines")
+file(REAL_PATH "${plugin_root}/platforms/libqcocoa.dylib" cocoa_source)
+file(REAL_PATH "${plugin_root}/iconengines/libqsvgicon.dylib" svg_icon_source)
+file(COPY_FILE "${cocoa_source}" "${plugin_dir}/platforms/libqcocoa.dylib")
+file(COPY_FILE "${svg_icon_source}" "${plugin_dir}/iconengines/libqsvgicon.dylib")
+
+set(svg_icon "${plugin_dir}/iconengines/libqsvgicon.dylib")
+execute_process(COMMAND /usr/bin/install_name_tool
+  -change /usr/local/opt/qtbase/lib/QtGui.framework/Versions/A/QtGui
+          @rpath/QtGui.framework/Versions/A/QtGui
+  -change /usr/local/opt/qtbase/lib/QtCore.framework/Versions/A/QtCore
+          @rpath/QtCore.framework/Versions/A/QtCore
+  -add_rpath @loader_path/../../Frameworks
+  "${svg_icon}"
+  COMMAND_ERROR_IS_FATAL ANY
+)
+execute_process(COMMAND /usr/bin/install_name_tool
+  -add_rpath @loader_path/../../Frameworks
+  "${plugin_dir}/platforms/libqcocoa.dylib"
+  COMMAND_ERROR_IS_FATAL ANY
+)
+
+file(MAKE_DIRECTORY "${app}/Contents/Resources")
+file(WRITE "${app}/Contents/Resources/qt.conf" "[Paths]\nPlugins = PlugIns\n")
+
+
+# Give the development bundle a stable designated requirement so macOS Files
+# & Folders privacy decisions are associated with PSXRecomp Studio instead of
+# a changing ad-hoc code hash. A distribution build may replace this signature.
+execute_process(
+  COMMAND /usr/bin/codesign --force --deep --sign -
+          --identifier org.psxrecomp.studio
+          --requirements "=designated => identifier \"org.psxrecomp.studio\""
+          "${app}"
+  COMMAND_ERROR_IS_FATAL ANY
+)
+execute_process(
+  COMMAND /usr/bin/codesign --verify --deep --strict --verbose=2 "${app}"
+  COMMAND_ERROR_IS_FATAL ANY
+)

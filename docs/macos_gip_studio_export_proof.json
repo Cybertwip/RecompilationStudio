@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "artifact": "PSXRecomp Studio macOS GIP export proof",
+  "date": "2026-07-15",
+  "studio_ui": {
+    "option": "Enable wired Xbox/PDP controllers on macOS",
+    "default_checked": true,
+    "visual_verification": true
+  },
+  "export_contract": {
+    "cmake_option": "PSX_MACOS_GIP_GAMEPAD",
+    "enabled_value": "ON",
+    "player1_device": "auto",
+    "libusb_preflight": true,
+    "static_archive_required": true,
+    "required_symbols": [
+      "_psx_gip_gamepad_open",
+      "_psx_gip_gamepad_get_state",
+      "_psx_gip_gamepad_close"
+    ],
+    "dynamic_libusb_rejected": true,
+    "embedded_proof_file": "macos_gip_controller.json"
+  },
+  "verification": {
+    "studio_build": "passed",
+    "studio_install": "passed",
+    "installed_bundle_codesign": "codesign --verify --deep --strict passed",
+    "dist_bundle_updated": true,
+    "libusb_version": "1.0.30",
+    "static_libusb_archive_present": true,
+    "studio_ctest": "2/2 passed"
+  },
+  "existing_export_observations": [
+    {
+      "app": "Bloody Roar II",
+      "gip_symbols": false,
+      "result": "older export must be rebuilt"
+    },
+    {
+      "app": "The King of Fighters '98",
+      "gip_symbols": true,
+      "dynamic_libusb_dependency": false,
+      "result": "runtime backend present; re-export adds visible Studio selection and embedded proof"
+    }
+  ],
+  "new_full_signed_game_export_executed": false,
+  "scope_note": "The exporter, UI, generated CMake contract, dependency gates, symbol verifier, tests, and distributable Studio bundle were verified. A new game app was not re-exported because the full pipeline requires the user's selected disc, BIOS, Ghidra project, and signing certificate workflow."
+}

@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "artifact": "PSXRecomp standalone macOS signer proof",
+  "date": "2026-07-15",
+  "tool": "tools/signer",
+  "contract": "./signer package.app certificate.pfx <password>",
+  "production_behavior": {
+    "openssl_3_pfx_normalization": true,
+    "isolated_temporary_keychain": true,
+    "valid_codesigning_identity_required": true,
+    "framework_and_nested_macho_signing": true,
+    "macos_directory_binary_signing": true,
+    "nested_code_bundle_signing": true,
+    "hardened_runtime": true,
+    "disable_library_validation_entitlement": true,
+    "secure_timestamp_default": true,
+    "strict_deep_verification": true,
+    "signs_in_place": true
+  },
+  "verification": {
+    "bash_syntax": "passed",
+    "complex_fixture": {
+      "main_executable": "signed",
+      "framework_dylib": "signed",
+      "framework_binary": "signed",
+      "nested_app_macos_executable": "signed",
+      "nested_app_bundle": "signed",
+      "codesign_verify_deep_strict": "passed"
+    },
+    "minimal_fixture_without_nested_code": {
+      "codesign_verify_deep_strict": "passed"
+    },
+    "main_and_app_entitlements": "disable-library-validation present",
+    "invalid_untrusted_pfx_in_production_mode": "rejected",
+    "temporary_workspaces_after_exit": 0,
+    "paths_with_spaces": {
+      "app_path": "passed",
+      "certificate_path": "passed",
+      "codesign_verify_deep_strict": "passed"
+    }
+  },
+  "timestamp_scope": "The disposable self-issued test identity used the explicit offline no-timestamp/ad-hoc smoke-test overrides. Production mode retains Studio's --timestamp behavior and never falls back to ad-hoc signing."
+}

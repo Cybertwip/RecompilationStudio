@@ -1,0 +1,129 @@
+table {
+  table-layout: fixed;
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid $table-border-outside-color;
+
+  // Icon.
+  td:nth-child(1),
+  th:nth-child(1) {
+    text-align: center;
+    width: 70px;
+  }
+
+  // Name.
+  td:nth-child(2),
+  th:nth-child(2) {
+    text-align: left;
+    width: 220px;
+  }
+
+  // Freedesktop name.
+  td:nth-child(3),
+  th:nth-child(3) {
+    text-align: left;
+    width: 160px;
+  }
+
+  // Tags.
+  td:nth-child(4),
+  th:nth-child(4) {
+    text-align: left;
+    min-width: 0;
+  }
+
+  th,
+  td {
+    padding: 8px;
+  }
+
+  thead {
+    color: $table-header-foreground-color;
+    font-size: $font-size-caption;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: 1px solid $table-border-outside-color;
+    font-weight: 500;
+
+    tr {
+      background-color: $table-header-background-color;
+      font-size: inherit;
+      font-weight: inherit;
+
+      th {
+        font-size: inherit;
+        font-weight: inherit;
+      }
+    }
+  }
+
+  tbody {
+    tr {
+      border-bottom: 1px solid $table-border-inside-color;
+      transition-property: color, background-color;
+      transition-duration: $animation-duration;
+      transition-timing-function: ease-out;
+
+      &:last-child {
+        border-bottom: none;
+      }
+
+      &:nth-child(odd) {
+        background-color: $table-row-background-color;
+      }
+
+      &:nth-child(even) {
+        background-color: $table-row-background-color-alt;
+      }
+
+      &:hover {
+        background-color: $table-row-background-color-hover;
+        color: $table-row-foreground-color-hover;
+      }
+    }
+    td:first-child {
+      cursor: pointer;
+      transition-property: background-color;
+      transition-duration: $animation-duration;
+      transition-timing-function: ease-out;
+
+      &:hover {
+        background-color: $table-cell-background-color-hover;
+      }
+      &:active {
+        background-color: $table-cell-background-color-active;
+      }
+    }
+    td:nth-child(2) {
+      font-family: $font-family-monospace;
+      font-size: $font-size-caption;
+    }
+
+    td:nth-child(3) {
+      font-family: $font-family-monospace;
+      font-size: $font-size-caption;
+    }
+  }
+
+  @media (max-width: $breakpoint-desktop-small) {
+    // Freedestkop.
+    td:nth-child(3),
+    th:nth-child(3) {
+      display: none;
+    }
+  }
+
+  @media (max-width: $breakpoint-phone-portrait) {
+    // Icon.
+    td:nth-child(2),
+    th:nth-child(2) {
+      width: 100%;
+    }
+
+    // Tags.
+    td:nth-child(4),
+    th:nth-child(4) {
+      display: none;
+    }
+  }
+}

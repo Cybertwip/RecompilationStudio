@@ -1,0 +1,39 @@
+name: Linux
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+  pull_request:
+    branches:
+      - master
+      - dev
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+
+      - name: Configure CMake
+        run: cmake --preset linux -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/install
+
+      - name: Build library
+        run: cmake --build --preset linux --target install
+
+      - name: Build tests
+        run: cmake --build --preset linux-test
+
+      - name: Run tests
+        run: ctest --preset linux

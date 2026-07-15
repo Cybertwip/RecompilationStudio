@@ -1,0 +1,39 @@
+name: Windows
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+  pull_request:
+    branches:
+      - master
+      - dev
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+
+      - name: Configure CMake
+        run: cmake --preset windows -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/install
+
+      - name: Build library
+        run: cmake --build --preset windows --target install
+
+      - name: Build tests
+        run: cmake --build --preset windows-test
+
+      - name: Run tests
+        run: ctest --preset windows

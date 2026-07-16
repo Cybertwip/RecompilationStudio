@@ -33,7 +33,7 @@ installed is a stub wearing a costume and is the worst kind because it
 hides the missing integration.
 
 If you find yourself wanting to violate any of the above three
-paragraphs, **stop and re-read PLAN.md**. Every prior attempt failed by
+paragraphs, **stop and re-read `docs/internal/PLAN.md`**. Every prior attempt failed by
 violating exactly these rules under pressure.
 
 ---
@@ -120,7 +120,7 @@ a fake event. The fake delivery was not progress, it was theater.
 At the start of every session, before any code change:
 
 1. Read this file (AGENTS.md).
-2. Read PLAN.md to confirm what phase we are in and what the next
+2. Read `docs/internal/PLAN.md` to confirm what phase we are in and what the next
    concrete milestone is.
 3. Verify `docs/psx_bios_disasm.txt` exists (primary reference).
 4. Verify Ghidra MCP is reachable. If not, stop and ask.

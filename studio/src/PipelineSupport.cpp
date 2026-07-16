@@ -142,6 +142,39 @@ bool copyFileReplacing(const QString& source, const QString& destination, QStrin
   return true;
 }
 
+bool copyDirectoryTree(const QString& sourceDirectory,
+                       const QString& destinationDirectory,
+                       QString& error) {
+  const QDir source(sourceDirectory);
+  if (!source.exists()) {
+    error = QStringLiteral("Source directory does not exist: %1").arg(sourceDirectory);
+    return false;
+  }
+  if (!QDir().mkpath(destinationDirectory)) {
+    error = QStringLiteral("Could not create directory: %1").arg(destinationDirectory);
+    return false;
+  }
+
+  QDirIterator entries(sourceDirectory,
+                       QDir::AllEntries | QDir::NoDotAndDotDot,
+                       QDirIterator::Subdirectories);
+  while (entries.hasNext()) {
+    const QString sourcePath = entries.next();
+    const QString relativePath = source.relativeFilePath(sourcePath);
+    const QString destinationPath = QDir(destinationDirectory).filePath(relativePath);
+    const QFileInfo info(sourcePath);
+    if (info.isDir()) {
+      if (!QDir().mkpath(destinationPath)) {
+        error = QStringLiteral("Could not create directory: %1").arg(destinationPath);
+        return false;
+      }
+    } else if (!copyFileReplacing(sourcePath, destinationPath, error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 namespace {
 
 bool renderIcon(const QString& path, int size, QImage& output, QString& error) {
@@ -225,6 +258,21 @@ bool createIcns(const QString& sourceIcon,
   }
   QDir().mkpath(QFileInfo(outputPath).absolutePath());
   return runIconutil(iconsetPath, outputPath, error);
+}
+
+bool createIco(const QString& sourceIcon,
+               const QString& outputPath,
+               QString& error) {
+  QImage image;
+  if (!renderIcon(sourceIcon, 256, image, error)) {
+    return false;
+  }
+  QDir().mkpath(QFileInfo(outputPath).absolutePath());
+  if (!image.save(outputPath, "ICO")) {
+    error = QStringLiteral("Could not encode the selected icon as a Windows ICO file.");
+    return false;
+  }
+  return true;
 }
 
 bool createProofArchive(const QString& proofDirectory,

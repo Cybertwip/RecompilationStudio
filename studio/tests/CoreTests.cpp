@@ -8,6 +8,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QImage>
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QtEndian>
@@ -140,6 +141,35 @@ int main(int argc, char** argv) {
   check(gipRequest.macosGipGamepad &&
           gipRequest.toJson().value(QStringLiteral("macos_gip_gamepad")).toBool(),
         QStringLiteral("GIP export defaults enabled and is serialized"));
+  check(gipRequest.targetPlatform == psxstudio::TargetPlatform::MacOS &&
+          gipRequest.toJson().value(QStringLiteral("platform")).toString() ==
+            QStringLiteral("macos"),
+        QStringLiteral("Studio export defaults to macOS and serializes the platform"));
+  gipRequest.targetPlatform = psxstudio::TargetPlatform::Windows;
+  check(psxstudio::targetPlatformKey(gipRequest.targetPlatform) == QStringLiteral("windows") &&
+          psxstudio::targetPlatformFromKey(QStringLiteral("WINDOWS")) ==
+            psxstudio::TargetPlatform::Windows &&
+          gipRequest.toJson().value(QStringLiteral("platform")).toString() ==
+            QStringLiteral("windows"),
+        QStringLiteral("Windows platform selection round-trips through the request"));
+
+  const QString sourceTree = QDir(temp.path()).filePath(QStringLiteral("source-tree"));
+  const QString copiedTree = QDir(temp.path()).filePath(QStringLiteral("copied-tree"));
+  check(psxstudio::writeText(QDir(sourceTree).filePath(QStringLiteral("nested/file.txt")),
+                             QStringLiteral("windows-package"), error), error);
+  check(psxstudio::copyDirectoryTree(sourceTree, copiedTree, error), error);
+  QFile copiedFile(QDir(copiedTree).filePath(QStringLiteral("nested/file.txt")));
+  check(copiedFile.open(QIODevice::ReadOnly) && copiedFile.readAll() == "windows-package",
+        QStringLiteral("Windows package directory copy"));
+
+  QImage sourceIcon(64, 64, QImage::Format_ARGB32);
+  sourceIcon.fill(QColor(32, 96, 192));
+  const QString sourceIconPath = QDir(temp.path()).filePath(QStringLiteral("source-icon.png"));
+  const QString windowsIconPath = QDir(temp.path()).filePath(QStringLiteral("AppIcon.ico"));
+  check(sourceIcon.save(sourceIconPath, "PNG"), QStringLiteral("Windows icon source PNG"));
+  check(psxstudio::createIco(sourceIconPath, windowsIconPath, error), error);
+  check(QFileInfo(windowsIconPath).isFile() && QFileInfo(windowsIconPath).size() > 0,
+        QStringLiteral("Windows ICO generation"));
 
   const QString proofDir = QDir(temp.path()).filePath(QStringLiteral("proof"));
   QDir().mkpath(proofDir);

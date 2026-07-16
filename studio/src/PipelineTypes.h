@@ -7,7 +7,29 @@
 
 namespace psxstudio {
 
+enum class TargetPlatform {
+  MacOS,
+  Windows,
+};
+
+inline QString targetPlatformKey(TargetPlatform platform) {
+  return platform == TargetPlatform::Windows ? QStringLiteral("windows")
+                                             : QStringLiteral("macos");
+}
+
+inline QString targetPlatformDisplayName(TargetPlatform platform) {
+  return platform == TargetPlatform::Windows ? QStringLiteral("Windows")
+                                             : QStringLiteral("macOS");
+}
+
+inline TargetPlatform targetPlatformFromKey(const QString& key) {
+  return key.compare(QStringLiteral("windows"), Qt::CaseInsensitive) == 0
+    ? TargetPlatform::Windows
+    : TargetPlatform::MacOS;
+}
+
 struct PipelineRequest {
+  TargetPlatform targetPlatform{ TargetPlatform::MacOS };
   QString cuePath;
   QStringList selectedBinPaths;
   QString biosPath;
@@ -33,6 +55,7 @@ struct PipelineRequest {
       bins.append(path);
     }
     QJsonObject object{
+      { QStringLiteral("platform"), targetPlatformKey(targetPlatform) },
       { QStringLiteral("cue_path"), cuePath },
       { QStringLiteral("bin_paths"), bins },
       { QStringLiteral("bios_path"), biosPath },
@@ -86,3 +109,4 @@ struct GameDescription {
 } // namespace psxstudio
 
 Q_DECLARE_METATYPE(psxstudio::PipelineRequest)
+Q_DECLARE_METATYPE(psxstudio::TargetPlatform)

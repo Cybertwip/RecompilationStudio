@@ -247,12 +247,41 @@ QString makeInfoPlist(const QString& bundleId,
 )").arg(bundleName.toHtmlEscaped(), executableName.toHtmlEscaped(), bundleId.toHtmlEscaped());
 }
 
+QString makeWindowsResource(QString iconPath) {
+  iconPath.replace('\\', QStringLiteral("\\\\"));
+  iconPath.replace('"', QStringLiteral("\\\""));
+  return QStringLiteral("IDI_APP_ICON ICON \"%1\"\n").arg(iconPath);
+}
+
+QString makeMingwToolchain(const QString& gcc,
+                           const QString& gxx,
+                           const QString& windres,
+                           const QString& ar,
+                           const QString& ranlib,
+                           const QString& strip) {
+  QString cmake;
+  cmake += QStringLiteral("set(CMAKE_SYSTEM_NAME Windows)\n");
+  cmake += QStringLiteral("set(CMAKE_SYSTEM_PROCESSOR x86_64)\n");
+  cmake += QStringLiteral("set(CMAKE_C_COMPILER %1)\n").arg(cmakeQuoted(gcc));
+  cmake += QStringLiteral("set(CMAKE_CXX_COMPILER %1)\n").arg(cmakeQuoted(gxx));
+  cmake += QStringLiteral("set(CMAKE_RC_COMPILER %1)\n").arg(cmakeQuoted(windres));
+  cmake += QStringLiteral("set(CMAKE_AR %1)\n").arg(cmakeQuoted(ar));
+  cmake += QStringLiteral("set(CMAKE_RANLIB %1)\n").arg(cmakeQuoted(ranlib));
+  cmake += QStringLiteral("set(CMAKE_STRIP %1)\n").arg(cmakeQuoted(strip));
+  cmake += QStringLiteral("set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n");
+  cmake += QStringLiteral("set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\n");
+  cmake += QStringLiteral("set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n");
+  cmake += QStringLiteral("set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)\n");
+  return cmake;
+}
+
 QString makeProjectCMake(const PipelineRequest& request,
                          const GameDescription& game,
                          const QString& bundleName,
                          const QString& bundleId,
-                         const QString& infoPlistPath,
+                         const QString& platformMetadataPath,
                          const QString& iconPath,
+                         const QString& dependencyCachePath,
                          const QString& biosFull,
                          const QString& biosDispatch,
                          const QString& gameFull,
@@ -261,19 +290,41 @@ QString makeProjectCMake(const PipelineRequest& request,
   const QString appSupportName = QStringLiteral("PSXRecomp/%1").arg(game.serial.isEmpty()
     ? sanitizedFileStem(request.windowTitle)
     : game.serial);
+  const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   QString cmake;
   cmake += QStringLiteral("cmake_minimum_required(VERSION 3.20)\n");
-  cmake += QStringLiteral("project(GeneratedPSXApp C CXX)\n");
+  cmake += windowsTarget ? QStringLiteral("project(GeneratedPSXApp C CXX RC)\n")
+                         : QStringLiteral("project(GeneratedPSXApp C CXX)\n");
   cmake += QStringLiteral("set(CMAKE_C_STANDARD 99)\nset(CMAKE_CXX_STANDARD 17)\n");
-  cmake += QStringLiteral("set(CMAKE_OSX_DEPLOYMENT_TARGET \"14.0\" CACHE STRING \"\" FORCE)\n");
-  cmake += QStringLiteral("set(CMAKE_MACOSX_RPATH ON)\nset(CMAKE_BUILD_WITH_INSTALL_RPATH ON)\n");
-  cmake += QStringLiteral("set(CMAKE_INSTALL_RPATH \"@executable_path/../Frameworks\")\n");
+  if (windowsTarget) {
+    cmake += QStringLiteral("include(FetchContent)\n");
+    cmake += QStringLiteral("set(FETCHCONTENT_QUIET OFF)\n");
+    cmake += QStringLiteral("set(FETCHCONTENT_BASE_DIR %1 CACHE PATH \"\" FORCE)\n")
+               .arg(cmakeQuoted(dependencyCachePath));
+    cmake += QStringLiteral("FetchContent_Declare(SDL2Mingw\n");
+    cmake += QStringLiteral("  URL \"https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz\"\n");
+    cmake += QStringLiteral("  URL_HASH SHA256=83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2\n");
+    cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
+    cmake += QStringLiteral("FetchContent_GetProperties(SDL2Mingw)\n");
+    cmake += QStringLiteral("if(NOT sdl2mingw_POPULATED)\n");
+    cmake += QStringLiteral("  FetchContent_Populate(SDL2Mingw)\nendif()\n");
+    cmake += QStringLiteral("set(_PSX_SDL2_ROOT \"${sdl2mingw_SOURCE_DIR}/x86_64-w64-mingw32\")\n");
+    cmake += QStringLiteral("find_package(SDL2 CONFIG REQUIRED PATHS \"${_PSX_SDL2_ROOT}/lib/cmake/SDL2\" NO_DEFAULT_PATH)\n");
+    cmake += QStringLiteral("set(SDL2_INCLUDE_DIRS \"${_PSX_SDL2_ROOT}/include;${_PSX_SDL2_ROOT}/include/SDL2\")\n");
+    cmake += QStringLiteral("set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
+    cmake += QStringLiteral("set(SDL2_STATIC_LDFLAGS ${SDL2_LIBRARIES})\n");
+    cmake += QStringLiteral("set(PSX_STATIC_RUNTIME ON CACHE BOOL \"\" FORCE)\n");
+  } else {
+    cmake += QStringLiteral("set(CMAKE_OSX_DEPLOYMENT_TARGET \"14.0\" CACHE STRING \"\" FORCE)\n");
+    cmake += QStringLiteral("set(CMAKE_MACOSX_RPATH ON)\nset(CMAKE_BUILD_WITH_INSTALL_RPATH ON)\n");
+    cmake += QStringLiteral("set(CMAKE_INSTALL_RPATH \"@executable_path/../Frameworks\")\n");
+  }
   cmake += QStringLiteral("set(PSXRECOMP_ROOT %1 CACHE PATH \"\" FORCE)\n")
              .arg(cmakeQuoted(request.frameworkRoot));
   cmake += QStringLiteral("set(PSXRECOMP_SKIP_BIOS_STALE_CHECK ON CACHE BOOL \"\" FORCE)\n");
   cmake += QStringLiteral("set(PSX_LAUNCHER OFF CACHE BOOL \"\" FORCE)\n");
   cmake += QStringLiteral("set(PSX_DEBUG_TOOLS OFF CACHE BOOL \"\" FORCE)\n");
-  cmake += macosGipCmakeOption(request.macosGipGamepad);
+  cmake += macosGipCmakeOption(!windowsTarget && request.macosGipGamepad);
   cmake += QStringLiteral("include(${PSXRECOMP_ROOT}/runtime/runtime.cmake)\n");
   cmake += QStringLiteral("psxrecomp_add_runtime_target(psx-runtime\n");
   cmake += QStringLiteral("  BIOS_GENERATED_FULL_C %1\n").arg(cmakeQuoted(biosFull));
@@ -282,24 +333,36 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  GAME_GENERATED_DISPATCH_C %1\n").arg(cmakeQuoted(gameDispatch));
   cmake += QStringLiteral("  WINDOW_TITLE %1\n").arg(cmakeQuoted(request.windowTitle));
   cmake += QStringLiteral("  EXE_NAME %1\n").arg(cmakeQuoted(bundleName));
-  cmake += QStringLiteral("  DEFAULT_BIOS_PATH \"../Resources/bios/SCPH1001.BIN\"\n");
-  cmake += QStringLiteral("  DEFAULT_GAME_CONFIG_PATH \"../Resources/game.toml\"\n");
+  cmake += windowsTarget
+    ? QStringLiteral("  DEFAULT_BIOS_PATH \"bios/SCPH1001.BIN\"\n")
+    : QStringLiteral("  DEFAULT_BIOS_PATH \"../Resources/bios/SCPH1001.BIN\"\n");
+  cmake += windowsTarget
+    ? QStringLiteral("  DEFAULT_GAME_CONFIG_PATH \"game.toml\"\n")
+    : QStringLiteral("  DEFAULT_GAME_CONFIG_PATH \"../Resources/game.toml\"\n");
   cmake += QStringLiteral("  APP_SUPPORT_DIR_NAME %1\n)\n").arg(cmakeQuoted(appSupportName));
   cmake += QStringLiteral("target_compile_definitions(psx-runtime PRIVATE PSX_EXPECTED_BIOS_CRC32=0x%1u)\n")
              .arg(expectedBiosCrc, 8, 16, QLatin1Char('0'));
-  cmake += QStringLiteral("set_source_files_properties(%1 PROPERTIES MACOSX_PACKAGE_LOCATION \"Resources\")\n")
-             .arg(cmakeQuoted(iconPath));
-  cmake += QStringLiteral("target_sources(psx-runtime PRIVATE %1)\n").arg(cmakeQuoted(iconPath));
-  cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES\n");
-  cmake += QStringLiteral("  MACOSX_BUNDLE TRUE\n");
-  cmake += QStringLiteral("  OUTPUT_NAME %1\n").arg(cmakeQuoted(bundleName));
-  cmake += QStringLiteral("  MACOSX_BUNDLE_INFO_PLIST %1\n").arg(cmakeQuoted(infoPlistPath));
-  cmake += QStringLiteral("  MACOSX_BUNDLE_GUI_IDENTIFIER %1\n").arg(cmakeQuoted(bundleId));
-  cmake += QStringLiteral("  MACOSX_BUNDLE_BUNDLE_NAME %1\n").arg(cmakeQuoted(bundleName));
-  cmake += QStringLiteral("  MACOSX_BUNDLE_ICON_FILE \"AppIcon.icns\"\n");
-  cmake += QStringLiteral("  XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED OFF\n");
-  cmake += QStringLiteral("  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY \"\"\n)\n");
-  cmake += QStringLiteral("install(TARGETS psx-runtime BUNDLE DESTINATION .)\n");
+  if (windowsTarget) {
+    cmake += QStringLiteral("target_sources(psx-runtime PRIVATE %1)\n")
+               .arg(cmakeQuoted(platformMetadataPath));
+    cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES OUTPUT_NAME %1)\n")
+               .arg(cmakeQuoted(bundleName));
+    cmake += QStringLiteral("install(TARGETS psx-runtime RUNTIME DESTINATION .)\n");
+  } else {
+    cmake += QStringLiteral("set_source_files_properties(%1 PROPERTIES MACOSX_PACKAGE_LOCATION \"Resources\")\n")
+               .arg(cmakeQuoted(iconPath));
+    cmake += QStringLiteral("target_sources(psx-runtime PRIVATE %1)\n").arg(cmakeQuoted(iconPath));
+    cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES\n");
+    cmake += QStringLiteral("  MACOSX_BUNDLE TRUE\n");
+    cmake += QStringLiteral("  OUTPUT_NAME %1\n").arg(cmakeQuoted(bundleName));
+    cmake += QStringLiteral("  MACOSX_BUNDLE_INFO_PLIST %1\n").arg(cmakeQuoted(platformMetadataPath));
+    cmake += QStringLiteral("  MACOSX_BUNDLE_GUI_IDENTIFIER %1\n").arg(cmakeQuoted(bundleId));
+    cmake += QStringLiteral("  MACOSX_BUNDLE_BUNDLE_NAME %1\n").arg(cmakeQuoted(bundleName));
+    cmake += QStringLiteral("  MACOSX_BUNDLE_ICON_FILE \"AppIcon.icns\"\n");
+    cmake += QStringLiteral("  XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED OFF\n");
+    cmake += QStringLiteral("  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY \"\"\n)\n");
+    cmake += QStringLiteral("install(TARGETS psx-runtime BUNDLE DESTINATION .)\n");
+  }
   return cmake;
 }
 
@@ -466,6 +529,7 @@ void PipelineWorker::cleanupKeychain() {
 void PipelineWorker::run(PipelineRequest request) {
   cancelRequested_.store(false, std::memory_order_relaxed);
   cleanupKeychain();
+  const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
 
   constexpr int totalStages = 9;
   QString sensitivePemPath;
@@ -538,7 +602,8 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("Select a writable output directory."), {});
     return;
   }
-  if (!QFileInfo(request.certificatePath).isFile() || request.certificatePassword.isEmpty()) {
+  if (!windowsTarget &&
+      (!QFileInfo(request.certificatePath).isFile() || request.certificatePassword.isEmpty())) {
     fail(QStringLiteral("A password-protected .pfx signing certificate and its password are required."), {});
     return;
   }
@@ -555,26 +620,53 @@ void PipelineWorker::run(PipelineRequest request) {
   const QString cmake = findExecutable(QStringLiteral("cmake"));
   const QString ninja = findExecutable(QStringLiteral("ninja"));
   const QString python = findExecutable(QStringLiteral("python3"));
-  const QString pkgConfig = findExecutable(QStringLiteral("pkg-config"));
-  const QString nm = QStringLiteral("/usr/bin/nm");
-  const QString openssl = findOpenSsl3();
-  if (openssl.isEmpty()) {
+  const QString pkgConfig = windowsTarget ? QString() : findExecutable(QStringLiteral("pkg-config"));
+  const QString nm = windowsTarget ? QString() : QStringLiteral("/usr/bin/nm");
+  const QString openssl = windowsTarget ? QString() : findOpenSsl3();
+  const QString mingwGcc = windowsTarget
+    ? findExecutable(QStringLiteral("x86_64-w64-mingw32-gcc")) : QString();
+  const QString mingwGxx = windowsTarget
+    ? findExecutable(QStringLiteral("x86_64-w64-mingw32-g++")) : QString();
+  const QString mingwWindres = windowsTarget
+    ? findExecutable(QStringLiteral("x86_64-w64-mingw32-windres")) : QString();
+  const QString mingwAr = windowsTarget
+    ? findExecutable(QStringLiteral("x86_64-w64-mingw32-ar")) : QString();
+  const QString mingwRanlib = windowsTarget
+    ? findExecutable(QStringLiteral("x86_64-w64-mingw32-ranlib")) : QString();
+  const QString mingwStrip = windowsTarget
+    ? findExecutable(QStringLiteral("x86_64-w64-mingw32-strip")) : QString();
+  const QString mingwObjdump = windowsTarget
+    ? findExecutable(QStringLiteral("x86_64-w64-mingw32-objdump")) : QString();
+  if (!windowsTarget && openssl.isEmpty()) {
     fail(QStringLiteral("OpenSSL 3 with PKCS#12 legacy-provider support is required. Install openssl@3 with Homebrew or set PSXRECOMP_OPENSSL."), {});
     return;
   }
-  for (const auto& tool : { cmake, ninja, python, pkgConfig, openssl,
-                            QStringLiteral("/usr/bin/iconutil"), QStringLiteral("/usr/bin/security"),
-                            QStringLiteral("/usr/bin/codesign"), QStringLiteral("/usr/bin/ditto"),
-                            QStringLiteral("/usr/bin/otool"), nm,
-                            QStringLiteral("/usr/bin/install_name_tool") }) {
+  QStringList requiredTools{ cmake, ninja, python };
+  if (windowsTarget) {
+    requiredTools << mingwGcc << mingwGxx << mingwWindres << mingwAr
+                  << mingwRanlib << mingwStrip << mingwObjdump;
+  } else {
+    requiredTools << pkgConfig << openssl
+                  << QStringLiteral("/usr/bin/iconutil") << QStringLiteral("/usr/bin/security")
+                  << QStringLiteral("/usr/bin/codesign") << QStringLiteral("/usr/bin/ditto")
+                  << QStringLiteral("/usr/bin/otool") << nm
+                  << QStringLiteral("/usr/bin/install_name_tool");
+  }
+  for (const auto& tool : requiredTools) {
     if (tool.isEmpty() || !QFileInfo(tool).isExecutable()) {
       fail(QStringLiteral("A required build tool is unavailable: %1").arg(tool.isEmpty() ? QStringLiteral("unknown") : tool), {});
       return;
     }
   }
+  emit logLine(QStringLiteral("Target platform: %1")
+                 .arg(targetPlatformDisplayName(request.targetPlatform)));
+  if (windowsTarget) {
+    emit logLine(QStringLiteral("MinGW C compiler: %1").arg(mingwGcc));
+    emit logLine(QStringLiteral("MinGW C++ compiler: %1").arg(mingwGxx));
+  }
   QString libusbVersion;
   QString libusbStaticArchive;
-  if (request.macosGipGamepad) {
+  if (!windowsTarget && request.macosGipGamepad) {
     QByteArray versionOutput;
     QByteArray libdirOutput;
     if (!runCommand(pkgConfig,
@@ -600,7 +692,7 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     emit logLine(QStringLiteral("macOS wired Xbox/PDP input: enabled (libusb %1, static archive %2)")
                    .arg(libusbVersion, libusbStaticArchive));
-  } else {
+  } else if (!windowsTarget) {
     emit logLine(QStringLiteral("macOS wired Xbox/PDP input: disabled by export settings"));
   }
 
@@ -643,54 +735,58 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(error, workspace);
     return;
   }
-  sensitivePemPath = QDir(workspace).filePath(QStringLiteral("signing-source.pem"));
-  normalizedCertificatePath = QDir(workspace).filePath(QStringLiteral("signing-normalized.p12"));
-  QProcessEnvironment certificateEnvironment = QProcessEnvironment::systemEnvironment();
-  normalizedCertificatePassword =
-    QUuid::createUuid().toString(QUuid::WithoutBraces) +
-    QUuid::createUuid().toString(QUuid::WithoutBraces);
-  certificateEnvironment.insert(QStringLiteral("PSXRECOMP_PFX_PASSWORD"),
-                                request.certificatePassword);
-  certificateEnvironment.insert(QStringLiteral("PSXRECOMP_NORMALIZED_PFX_PASSWORD"),
-                                normalizedCertificatePassword);
-  const QStringList extractArgs{
-    QStringLiteral("pkcs12"), QStringLiteral("-in"), request.certificatePath,
-    QStringLiteral("-nodes"), QStringLiteral("-out"), sensitivePemPath,
-    QStringLiteral("-passin"), QStringLiteral("env:PSXRECOMP_PFX_PASSWORD")
-  };
-  bool certificateExtracted = runCommand(
-    openssl, extractArgs, workspace,
-    QStringLiteral("openssl pkcs12 -in <certificate.pfx> -nodes -out <temporary PEM> -passin <redacted>"),
-    60000, nullptr, &certificateEnvironment);
-  if (!certificateExtracted) {
-    QStringList legacyArgs = extractArgs;
-    legacyArgs.insert(1, QStringLiteral("-legacy"));
-    certificateExtracted = runCommand(
-      openssl, legacyArgs, workspace,
-      QStringLiteral("openssl pkcs12 -legacy -in <certificate.pfx> -nodes -out <temporary PEM> -passin <redacted>"),
+  if (!windowsTarget) {
+    sensitivePemPath = QDir(workspace).filePath(QStringLiteral("signing-source.pem"));
+    normalizedCertificatePath = QDir(workspace).filePath(QStringLiteral("signing-normalized.p12"));
+    QProcessEnvironment certificateEnvironment = QProcessEnvironment::systemEnvironment();
+    normalizedCertificatePassword =
+      QUuid::createUuid().toString(QUuid::WithoutBraces) +
+      QUuid::createUuid().toString(QUuid::WithoutBraces);
+    certificateEnvironment.insert(QStringLiteral("PSXRECOMP_PFX_PASSWORD"),
+                                  request.certificatePassword);
+    certificateEnvironment.insert(QStringLiteral("PSXRECOMP_NORMALIZED_PFX_PASSWORD"),
+                                  normalizedCertificatePassword);
+    const QStringList extractArgs{
+      QStringLiteral("pkcs12"), QStringLiteral("-in"), request.certificatePath,
+      QStringLiteral("-nodes"), QStringLiteral("-out"), sensitivePemPath,
+      QStringLiteral("-passin"), QStringLiteral("env:PSXRECOMP_PFX_PASSWORD")
+    };
+    bool certificateExtracted = runCommand(
+      openssl, extractArgs, workspace,
+      QStringLiteral("openssl pkcs12 -in <certificate.pfx> -nodes -out <temporary PEM> -passin <redacted>"),
       60000, nullptr, &certificateEnvironment);
+    if (!certificateExtracted) {
+      QStringList legacyArgs = extractArgs;
+      legacyArgs.insert(1, QStringLiteral("-legacy"));
+      certificateExtracted = runCommand(
+        openssl, legacyArgs, workspace,
+        QStringLiteral("openssl pkcs12 -legacy -in <certificate.pfx> -nodes -out <temporary PEM> -passin <redacted>"),
+        60000, nullptr, &certificateEnvironment);
+    }
+    if (!certificateExtracted) {
+      fail(QStringLiteral("The PFX password was rejected while validating the certificate."), workspace);
+      return;
+    }
+    QFile::setPermissions(sensitivePemPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    if (!runCommand(
+          openssl,
+          { QStringLiteral("pkcs12"), QStringLiteral("-legacy"),
+            QStringLiteral("-export"), QStringLiteral("-in"), sensitivePemPath,
+            QStringLiteral("-out"), normalizedCertificatePath,
+            QStringLiteral("-passout"), QStringLiteral("env:PSXRECOMP_NORMALIZED_PFX_PASSWORD"),
+            QStringLiteral("-name"), QStringLiteral("PSXRecomp Studio Signing") },
+          workspace,
+          QStringLiteral("openssl pkcs12 -legacy -export -in <temporary PEM> -out <normalized P12> -passout <generated>"),
+          60000, nullptr, &certificateEnvironment)) {
+      fail(QStringLiteral("The signing certificate could not be normalized for macOS Security."), workspace);
+      return;
+    }
+    QFile::remove(sensitivePemPath);
+    sensitivePemPath.clear();
+    emit logLine(QStringLiteral("Signing certificate password validated; PKCS#12 normalized for macOS."));
+  } else {
+    emit logLine(QStringLiteral("Windows package signing: not requested; the MinGW export is unsigned."));
   }
-  if (!certificateExtracted) {
-    fail(QStringLiteral("The PFX password was rejected while validating the certificate."), workspace);
-    return;
-  }
-  QFile::setPermissions(sensitivePemPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-  if (!runCommand(
-        openssl,
-        { QStringLiteral("pkcs12"), QStringLiteral("-legacy"),
-          QStringLiteral("-export"), QStringLiteral("-in"), sensitivePemPath,
-          QStringLiteral("-out"), normalizedCertificatePath,
-          QStringLiteral("-passout"), QStringLiteral("env:PSXRECOMP_NORMALIZED_PFX_PASSWORD"),
-          QStringLiteral("-name"), QStringLiteral("PSXRecomp Studio Signing") },
-        workspace,
-        QStringLiteral("openssl pkcs12 -legacy -export -in <temporary PEM> -out <normalized P12> -passout <generated>"),
-        60000, nullptr, &certificateEnvironment)) {
-    fail(QStringLiteral("The signing certificate could not be normalized for macOS Security."), workspace);
-    return;
-  }
-  QFile::remove(sensitivePemPath);
-  sensitivePemPath.clear();
-  emit logLine(QStringLiteral("Signing certificate password validated; PKCS#12 normalized for macOS."));
   emit logLine(QStringLiteral("Workspace: %1").arg(workspace));
 
   const QString exePath = QDir(gameDir).filePath(game.bootFileName);
@@ -1114,15 +1210,30 @@ void PipelineWorker::run(PipelineRequest request) {
     return;
   }
 
-  nextStage(QStringLiteral("Create macOS app project"));
+  nextStage(windowsTarget ? QStringLiteral("Create Windows app project")
+                          : QStringLiteral("Create macOS app project"));
   const QString bundleId = sanitizedBundleIdentifier(game.serial, request.windowTitle);
-  const QString iconPath = QDir(projectDir).filePath(QStringLiteral("AppIcon.icns"));
-  if (!createIcns(request.iconPath, workspace, iconPath, error)) {
-    fail(error, workspace);
+  const QString iconPath = QDir(projectDir).filePath(
+    windowsTarget ? QStringLiteral("AppIcon.ico") : QStringLiteral("AppIcon.icns"));
+  const QString platformMetadataPath = QDir(projectDir).filePath(
+    windowsTarget ? QStringLiteral("AppIcon.rc") : QStringLiteral("Info.plist"));
+  const QString dependencyCachePath = QDir(
+    QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+      .filePath(QStringLiteral("dependencies"));
+  if (windowsTarget && !QDir().mkpath(dependencyCachePath)) {
+    fail(QStringLiteral("Could not create the Studio dependency cache: %1")
+           .arg(dependencyCachePath), workspace);
     return;
   }
-  const QString infoPlistPath = QDir(projectDir).filePath(QStringLiteral("Info.plist"));
-  if (!writeText(infoPlistPath, makeInfoPlist(bundleId, bundleName, bundleName), error)) {
+  if (windowsTarget) {
+    if (!createIco(request.iconPath, iconPath, error) ||
+        !writeText(platformMetadataPath, makeWindowsResource(iconPath), error)) {
+      fail(error, workspace);
+      return;
+    }
+  } else if (!createIcns(request.iconPath, workspace, iconPath, error) ||
+             !writeText(platformMetadataPath,
+                        makeInfoPlist(bundleId, bundleName, bundleName), error)) {
     fail(error, workspace);
     return;
   }
@@ -1138,25 +1249,47 @@ void PipelineWorker::run(PipelineRequest request) {
   }
   const QString cmakeListsPath = QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt"));
   if (!writeText(cmakeListsPath,
-                 makeProjectCMake(request, game, bundleName, bundleId, infoPlistPath,
-                                  iconPath, biosFull, biosDispatch, gameFull, gameDispatch,
+                 makeProjectCMake(request, game, bundleName, bundleId, platformMetadataPath,
+                                  iconPath, dependencyCachePath,
+                                  biosFull, biosDispatch, gameFull, gameDispatch,
                                   effectiveBiosCrc),
                  error)) {
     fail(error, workspace);
     return;
   }
+  const QString mingwToolchainPath = QDir(projectDir).filePath(QStringLiteral("mingw-toolchain.cmake"));
+  if (windowsTarget &&
+      !writeText(mingwToolchainPath,
+                 makeMingwToolchain(mingwGcc, mingwGxx, mingwWindres,
+                                    mingwAr, mingwRanlib, mingwStrip), error)) {
+    fail(error, workspace);
+    return;
+  }
 
-  nextStage(QStringLiteral("Compile native app"));
+  nextStage(windowsTarget ? QStringLiteral("Cross-compile Windows app")
+                          : QStringLiteral("Compile native app"));
+  QStringList configureArguments{
+    QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
+    QStringLiteral("-G"), QStringLiteral("Ninja"),
+    QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
+    QStringLiteral("-DPSX_LAUNCHER=OFF"),
+    QStringLiteral("-DPSX_DEBUG_TOOLS=OFF")
+  };
+  if (windowsTarget) {
+    configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(mingwToolchainPath)
+                       << QStringLiteral("-DPSX_STATIC_RUNTIME=ON")
+                       << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
+  } else {
+    configureArguments << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=%1")
+                            .arg(request.macosGipGamepad ? QStringLiteral("ON")
+                                                       : QStringLiteral("OFF"));
+  }
   if (!runCommand(cmake,
-                  { QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
-                    QStringLiteral("-G"), QStringLiteral("Ninja"),
-                    QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
-                    QStringLiteral("-DPSX_LAUNCHER=OFF"),
-                    QStringLiteral("-DPSX_DEBUG_TOOLS=OFF"),
-                    QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=%1")
-                      .arg(request.macosGipGamepad ? QStringLiteral("ON") : QStringLiteral("OFF")) },
+                  configureArguments,
                   workspace,
-                  QStringLiteral("cmake -S <project> -B <build> -G Ninja -DCMAKE_BUILD_TYPE=Release"),
+                  windowsTarget
+                    ? QStringLiteral("cmake -S <project> -B <build> -G Ninja -DCMAKE_TOOLCHAIN_FILE=<mingw-toolchain> -DCMAKE_BUILD_TYPE=Release")
+                    : QStringLiteral("cmake -S <project> -B <build> -G Ninja -DCMAKE_BUILD_TYPE=Release"),
                   15 * 60 * 1000) ||
       !runCommand(cmake,
                   { QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
@@ -1174,53 +1307,70 @@ void PipelineWorker::run(PipelineRequest request) {
       QDir(workspace).removeRecursively();
       emit cancelled();
     } else {
-      fail(QStringLiteral("The native macOS app could not be compiled and staged."), workspace);
+      fail(windowsTarget
+             ? QStringLiteral("The Windows app could not be cross-compiled and staged with MinGW.")
+             : QStringLiteral("The native macOS app could not be compiled and staged."),
+           workspace);
     }
     return;
   }
-  const QString stagedApp = QDir(stageDir).filePath(bundleName + QStringLiteral(".app"));
-  if (!QFileInfo(stagedApp).isDir()) {
-    fail(QStringLiteral("CMake did not stage the expected app bundle: %1").arg(stagedApp), workspace);
+  const QString stagedApp = windowsTarget
+    ? stageDir
+    : QDir(stageDir).filePath(bundleName + QStringLiteral(".app"));
+  if ((!windowsTarget && !QFileInfo(stagedApp).isDir()) ||
+      (windowsTarget && !QFileInfo(stageDir).isDir())) {
+    fail(QStringLiteral("CMake did not stage the expected %1 output: %2")
+           .arg(targetPlatformDisplayName(request.targetPlatform), stagedApp), workspace);
     return;
   }
-  const QString mainExecutable = QDir(stagedApp).filePath(
-    QStringLiteral("Contents/MacOS/") + bundleName);
-  QByteArray controllerSymbols;
-  if (!runCommand(nm, { QStringLiteral("-gU"), mainExecutable }, workspace,
-                  QStringLiteral("nm -gU <app executable>"), 30000,
-                  &controllerSymbols)) {
-    fail(QStringLiteral("The exported controller backend symbols could not be inspected."), workspace);
+  const QString mainExecutable = windowsTarget
+    ? QDir(stageDir).filePath(bundleName + QStringLiteral(".exe"))
+    : QDir(stagedApp).filePath(QStringLiteral("Contents/MacOS/") + bundleName);
+  if (!QFileInfo(mainExecutable).isFile()) {
+    fail(QStringLiteral("CMake did not stage the expected executable: %1").arg(mainExecutable), workspace);
     return;
   }
-  const bool gipBackendCompiled = nmOutputHasMacosGipBackend(controllerSymbols);
-  if (gipBackendCompiled != request.macosGipGamepad) {
-    fail(request.macosGipGamepad
-           ? QStringLiteral("The Studio export requested wired Xbox/PDP support, but the native GIP backend is absent from the app executable.")
-           : QStringLiteral("The Studio export disabled wired Xbox/PDP support, but GIP backend symbols are still present."),
-         workspace);
-    return;
-  }
-  emit logLine(request.macosGipGamepad
-                 ? QStringLiteral("Verified native Xbox GIP controller symbols in exported executable.")
-                 : QStringLiteral("Verified Xbox GIP controller backend is absent from exported executable."));
-  const QJsonObject controllerBackendProof{
-    { QStringLiteral("schema"), 1 },
-    { QStringLiteral("requested"), request.macosGipGamepad },
-    { QStringLiteral("compiled"), gipBackendCompiled },
-    { QStringLiteral("transport"), request.macosGipGamepad
-        ? QStringLiteral("libusb-1.0 static") : QStringLiteral("disabled") },
-    { QStringLiteral("libusb_version"), libusbVersion },
-    { QStringLiteral("libusb_static_archive"), libusbStaticArchive },
-    { QStringLiteral("player1_device"), QStringLiteral("auto") },
-    { QStringLiteral("symbol_verification"), QStringLiteral("nm -gU") },
-  };
-  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("macos_gip_controller.json")),
-                 controllerBackendProof, error)) {
-    fail(error, workspace);
-    return;
+  bool gipBackendCompiled = false;
+  if (!windowsTarget) {
+    QByteArray controllerSymbols;
+    if (!runCommand(nm, { QStringLiteral("-gU"), mainExecutable }, workspace,
+                    QStringLiteral("nm -gU <app executable>"), 30000,
+                    &controllerSymbols)) {
+      fail(QStringLiteral("The exported controller backend symbols could not be inspected."), workspace);
+      return;
+    }
+    gipBackendCompiled = nmOutputHasMacosGipBackend(controllerSymbols);
+    if (gipBackendCompiled != request.macosGipGamepad) {
+      fail(request.macosGipGamepad
+             ? QStringLiteral("The Studio export requested wired Xbox/PDP support, but the native GIP backend is absent from the app executable.")
+             : QStringLiteral("The Studio export disabled wired Xbox/PDP support, but GIP backend symbols are still present."),
+           workspace);
+      return;
+    }
+    emit logLine(request.macosGipGamepad
+                   ? QStringLiteral("Verified native Xbox GIP controller symbols in exported executable.")
+                   : QStringLiteral("Verified Xbox GIP controller backend is absent from exported executable."));
+    const QJsonObject controllerBackendProof{
+      { QStringLiteral("schema"), 1 },
+      { QStringLiteral("requested"), request.macosGipGamepad },
+      { QStringLiteral("compiled"), gipBackendCompiled },
+      { QStringLiteral("transport"), request.macosGipGamepad
+          ? QStringLiteral("libusb-1.0 static") : QStringLiteral("disabled") },
+      { QStringLiteral("libusb_version"), libusbVersion },
+      { QStringLiteral("libusb_static_archive"), libusbStaticArchive },
+      { QStringLiteral("player1_device"), QStringLiteral("auto") },
+      { QStringLiteral("symbol_verification"), QStringLiteral("nm -gU") },
+    };
+    if (!writeJson(QDir(proofDir).filePath(QStringLiteral("macos_gip_controller.json")),
+                   controllerBackendProof, error)) {
+      fail(error, workspace);
+      return;
+    }
   }
   nextStage(QStringLiteral("Embed disc, BIOS, and proof"));
-  const QString resourcesDir = QDir(stagedApp).filePath(QStringLiteral("Contents/Resources"));
+  const QString resourcesDir = windowsTarget
+    ? stagedApp
+    : QDir(stagedApp).filePath(QStringLiteral("Contents/Resources"));
   const QString packagedBiosDir = QDir(resourcesDir).filePath(QStringLiteral("bios"));
   const QString packagedGameDir = QDir(resourcesDir).filePath(QStringLiteral("game"));
   const QString packagedDiscDir = QDir(resourcesDir).filePath(QStringLiteral("disc"));
@@ -1269,6 +1419,9 @@ void PipelineWorker::run(PipelineRequest request) {
   const QJsonObject buildManifest{
     { QStringLiteral("schema"), 1 },
     { QStringLiteral("created_utc"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate) },
+    { QStringLiteral("platform"), targetPlatformKey(request.targetPlatform) },
+    { QStringLiteral("target_architecture"), windowsTarget
+        ? QStringLiteral("x86_64-w64-mingw32") : QSysInfo::currentCpuArchitecture() },
     { QStringLiteral("bundle_name"), bundleName },
     { QStringLiteral("bundle_identifier"), bundleId },
     { QStringLiteral("window_title"), request.windowTitle },
@@ -1278,14 +1431,22 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("effective_bios_crc32"), QStringLiteral("0x%1").arg(effectiveBiosCrc, 8, 16, QLatin1Char('0')).toUpper() },
     { QStringLiteral("bios_branding_patched"), request.patchBiosBranding },
     { QStringLiteral("skip_bios_boot"), request.skipBiosBoot },
-    { QStringLiteral("macos_gip_gamepad_requested"), request.macosGipGamepad },
+    { QStringLiteral("macos_gip_gamepad_requested"), !windowsTarget && request.macosGipGamepad },
     { QStringLiteral("macos_gip_gamepad_compiled"), gipBackendCompiled },
     { QStringLiteral("libusb_version"), libusbVersion },
     { QStringLiteral("framework_commit"), QString::fromUtf8(gitOutput).trimmed() },
     { QStringLiteral("cmake"), versionText(cmake, { QStringLiteral("--version") }).section('\n', 0, 0) },
     { QStringLiteral("ninja"), versionText(ninja, { QStringLiteral("--version") }) },
     { QStringLiteral("ghidra_home"), request.ghidraHome },
-    { QStringLiteral("architecture"), QSysInfo::currentCpuArchitecture() },
+    { QStringLiteral("host_architecture"), QSysInfo::currentCpuArchitecture() },
+    { QStringLiteral("compiler"), windowsTarget
+        ? versionText(mingwGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
+        : versionText(QStringLiteral("/usr/bin/clang"), { QStringLiteral("--version") }).section('\n', 0, 0) },
+    { QStringLiteral("sdl2_source"), windowsTarget
+        ? QStringLiteral("SDL2-devel-2.32.10-mingw.tar.gz") : QStringLiteral("host pkg-config") },
+    { QStringLiteral("sdl2_sha256"), windowsTarget
+        ? QStringLiteral("83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2")
+        : QString() },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("build_manifest.json")), buildManifest, error)) {
     fail(error, workspace);
@@ -1294,6 +1455,129 @@ void PipelineWorker::run(PipelineRequest request) {
   const QString proofArchive = QDir(resourcesDir).filePath(QStringLiteral("PSXRecomp-Proof.zip"));
   if (!createProofArchive(proofDir, proofArchive, error)) {
     fail(error, workspace);
+    return;
+  }
+
+  if (windowsTarget) {
+    nextStage(QStringLiteral("Verify Windows package"));
+    QByteArray peOutput;
+    if (!runCommand(mingwObjdump,
+                    { QStringLiteral("-p"), mainExecutable }, workspace,
+                    QStringLiteral("x86_64-w64-mingw32-objdump -p <Windows executable>"),
+                    30000, &peOutput)) {
+      fail(QStringLiteral("The staged Windows executable could not be inspected."), workspace);
+      return;
+    }
+    const QString peText = QString::fromUtf8(peOutput);
+    if (!peText.contains(QStringLiteral("file format pei-x86-64")) ||
+        !peText.contains(QRegularExpression(QStringLiteral(
+          R"((?m)^Subsystem\s+00000002\s+\(Windows GUI\))")))) {
+      fail(QStringLiteral("The staged executable is not an x86-64 Windows GUI PE binary."), workspace);
+      return;
+    }
+
+    QJsonArray importedDlls;
+    const QRegularExpression dllPattern(QStringLiteral(R"((?m)^\s*DLL Name:\s*(\S+)\s*$)"));
+    auto matches = dllPattern.globalMatch(peText);
+    QStringList forbiddenImports;
+    while (matches.hasNext()) {
+      const QString dll = matches.next().captured(1);
+      importedDlls.append(dll);
+      if (dll.compare(QStringLiteral("SDL2.dll"), Qt::CaseInsensitive) == 0 ||
+          dll.startsWith(QStringLiteral("libgcc_"), Qt::CaseInsensitive) ||
+          dll.startsWith(QStringLiteral("libstdc++"), Qt::CaseInsensitive) ||
+          dll.startsWith(QStringLiteral("libwinpthread"), Qt::CaseInsensitive)) {
+        forbiddenImports.append(dll);
+      }
+    }
+    if (!forbiddenImports.isEmpty()) {
+      fail(QStringLiteral("The Windows executable is not self-contained; non-system DLL imports remain: %1")
+             .arg(forbiddenImports.join(QStringLiteral(", "))), workspace);
+      return;
+    }
+    const QString stagedExeHash = sha256File(mainExecutable, error);
+    const QJsonObject windowsProof{
+      { QStringLiteral("schema"), 1 },
+      { QStringLiteral("platform"), QStringLiteral("windows") },
+      { QStringLiteral("architecture"), QStringLiteral("x86_64") },
+      { QStringLiteral("toolchain"), QStringLiteral("x86_64-w64-mingw32") },
+      { QStringLiteral("compiler"), versionText(mingwGcc, { QStringLiteral("--version") }).section('\n', 0, 0) },
+      { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
+      { QStringLiteral("executable_sha256"), stagedExeHash },
+      { QStringLiteral("subsystem"), QStringLiteral("Windows GUI") },
+      { QStringLiteral("imported_dlls"), importedDlls },
+      { QStringLiteral("self_contained_runtime"), true },
+      { QStringLiteral("signed"), false },
+      { QStringLiteral("verification"), QStringLiteral("MinGW objdump PE header and import-table inspection") },
+    };
+    if (stagedExeHash.isEmpty() ||
+        !writeJson(QDir(proofDir).filePath(QStringLiteral("windows_binary_verification.json")),
+                   windowsProof, error) ||
+        !createProofArchive(proofDir, proofArchive, error)) {
+      fail(error, workspace);
+      return;
+    }
+
+    nextStage(QStringLiteral("Deliver Windows package"));
+    const QString outputPackage = QDir(request.outputDirectory).filePath(
+      bundleName + QStringLiteral("-Windows"));
+    const QString deliveryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString deliveryPackage = QDir(request.outputDirectory).filePath(
+      QStringLiteral(".%1.psxrecomp-new-%2-Windows").arg(bundleName, deliveryToken));
+    const QString backupPackage = QDir(request.outputDirectory).filePath(
+      QStringLiteral(".%1.psxrecomp-old-%2-Windows").arg(bundleName, deliveryToken));
+    QDir(deliveryPackage).removeRecursively();
+    QDir(backupPackage).removeRecursively();
+    if (!copyDirectoryTree(stageDir, deliveryPackage, error)) {
+      QDir(deliveryPackage).removeRecursively();
+      fail(error, workspace);
+      return;
+    }
+    const QString deliveredStagingExe = QDir(deliveryPackage).filePath(
+      bundleName + QStringLiteral(".exe"));
+    if (sha256File(deliveredStagingExe, error) != stagedExeHash) {
+      QDir(deliveryPackage).removeRecursively();
+      fail(QStringLiteral("The Windows executable changed while staging the package for delivery."), workspace);
+      return;
+    }
+
+    const bool hadExistingOutput = QFileInfo::exists(outputPackage);
+    if (hadExistingOutput && !request.overwriteOutput) {
+      QDir(deliveryPackage).removeRecursively();
+      fail(QStringLiteral("The Windows output already exists and overwrite was not approved: %1")
+             .arg(outputPackage), workspace);
+      return;
+    }
+    if (hadExistingOutput && !QDir().rename(outputPackage, backupPackage)) {
+      QDir(deliveryPackage).removeRecursively();
+      fail(QStringLiteral("Could not preserve the existing Windows package before replacement: %1")
+             .arg(outputPackage), workspace);
+      return;
+    }
+    if (!QDir().rename(deliveryPackage, outputPackage)) {
+      if (hadExistingOutput) QDir().rename(backupPackage, outputPackage);
+      QDir(deliveryPackage).removeRecursively();
+      fail(QStringLiteral("Could not move the verified Windows package into its final output path."), workspace);
+      return;
+    }
+    const QString outputExe = QDir(outputPackage).filePath(bundleName + QStringLiteral(".exe"));
+    const bool deliveryVerified = sha256File(outputExe, error) == stagedExeHash &&
+      QFileInfo(QDir(outputPackage).filePath(QStringLiteral("PSXRecomp-Proof.zip"))).isFile();
+    if (!deliveryVerified) {
+      const QString failedPackage = outputPackage + QStringLiteral(".failed-") + deliveryToken;
+      QDir().rename(outputPackage, failedPackage);
+      if (hadExistingOutput) QDir().rename(backupPackage, outputPackage);
+      fail(QStringLiteral("The delivered Windows package failed final verification; the failed copy remains at %1")
+             .arg(failedPackage), workspace);
+      return;
+    }
+    if (hadExistingOutput && !QDir(backupPackage).removeRecursively()) {
+      emit logLine(QStringLiteral("Warning: previous Windows package backup remains at %1")
+                     .arg(backupPackage));
+    }
+    emit logLine(QStringLiteral("Windows app package created: %1").arg(outputPackage));
+    QDir(workspace).removeRecursively();
+    emit completed(outputPackage);
     return;
   }
 

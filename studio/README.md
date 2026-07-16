@@ -1,12 +1,13 @@
 # PSXRecomp Studio
 
-PSXRecomp Studio is the macOS Qt front end for producing a self-contained,
-signed PlayStation recompilation app without creating a permanent per-title
-repository.
+PSXRecomp Studio is the Qt front end for producing self-contained macOS or
+Windows PlayStation recompilation apps without creating a permanent per-title
+repository. Studio itself currently runs on macOS; its Windows output is
+cross-compiled with MinGW.
 
 It uses Qt 6 Widgets, Oclero Qlementine, Qlementine Icons,
 QtAppInstanceManager, and QuaZip. Work happens in a temporary directory; the
-selected output directory receives only the final `.app` bundle.
+selected output directory receives only the final platform package.
 
 ## Required inputs
 
@@ -17,9 +18,9 @@ selected output directory receives only the final `.app` bundle.
   - SHA-256: `71af94d1e47a68c11e8fdb9f8368040601514a42a5a399cda48c7d3bff1e99d3`
 - A PNG, SVG, or ICNS app icon.
 - Optional BIOS branding images: one initial splash and one handoff image.
-- The desired runtime window title. This also becomes the macOS app name.
-- A password-protected PKCS#12 signing identity (`.pfx` or `.p12`) and its
-  password.
+- The desired runtime window title. This also becomes the app name.
+- For macOS exports, a password-protected PKCS#12 signing identity (`.pfx` or
+  `.p12`) and its password. Windows exports are currently unsigned.
 - Ghidra 11.3.2 with Java 21.
 
 The certificate password is kept only in memory. Studio validates the source
@@ -30,18 +31,25 @@ verifies the bundle, then deletes all temporary key material and the keychain.
 
 ## Host tools
 
-The machine running Studio must provide:
+Every export requires CMake, Ninja, Python 3, Ghidra 11.3.2, and OpenJDK 21.
+macOS exports additionally require:
 
 - Xcode command-line tools (`codesign`, `security`, `iconutil`, `otool`)
-- CMake and Ninja
-- Python 3
 - SDL2 development files discoverable through `pkg-config`
 - libusb 1.0 development files, including `libusb-1.0.a`, for the default wired
   Xbox/PDP controller export (`brew install libusb`)
 - When Homebrew provides SDL2 through `sdl2-compat`, the matching SDL3 runtime
   must be installed; Studio bundles and signs both libraries.
 - OpenSSL 3 with `pkcs12 -legacy` support (`brew install openssl@3`)
-- Ghidra 11.3.2 and OpenJDK 21
+
+Windows exports additionally require the Homebrew MinGW-w64 tools named
+`x86_64-w64-mingw32-gcc`, `x86_64-w64-mingw32-g++`,
+`x86_64-w64-mingw32-windres`, `x86_64-w64-mingw32-ar`,
+`x86_64-w64-mingw32-ranlib`, `x86_64-w64-mingw32-strip`, and
+`x86_64-w64-mingw32-objdump`. Studio writes an explicit CMake toolchain file
+for these programs. It downloads SDL2's official, checksum-pinned MinGW
+development archive and statically links SDL2 plus the GCC/C++ runtimes so the
+delivered executable has no non-system DLL dependency.
 
 Qt is bundled into the distributed Studio app. Qt is not linked into generated
 game apps; those use the PSXRecomp SDL runtime.
@@ -64,17 +72,18 @@ game apps; those use the PSXRecomp SDL runtime.
    native C from that patched BIOS. The original BIOS file remains unchanged.
 9. Run the generated-code, dispatch, range, data, and runtime-installed-target
    audits. Any unresolved disagreement stops the build.
-10. Compile a Release macOS application bundle, explicitly enable and verify
-    the selected wired Xbox/PDP GIP backend, bundle SDL2 and (when needed) SDL3,
-    and embed the BIOS, extracted EXE, CUE/BIN files, runtime configuration,
-    icon, and a QuaZip proof archive.
-11. Import the normalized PFX into an isolated temporary keychain, sign every
-    nested Mach-O, and sign the app with Hardened Runtime, a secure timestamp,
-    and the narrow `disable-library-validation` entitlement required by
-    non-Apple/self-issued code-signing identities. Run strict `codesign`
+10. Compile either a Release macOS application bundle or an x86-64 Windows GUI
+    executable. The macOS path verifies the selected wired Xbox/PDP GIP backend
+    and bundles SDL2/SDL3 as needed. The Windows path selects the installed
+    MinGW-w64 toolchain, embeds a Windows icon, statically links SDL2, and
+    rejects non-system runtime DLL imports.
+11. For macOS, import the normalized PFX into an isolated temporary keychain,
+    sign every nested Mach-O, and sign the app with Hardened Runtime, a secure
+    timestamp, and the narrow `disable-library-validation` entitlement required
+    by non-Apple/self-issued code-signing identities. Run strict `codesign`
     verification before and after delivery.
-12. Copy the verified `.app` into the selected output directory and verify the
-    delivered copy again.
+12. Copy the verified `.app` or `-Windows` package into the selected output
+    directory and verify the delivered copy again.
 
 A direct JAL into bytes classified as static data is emitted only as a
 runtime-installed target. The bytes remain absent from native C and the runtime
@@ -95,6 +104,19 @@ Game Name.app/
       bios/SCPH1001.BIN
       game/<serial boot EXE>
       disc/<CUE and referenced BIN files>
+```
+
+Windows exports use:
+
+```text
+Game Name-Windows/
+  Game Name.exe
+  game.toml
+  PSXRecomp-Proof.zip
+  bios/SCPH1001.BIN
+  game/<serial boot EXE>
+  disc/<CUE and referenced BIN files>
+  seeds/ghidra_funcs.txt
 ```
 
 ### macOS wired Xbox/PDP controller export

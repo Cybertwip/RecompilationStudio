@@ -5,6 +5,7 @@
 #include <QMainWindow>
 
 class QCheckBox;
+class QComboBox;
 class QFrame;
 class QGridLayout;
 class QLabel;
@@ -49,6 +50,7 @@ private slots:
   void chooseBiosInitialSplash();
   void chooseBiosHandoffImage();
   void updateBiosPatchControls();
+  void updatePlatformControls();
   void startBuild();
   void cancelBuild();
   void revealOutput();
@@ -72,12 +74,14 @@ private:
   PipelineRequest requestFromUi(bool overwrite) const;
 
   QLineEdit* discEdit_{ nullptr };
+  QComboBox* platformCombo_{ nullptr };
   QLineEdit* biosEdit_{ nullptr };
   QLineEdit* iconEdit_{ nullptr };
   QLineEdit* titleEdit_{ nullptr };
   QLineEdit* outputEdit_{ nullptr };
   QLineEdit* certificateEdit_{ nullptr };
   QLineEdit* certificatePasswordEdit_{ nullptr };
+  QLabel* signingNote_{ nullptr };
   QLineEdit* ghidraEdit_{ nullptr };
   QCheckBox* biosPatchEnabled_{ nullptr };
   QLineEdit* biosInitialSplashEdit_{ nullptr };

@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QCheckBox>
+#include <QComboBox>
 
 #include <oclero/qlementine.hpp>
 #include <oclero/qlementine/icons/Icons16.hpp>
@@ -131,14 +132,14 @@ MainWindow::MainWindow(QWidget* parent)
   auto* headerTextLayout = new QVBoxLayout(headerText);
   headerTextLayout->setContentsMargins(0, 0, 0, 0);
   headerTextLayout->setSpacing(4);
-  auto* title = new QLabel(QStringLiteral("Build a signed native PlayStation app"), headerText);
+  auto* title = new QLabel(QStringLiteral("Build a native PlayStation app"), headerText);
   auto titleFont = title->font();
   titleFont.setBold(true);
   titleFont.setPointSizeF(titleFont.pointSizeF() + 7.0);
   title->setFont(titleFont);
   auto* subtitle = new QLabel(
     QStringLiteral("One workflow for disc analysis, evidence-backed source generation, native compilation, "
-                   "macOS packaging, and certificate signing."),
+                   "and platform packaging."),
     headerText);
   subtitle->setWordWrap(true);
   headerTextLayout->addWidget(title);
@@ -161,6 +162,19 @@ MainWindow::MainWindow(QWidget* parent)
   inputLayout->setContentsMargins(18, 16, 18, 18);
   inputLayout->setSpacing(10);
   inputLayout->addWidget(makeSectionTitle(QStringLiteral("App inputs"), inputCard_));
+
+  auto* platformRow = new QWidget(inputCard_);
+  platformRow->setMinimumHeight(34);
+  auto* platformLayout = new QHBoxLayout(platformRow);
+  platformLayout->setContentsMargins(0, 0, 0, 0);
+  auto* platformLabel = new QLabel(QStringLiteral("Platform"), platformRow);
+  platformLabel->setMinimumWidth(142);
+  platformCombo_ = new QComboBox(platformRow);
+  platformCombo_->addItem(QStringLiteral("macOS"), targetPlatformKey(TargetPlatform::MacOS));
+  platformCombo_->addItem(QStringLiteral("Windows"), targetPlatformKey(TargetPlatform::Windows));
+  platformLayout->addWidget(platformLabel);
+  platformLayout->addWidget(platformCombo_, 1);
+  inputLayout->addWidget(platformRow);
 
   discEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("Disc BIN/CUE"),
                          QStringLiteral("One .cue and all referenced .bin files"), SLOT(chooseDisc()));
@@ -202,7 +216,7 @@ MainWindow::MainWindow(QWidget* parent)
   auto* toolsLayout = new QVBoxLayout(toolsCard_);
   toolsLayout->setContentsMargins(18, 16, 18, 18);
   toolsLayout->setSpacing(10);
-  toolsLayout->addWidget(makeSectionTitle(QStringLiteral("Analysis and signing"), toolsCard_));
+  toolsLayout->addWidget(makeSectionTitle(QStringLiteral("Analysis and export tools"), toolsCard_));
   ghidraEdit_ = addPathRow(toolsCard_, toolsLayout, QStringLiteral("Ghidra home"),
                            QStringLiteral("Ghidra 11.3.2 installation"), SLOT(chooseGhidraHome()));
   certificateEdit_ = addPathRow(toolsCard_, toolsLayout, QStringLiteral("Certificate"),
@@ -220,12 +234,12 @@ MainWindow::MainWindow(QWidget* parent)
   passwordLayout->addWidget(passwordLabel);
   passwordLayout->addWidget(certificatePasswordEdit_, 1);
   toolsLayout->addWidget(passwordRow);
-  auto* signingNote = new QLabel(
+  signingNote_ = new QLabel(
     QStringLiteral("The certificate is imported into an isolated temporary keychain and removed after verification."),
     toolsCard_);
-  signingNote->setWordWrap(true);
-  signingNote->setObjectName(QStringLiteral("secondaryText"));
-  toolsLayout->addWidget(signingNote);
+  signingNote_->setWordWrap(true);
+  signingNote_->setObjectName(QStringLiteral("secondaryText"));
+  toolsLayout->addWidget(signingNote_);
   toolsLayout->addStretch(1);
 
   brandingCard_ = makeCard(QStringLiteral("brandingCard"), formsContainer_);
@@ -339,6 +353,8 @@ MainWindow::MainWindow(QWidget* parent)
   connect(cancelButton_, &QPushButton::clicked, this, &MainWindow::cancelBuild);
   connect(revealButton_, &QPushButton::clicked, this, &MainWindow::revealOutput);
   connect(themeButton_, &QPushButton::clicked, this, &MainWindow::toggleTheme);
+  connect(platformCombo_, &QComboBox::currentIndexChanged,
+          this, &MainWindow::updatePlatformControls);
   connect(biosPatchEnabled_, &QCheckBox::toggled, this, &MainWindow::updateBiosPatchControls);
   connect(skipBiosBoot_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
   connect(macosGipGamepad_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
@@ -354,6 +370,7 @@ MainWindow::MainWindow(QWidget* parent)
   }
 
   loadSettings();
+  updatePlatformControls();
   updateBiosPatchControls();
   applyTheme();
   updateBuildButton();
@@ -507,6 +524,10 @@ QString MainWindow::detectGhidraHome() const {
 
 void MainWindow::loadSettings() {
   QSettings settings;
+  const QString platformKey = settings.value(QStringLiteral("app/platform"),
+                                              QStringLiteral("macos")).toString();
+  const int platformIndex = platformCombo_->findData(platformKey);
+  platformCombo_->setCurrentIndex(platformIndex >= 0 ? platformIndex : 0);
   biosEdit_->setText(settings.value(QStringLiteral("paths/bios")).toString());
   iconEdit_->setText(settings.value(QStringLiteral("paths/icon")).toString());
   outputEdit_->setText(settings.value(QStringLiteral("paths/output"),
@@ -533,6 +554,7 @@ void MainWindow::loadSettings() {
 
 void MainWindow::saveSettings() const {
   QSettings settings;
+  settings.setValue(QStringLiteral("app/platform"), platformCombo_->currentData().toString());
   settings.setValue(QStringLiteral("paths/bios"), biosEdit_->text());
   settings.setValue(QStringLiteral("paths/icon"), iconEdit_->text());
   settings.setValue(QStringLiteral("paths/output"), outputEdit_->text());
@@ -627,7 +649,7 @@ void MainWindow::chooseIcon() {
 }
 
 void MainWindow::chooseOutputDirectory() {
-  QFileDialog dialog(this, QStringLiteral("Select .app output directory"));
+  QFileDialog dialog(this, QStringLiteral("Select output directory"));
   dialog.setAcceptMode(QFileDialog::AcceptOpen);
   dialog.setFileMode(QFileDialog::Directory);
   dialog.setOption(QFileDialog::ShowDirsOnly, true);
@@ -671,6 +693,7 @@ void MainWindow::chooseGhidraHome() {
 
 PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   PipelineRequest request;
+  request.targetPlatform = targetPlatformFromKey(platformCombo_->currentData().toString());
   request.cuePath = discEdit_->text();
   request.selectedBinPaths = selectedBins_;
   request.biosPath = biosEdit_->text();
@@ -699,17 +722,22 @@ void MainWindow::startBuild() {
       this, QStringLiteral("Output directory unavailable"),
       QStringLiteral("PSXRecomp Studio cannot use the selected output directory.\n\n"
                      "%1\n\n"
-                     "Use Browse to select it again so macOS can grant access.").arg(accessError));
+                     "Use Browse to select it again and grant Studio access if prompted.").arg(accessError));
     return;
   }
 
   const QString bundleName = titleEdit_->text().trimmed().replace('/', QStringLiteral(" - ")).replace(':', QStringLiteral(" -"));
-  const QString outputPath = QDir(outputEdit_->text()).filePath(bundleName + QStringLiteral(".app"));
+  const bool windowsTarget =
+    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::Windows;
+  const QString outputName = windowsTarget
+    ? bundleName + QStringLiteral("-Windows")
+    : bundleName + QStringLiteral(".app");
+  const QString outputPath = QDir(outputEdit_->text()).filePath(outputName);
   bool overwrite = false;
   if (QFileInfo::exists(outputPath)) {
     const auto answer = QMessageBox::question(
-      this, QStringLiteral("Replace existing app?"),
-      QStringLiteral("%1 already exists. Replace it with the new signed build?").arg(outputPath),
+      this, QStringLiteral("Replace existing output?"),
+      QStringLiteral("%1 already exists. Replace it with the new build?").arg(outputPath),
       QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (answer != QMessageBox::Yes) {
       return;
@@ -745,11 +773,19 @@ void MainWindow::onCompleted(const QString& appPath) {
   outputAppPath_ = appPath;
   progressBar_->setRange(0, 100);
   progressBar_->setValue(100);
-  stageLabel_->setText(QStringLiteral("Complete — signed app verified"));
+  const bool windowsTarget =
+    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::Windows;
+  stageLabel_->setText(windowsTarget
+    ? QStringLiteral("Complete — Windows package verified")
+    : QStringLiteral("Complete — signed app verified"));
   revealButton_->setEnabled(true);
   setBusy(false);
-  QMessageBox::information(this, QStringLiteral("Signed app created"),
-                           QStringLiteral("The signed macOS app was created and verified:\n\n%1").arg(appPath));
+  QMessageBox::information(
+    this, windowsTarget ? QStringLiteral("Windows app created")
+                        : QStringLiteral("Signed app created"),
+    windowsTarget
+      ? QStringLiteral("The Windows app package was created and verified:\n\n%1").arg(appPath)
+      : QStringLiteral("The signed macOS app was created and verified:\n\n%1").arg(appPath));
 }
 
 void MainWindow::onFailed(const QString& message, const QString& workspacePath) {
@@ -779,11 +815,40 @@ void MainWindow::setBusy(bool busy) {
     edit->setEnabled(!busy);
   }
   biosPatchEnabled_->setEnabled(!busy);
+  platformCombo_->setEnabled(!busy);
   skipBiosBoot_->setEnabled(!busy);
   macosGipGamepad_->setEnabled(!busy);
   biosMuteAudio_->setEnabled(!busy && biosPatchEnabled_->isChecked());
   biosRemovePsGlyph_->setEnabled(!busy && biosPatchEnabled_->isChecked());
-  if (!busy) updateBiosPatchControls();
+  if (!busy) {
+    updatePlatformControls();
+    updateBiosPatchControls();
+  }
+  updateBuildButton();
+}
+
+void MainWindow::updatePlatformControls() {
+  const bool macosTarget =
+    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::MacOS;
+  const bool busy = cancelButton_ && cancelButton_->isEnabled();
+  certificateEdit_->setEnabled(macosTarget && !busy);
+  certificatePasswordEdit_->setEnabled(macosTarget && !busy);
+  certificateEdit_->parentWidget()->setVisible(macosTarget);
+  certificatePasswordEdit_->parentWidget()->setVisible(macosTarget);
+  macosGipGamepad_->setVisible(macosTarget);
+  macosGipGamepad_->setEnabled(macosTarget && !busy);
+  certificateEdit_->setToolTip(macosTarget
+    ? QStringLiteral("PKCS#12 identity used to sign the macOS app")
+    : QStringLiteral("Windows exports are currently delivered unsigned"));
+  certificatePasswordEdit_->setToolTip(certificateEdit_->toolTip());
+  signingNote_->setText(macosTarget
+    ? QStringLiteral("The certificate is imported into an isolated temporary keychain and removed after verification.")
+    : QStringLiteral("Windows exports use the installed x86_64-w64-mingw32 MinGW toolchain and are delivered unsigned."));
+  outputEdit_->setPlaceholderText(macosTarget
+    ? QStringLiteral("Destination for the signed .app")
+    : QStringLiteral("Destination for the Windows app folder"));
+  buildButton_->setText(macosTarget ? QStringLiteral("Build Signed .app")
+                                    : QStringLiteral("Build Windows App"));
   updateBuildButton();
 }
 
@@ -793,11 +858,14 @@ void MainWindow::updateBuildButton() {
   }
   const bool brandingReady = !biosPatchEnabled_->isChecked() ||
     (!biosInitialSplashEdit_->text().isEmpty() && !biosHandoffImageEdit_->text().isEmpty());
+  const bool macosTarget =
+    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::MacOS;
+  const bool signingReady = !macosTarget ||
+    (!certificateEdit_->text().isEmpty() && !certificatePasswordEdit_->text().isEmpty());
   const bool ready = !discEdit_->text().isEmpty() && !biosEdit_->text().isEmpty() &&
                      !iconEdit_->text().isEmpty() && !titleEdit_->text().trimmed().isEmpty() &&
-                     !outputEdit_->text().isEmpty() && !certificateEdit_->text().isEmpty() &&
-                     !certificatePasswordEdit_->text().isEmpty() && !ghidraEdit_->text().isEmpty() &&
-                     brandingReady;
+                     !outputEdit_->text().isEmpty() && !ghidraEdit_->text().isEmpty() &&
+                     signingReady && brandingReady;
   buildButton_->setEnabled(ready);
 }
 

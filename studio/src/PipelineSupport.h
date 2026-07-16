@@ -26,6 +26,12 @@ bool createIcns(const QString& sourceIcon,
                 const QString& workingDirectory,
                 const QString& outputPath,
                 QString& error);
+bool createIco(const QString& sourceIcon,
+               const QString& outputPath,
+               QString& error);
+bool copyDirectoryTree(const QString& sourceDirectory,
+                       const QString& destinationDirectory,
+                       QString& error);
 bool createProofArchive(const QString& proofDirectory,
                         const QString& outputPath,
                         QString& error);

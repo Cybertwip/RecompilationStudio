@@ -532,6 +532,7 @@ namespace {
 
 enum class ExactCfKind {
     Normal,
+    Break,
     Branch,
     Jump,
     Jal,
@@ -583,6 +584,13 @@ static ExactCf exact_classify_cf(uint32_t pc, uint32_t instr) {
     uint32_t funct = instr & 0x3Fu;
     uint32_t rs = (instr >> 21) & 0x1Fu;
 
+    // BREAK has no return path in the current function. SYSCALL is different:
+    // PS1 Enter/ExitCriticalSection wrappers resume at the next instruction
+    // after the exception handler returns, commonly `jr $ra; nop`.
+    if (opcode == 0x00u && funct == 0x0Du) {
+        cf.kind = ExactCfKind::Break;
+        return cf;
+    }
     if (opcode == 0x00u && funct == 0x08u) {
         cf.kind = (rs == 31u) ? ExactCfKind::JrRa : ExactCfKind::JrOther;
         return cf;
@@ -754,6 +762,8 @@ FunctionAnalysisResult FunctionAnalyzer::analyze_exact_entries(const std::vector
             switch (cf.kind) {
             case ExactCfKind::Normal:
                 if (in_function(pc + 4u)) work.push(pc + 4u);
+                break;
+            case ExactCfKind::Break:
                 break;
             case ExactCfKind::Branch:
                 if (in_function(delay)) wr.visited.insert(delay);
@@ -1339,6 +1349,9 @@ FunctionAnalysisResult FunctionAnalyzer::analyze() {
             switch (cf.kind) {
             case ExactCfKind::Normal:
                 if (in_fn(pc + 4u)) work.push(pc + 4u);
+                break;
+            case ExactCfKind::Break:
+                reached_exit = true;
                 break;
             case ExactCfKind::Branch:
                 if (in_fn(delay)) visited.insert(delay);

@@ -8,8 +8,14 @@ bios/
 duckstation/build/
 duckstation/dep/prebuilt/
 
-# Ghidra project files (large, regenerable)
-ghidra/
+# Root Ghidra project files (large, regenerable).
+/ghidra/
+
+# Studio's two headless scripts are build inputs, not project artifacts.
+# Keep the other local Ghidra helpers private until they are adopted.
+/tools/ghidra/*
+!/tools/ghidra/SeedPsxEntry.java
+!/tools/ghidra/ExportGameAnalysis.java
 
 # Backup of the working state — see CURRENT_STATE.md for what this contains.
 .happypath/

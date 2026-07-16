@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "artifact": "linux_input_support",
+  "reported_host": {
+    "distribution": "Ubuntu 24.04",
+    "display_session": "unknown_default",
+    "keyboard_event_evidence": "Alt+Enter toggles fullscreen",
+    "reported_failures": [
+      "PSX keyboard controls inactive",
+      "gamepad not detected"
+    ]
+  },
+  "implementation_manifest": {
+    "keyboard_state": "Linux SDL keydown/keyup event shadow",
+    "automatic_route": "physical controller first, keyboard when no physical controller is attached",
+    "linux_controller_backend": "SDL kernel evdev with SDL HIDAPI disabled",
+    "controller_mappings": {
+      "project": "SDL_GameControllerDB",
+      "commit": "8d9fefd7b810f2541f78cc7a8ccbd185bc84c7a5",
+      "archive_sha256": "e260456d9c7bdff5f2f8a0db0f772316b44d3e4f7833f72ff8328e95b30eb0ec",
+      "database_sha256": "dd4dd9dcb458aa4fbfd9b37ccdd4884b1e2e258edf8a16c3c4df3e77ac5174a0",
+      "linux_mapping_count": 728
+    }
+  },
+  "verification": {
+    "host_input_policy_checks": 11,
+    "host_input_policy_failures": 0,
+    "studio_tests_passed": 2,
+    "linux_runtime_cross_linked": true,
+    "sonic_wings_package_cross_linked": true,
+    "sonic_wings_executable_sha256": "6912cb0700b8db780f6fb960aef2455547340d9838c49cedf7f802596598abee",
+    "sonic_wings_test_archive_sha256": "9426a9d302a23415fd959757de299cd3ddb4050ce3ca760bf57caf9b44bcc1dc",
+    "recompiler_or_ghidra_rerun_for_test_package": false,
+    "linux_elf": "ELF64 little-endian AMD64",
+    "maximum_observed_glibc": "2.25",
+    "bundled_sdl2_sha256": "0d7d4648b31ebabb8943d9cd5e72f15b74b5e0369c43dfa603202adf1aead69c",
+    "controller_database_fetch_and_hash_verified": true,
+    "physical_ubuntu_retest": "pending"
+  }
+}

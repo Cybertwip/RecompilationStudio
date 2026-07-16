@@ -52,6 +52,7 @@
 #include "disc_identity.h"
 #include "iso_reader.h"      /* text-image guard: extract the boot EXE from the disc */
 #include "psx_keybinds.h"    /* configurable keyboard->DualShock keybinds (keybinds.ini) */
+#include "host_input_policy.h"
 #if defined(PSX_HAVE_GIP_GAMEPAD)
 #include "gip_gamepad.h"      /* macOS direct-USB Xbox GIP controllers */
 #endif
@@ -294,6 +295,13 @@ static PlayerInput g_players[2];
  * a short Return/Start tap cannot occur entirely between keyboard-state polls. */
 static uint16_t g_keyboard_edge_mask[2] = { 0, 0 };  /* active-high PSX bits */
 static uint8_t  g_keyboard_edge_frames[2] = { 0, 0 };
+static int      g_external_controller_mappings = 0;
+#if defined(__linux__)
+/* The frontend shortcuts prove the SDL key event stream is live on Linux.
+ * Keep PSX held-key state on that same stream instead of depending on a second
+ * polled snapshot with separate backend/compositor behavior. */
+static PSXRecompV4::HostKeyboardState g_linux_keyboard_state;
+#endif
 
 
 typedef struct FrontendInputTraceEntry {
@@ -323,16 +331,74 @@ static void frontend_input_trace_note(uint8_t kind, SDL_Scancode sc,
     e->pad_word = pad_word;
 }
 
+static SDL_Scancode host_event_scancode(const SDL_KeyboardEvent& event) {
+    return PSXRecompV4::HostKeyboardState::event_scancode(event);
+}
+
+static void host_keyboard_event(const SDL_KeyboardEvent& event, bool pressed) {
+#if defined(__linux__)
+    g_linux_keyboard_state.update(event, pressed);
+#else
+    (void)event;
+    (void)pressed;
+#endif
+}
+
+static void host_keyboard_reset(void) {
+#if defined(__linux__)
+    g_linux_keyboard_state.reset();
+#endif
+}
+
+static const Uint8* host_keyboard_state(void) {
+#if defined(__linux__)
+    return g_linux_keyboard_state.data();
+#else
+    return SDL_GetKeyboardState(NULL);
+#endif
+}
+
+static void configure_sdl_input_hints(void) {
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#if defined(__linux__)
+    /* Ubuntu's desktop-session controller path is kernel evdev; direct hidraw
+     * permissions vary by device and local udev policy. Use the kernel's
+     * xpad/hid-playstation/hid-nintendo drivers so enumeration does not depend
+     * on direct hidraw access. */
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
+#else
+    /* macOS and Windows need SDL's HIDAPI drivers for devices the native
+     * controller backends do not expose consistently. */
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
+#endif
+#if defined(_WIN32)
+    /* Steam's virtual Xbox pad must be exposed through HIDAPI. With RawInput
+     * disabled, explicitly enable the Xbox HIDAPI sub-driver too. */
+    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_XBOX, "1");
+#endif
+}
+
 extern "C" int frontend_input_state_json(char *out, int cap) {
     if (!out || cap <= 0) return 0;
     uint64_t total = g_frontend_input_seq;
     uint64_t count = total < FRONTEND_INPUT_TRACE_CAP ? total : FRONTEND_INPUT_TRACE_CAP;
     uint64_t start = total - count;
+    const int joystick_count = (SDL_WasInit(SDL_INIT_JOYSTICK) != 0)
+                                 ? SDL_NumJoysticks() : 0;
+    const bool p1_sdl_attached = g_players[0].handle &&
+                                 SDL_GameControllerGetAttached(g_players[0].handle);
+    const char *video_driver = SDL_GetCurrentVideoDriver();
     int n = std::snprintf(out, (size_t)cap,
         "{\"total\":%llu,\"p1_kind\":%d,\"p1_mode\":%d,"
-        "\"edge_mask\":\"0x%04X\",\"edge_frames\":%u,\"entries\":[",
+        "\"edge_mask\":\"0x%04X\",\"edge_frames\":%u,"
+        "\"video_driver\":\"%s\",\"joysticks\":%d,"
+        "\"external_controller_mappings\":%d,\"p1_sdl_attached\":%s,"
+        "\"entries\":[",
         (unsigned long long)total, g_players[0].kind, g_players[0].mode,
-        g_keyboard_edge_mask[0], (unsigned)g_keyboard_edge_frames[0]);
+        g_keyboard_edge_mask[0], (unsigned)g_keyboard_edge_frames[0],
+        video_driver ? video_driver : "", joystick_count,
+        g_external_controller_mappings, p1_sdl_attached ? "true" : "false");
     for (uint64_t i = 0; i < count && n < cap - 256; i++) {
         const FrontendInputTraceEntry *e =
             &g_frontend_input_trace[(start + i) & (FRONTEND_INPUT_TRACE_CAP - 1u)];
@@ -607,6 +673,20 @@ static std::filesystem::path exe_dir_from_argv(const char* argv0) {
     // we never silently resolve against an unrelated cwd deeper in the tree.
     if (exe_dir.empty()) exe_dir = fs::path(".");
     return exe_dir;
+}
+
+static void load_external_controller_mappings(const char* argv0) {
+    static bool attempted = false;
+    if (attempted) return;
+    attempted = true;
+
+    const std::filesystem::path path =
+        exe_dir_from_argv(argv0) / "gamecontrollerdb.txt";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) return;
+
+    const int loaded = SDL_GameControllerAddMappingsFromFile(path.string().c_str());
+    if (loaded >= 0) g_external_controller_mappings = loaded;
 }
 
 // Writable runtime state must never be placed inside a signed macOS bundle.
@@ -1529,6 +1609,11 @@ static std::string default_input_ini_text(void) {
 static void load_input_config(const char* argv0) {
     set_default_controller_mapping();
 
+    /* Keyboard binds are independent of input.ini and must be initialized on
+     * the first run too. Previously the missing-input.ini branch returned
+     * before keybinds.ini was loaded or created. */
+    psx_keybinds_init(argv0);
+
     namespace fs = std::filesystem;
     fs::path config_path = runtime_writable_dir(argv0) / "input.ini";
     std::error_code ec;
@@ -1580,11 +1665,6 @@ static void load_input_config(const char* argv0) {
         for (auto& entry : controller_map) entry.sources.clear();
     }
 
-    /* Configurable KEYBOARD keybinds (keybinds.ini, next to the exe) — separate
-     * from input.ini's gamepad map. Loads the user's map (or writes defaults on
-     * first run). The launcher may have just edited+saved this file; we re-read
-     * it here so the runtime always reflects the current bindings. */
-    psx_keybinds_init(argv0);
 }
 
 static void close_player(PlayerInput& p) {
@@ -1699,11 +1779,7 @@ static void set_player_device(PlayerInput& p, const std::string& dev, int mode) 
     if (d.empty() || d == "none") { p.kind = 0; }
     else if (d == "keyboard")     { p.kind = 1; }
     else if (d == "auto" || d == "gamepad" || d == "controller") {
-#if defined(PSX_HAVE_GIP_GAMEPAD)
         p.kind = 4;
-#else
-        p.kind = 2;
-#endif
     }
 #if defined(PSX_HAVE_GIP_GAMEPAD)
     else if (d.rfind("gip:", 0) == 0) {
@@ -1811,7 +1887,7 @@ static bool gip_source_pressed(const PsxGipGamepadState& state,
  * (arrows=d-pad, X/S/Z/A=Cross/Circle/Square/Triangle, Q/W/E/R=L1/R1/L2/R2,
  * Return=Start, RShift=Select) plus T/Y=L3/R3 stick clicks. */
 static uint16_t pad_from_keyboard(int player) {
-    const Uint8* keys = SDL_GetKeyboardState(NULL);
+    const Uint8* keys = host_keyboard_state();
     return psx_keybinds_pad_word(keys, player);
 }
 
@@ -1854,6 +1930,22 @@ static uint16_t physical_pad_buttons(const PlayerInput& p) {
     return 0xFFFF;
 }
 
+static bool player_has_physical_input(const PlayerInput& p) {
+    if (p.handle && SDL_GameControllerGetAttached(p.handle)) return true;
+#if defined(PSX_HAVE_GIP_GAMEPAD)
+    if (p.gip && psx_gip_gamepad_connection(p.gip) == PSX_GIP_CONNECTION_CONNECTED)
+        return true;
+#endif
+    return false;
+}
+
+static bool player_uses_keyboard(const PlayerInput& p) {
+    /* Automatic routing is controller-first with a real keyboard fallback.
+     * This is release behavior, not the PSX_DEV_INPUT developer merge. */
+    return PSXRecompV4::host_route_uses_keyboard(
+        p.kind, player_has_physical_input(p));
+}
+
 /* Radial deadzone: process a stick's X and Y together so the dead region is a
  * small CIRCLE, not a per-axis square. Travel within controller_deadzone reads
  * centred (0x80/0x80); beyond it the vector MAGNITUDE is rescaled to the full
@@ -1886,7 +1978,7 @@ static void axes_to_pad_pair(int16_t vx, int16_t vy, uint8_t* obx, uint8_t* oby)
 /* Buttons for a player's selected device (0xFFFF = none pressed). `player` is
  * 1 or 2 — selects which keybinds.ini section drives a keyboard port. */
 static uint16_t pad_buttons_for(const PlayerInput& p, int player) {
-    if (p.kind == 1) return pad_from_keyboard(player);
+    if (player_uses_keyboard(p)) return pad_from_keyboard(player);
     if (p.kind >= 2 && p.kind <= 4) return physical_pad_buttons(p);
     return 0xFFFF;
 }
@@ -1906,11 +1998,11 @@ static uint16_t pad_buttons_for(const PlayerInput& p, int player) {
  * — they are that player's only stick source. */
 static void pad_sticks_for(const PlayerInput& p, int player, uint8_t out[4], bool fold_dpad) {
     out[0] = out[1] = out[2] = out[3] = 0x80;
-    if (p.kind == 1) {
+    if (player_uses_keyboard(p)) {
         /* Keyboard analog: the configurable left/right stick-direction binds
          * (default = arrow keys on the LEFT stick; RIGHT stick unbound), so the
          * old keyboard analog behaviour is preserved unless the user rebinds. */
-        const Uint8* keys = SDL_GetKeyboardState(NULL);
+        const Uint8* keys = host_keyboard_state();
         psx_keybinds_sticks(keys, player, out);
         return;
     }
@@ -1988,8 +2080,8 @@ static bool hybrid_dpad_active(const PlayerInput& p, int player, bool kb_always)
         }
     }
 #endif
-    if (p.kind == 1 || kb_always) {
-        const Uint8* keys = SDL_GetKeyboardState(NULL);
+    if (player_uses_keyboard(p) || kb_always) {
+        const Uint8* keys = host_keyboard_state();
         if (psx_keybinds_dpad_active(keys, player)) return true;
     }
     return false;
@@ -2142,7 +2234,7 @@ static void sample_pad_into_sio(int override) {
          * active-low, so AND combines "pressed on either source"). In dev mode P1
          * also folds in the keyboard binds and EVERY connected controller. */
         uint16_t btn = (p.kind != 0) ? pad_buttons_for(p, player) : (uint16_t)0xFFFF;
-        if (p.kind == 1 || dev_here)
+        if (player_uses_keyboard(p) || dev_here)
             btn &= (uint16_t)~g_keyboard_edge_mask[s];
         if (dev_here) {
             btn &= pad_from_keyboard(1);           /* keyboard drives P1 binds     */
@@ -2181,7 +2273,7 @@ static void sample_pad_into_sio(int override) {
          * sticks onto the analog stick, so an analog-mode P1 steers from whatever
          * is plugged in (P1 binds). */
         if (dev_here && eff_analog) {
-            const Uint8* keys = SDL_GetKeyboardState(NULL);
+            const Uint8* keys = host_keyboard_state();
             psx_keybinds_sticks(keys, 1, st);
             dev_any_controller_sticks(st);
         }
@@ -2479,7 +2571,14 @@ static void sdl_vblank_present(void) {
                     close_controller();
                     refresh_player_devices();
                 }
+            } else if (ev.type == SDL_WINDOWEVENT &&
+                       ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                host_keyboard_reset();
+            } else if (ev.type == SDL_KEYUP) {
+                host_keyboard_event(ev.key, false);
             } else if (ev.type == SDL_KEYDOWN) {
+                host_keyboard_event(ev.key, true);
+                const SDL_Scancode event_scancode = host_event_scancode(ev.key);
                 const Uint16 mod = ev.key.keysym.mod;
                 bool shortcut = false;
                 /* Save states: Shift+F1-F12 = save slot 0-11, F1-F12 = load.
@@ -2506,14 +2605,14 @@ static void sdl_vblank_present(void) {
                     uint16_t p1_mask = 0;
                     for (int s = 0; s < 2; s++) {
                         uint16_t mask = psx_keybinds_button_mask_for_scancode(
-                            ev.key.keysym.scancode, s + 1);
+                            event_scancode, s + 1);
                         if (s == 0) p1_mask = mask;
                         if (mask) {
                             g_keyboard_edge_mask[s] |= mask;
                             g_keyboard_edge_frames[s] = 3;
                         }
                     }
-                    frontend_input_trace_note(1, ev.key.keysym.scancode,
+                    frontend_input_trace_note(1, event_scancode,
                                               p1_mask, g_frontend_last_pad);
                 }
             }
@@ -2629,7 +2728,7 @@ static void sdl_vblank_present(void) {
      * CPU sustains without graphics-driver vsync overhead. Present once
      * every TURBO_PRESENT_EVERY frames so the user sees visual progress. */
     {
-        const Uint8* keys = SDL_GetKeyboardState(NULL);
+        const Uint8* keys = host_keyboard_state();
         static int turbo_skip = 0;
         const int TURBO_PRESENT_EVERY = 30;
         if (keys[SDL_SCANCODE_TAB]) {
@@ -3594,6 +3693,8 @@ int main(int argc, char** argv) {
         force_launcher ||
         (!std::getenv("PSX_NO_LAUNCHER") && !force_no_launcher && !skip_launcher_setting);
     if (want_launcher) {
+        load_external_controller_mappings(argv[0]);
+        configure_sdl_input_hints();
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) == 0) {
             PSXRecompV4::UserSettings seed;
             seed.renderer = g_video_renderer;             seed.has_renderer = true;
@@ -3899,22 +4000,13 @@ int main(int argc, char** argv) {
      * antialiasing is on so the (super)sampled frame stays smooth when the
      * window is resized; nearest preserves crisp pixels otherwise. */
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, g_video_aa ? "1" : "0");
-    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-    /* Prefer SDL's own HIDAPI driver over platform-native so Steam's virtual
-     * Xbox controller (injected by Steam Input / Remote Play) is enumerated
-     * as a game controller rather than a raw HID device. */
-    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
-    SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
-    /* ...but HIDAPI's Xbox sub-driver is OFF by default on Windows (Xbox pads are
-     * normally RAWINPUT/XInput there). With RAWINPUT disabled above, a PHYSICAL
-     * Xbox One/Series controller would be claimed by nobody -> not a GameController
-     * -> zero input (PS5 DualSense works regardless: its HIDAPI driver is on by
-     * default). Enable the HIDAPI Xbox driver so HIDAPI handles Xbox pads too. */
-    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_XBOX, "1");
+    load_external_controller_mappings(argv[0]);
+    configure_sdl_input_hints();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+    host_keyboard_reset();
     load_input_config(argv[0]);
     /* The launcher / settings.toml / game.toml deadzone (when set) is the
      * user-facing authority; apply it over the input.ini value here, after

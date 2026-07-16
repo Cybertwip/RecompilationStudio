@@ -1,6 +1,8 @@
 ﻿cmake_minimum_required(VERSION 3.20)
 project(psxrecomp-runtime C CXX)
 
+include(CTest)
+
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -57,4 +59,17 @@ if(PSXRECOMP_GIP_GAMEPAD_AVAILABLE)
     psxrecomp_configure_gip_gamepad(gip_gamepad_protocol_test)
     enable_testing()
     add_test(NAME gip_gamepad_protocol COMMAND gip_gamepad_protocol_test)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(host_input_policy_test
+        tests/host_input_policy_test.cpp
+        src/psx_keybinds.c
+    )
+    target_include_directories(host_input_policy_test PRIVATE
+        include
+        ${SDL2_INCLUDE_DIRS}
+    )
+    target_link_libraries(host_input_policy_test PRIVATE ${SDL2_LIBRARIES})
+    add_test(NAME host_input_policy COMMAND host_input_policy_test)
 endif()

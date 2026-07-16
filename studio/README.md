@@ -59,8 +59,11 @@ Linux exports additionally require the tools named
 file for these programs. It uses checksum-pinned SDL2 2.32.10 headers and a
 checksum-pinned manylinux x86-64 SDL2 runtime, statically links the GCC and C++
 runtimes, and bundles SDL2 beside the executable with an `$ORIGIN` runtime
-path. The resulting package targets glibc 2.28 or newer and is verified to have
-no non-system shared-library dependency outside the bundled SDL2 runtime.
+path. Linux input uses SDL's kernel evdev path rather than direct HIDRAW access,
+loads a checksum-pinned SDL GameController mapping database, and routes Player
+1's `auto` selection to the keyboard whenever no physical controller is live.
+The resulting package targets glibc 2.28 or newer and is verified to have no
+non-system shared-library dependency outside the bundled SDL2 runtime.
 
 Qt is bundled into the distributed Studio app. Qt is not linked into generated
 game apps; those use the PSXRecomp SDL runtime.
@@ -89,7 +92,8 @@ game apps; those use the PSXRecomp SDL runtime.
     selects the installed MinGW-w64 toolchain, embeds a Windows icon, statically
     links SDL2, and rejects non-system runtime DLL imports. The Linux path
     selects the installed `x86_64-unknown-linux-gnu` toolchain, bundles SDL2,
-    and rejects unexpected ELF dependencies or glibc requirements above 2.28.
+    verifies the controller database, and rejects unexpected ELF dependencies
+    or glibc requirements above 2.28.
 11. For macOS, import the normalized PFX into an isolated temporary keychain,
     sign every nested Mach-O, and sign the app with Hardened Runtime, a secure
     timestamp, and the narrow `disable-library-validation` entitlement required
@@ -138,11 +142,13 @@ Linux exports use:
 Game Name-Linux/
   Game Name
   libSDL2-2.0.so.0
+  gamecontrollerdb.txt
   AppIcon.png
   game.toml
   PSXRecomp-Proof.zip
   licenses/SDL2.txt
   licenses/pysdl2-dll.txt
+  licenses/SDL_GameControllerDB.txt
   bios/SCPH1001.BIN
   game/<serial boot EXE>
   disc/<CUE and referenced BIN files>

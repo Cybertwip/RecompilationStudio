@@ -44,6 +44,15 @@ constexpr auto kLinuxSdl2WheelSha256 =
   "1e6139e3ce832d95d8376b77f4c9288bef34d6b131f844f2a5fcc8873ce8e6da";
 constexpr auto kLinuxSdl2LibrarySha256 =
   "0d7d4648b31ebabb8943d9cd5e72f15b74b5e0369c43dfa603202adf1aead69c";
+constexpr auto kLinuxControllerDbCommit =
+  "8d9fefd7b810f2541f78cc7a8ccbd185bc84c7a5";
+constexpr auto kLinuxControllerDbUrl =
+  "https://github.com/mdqinc/SDL_GameControllerDB/archive/"
+  "8d9fefd7b810f2541f78cc7a8ccbd185bc84c7a5.tar.gz";
+constexpr auto kLinuxControllerDbArchiveSha256 =
+  "e260456d9c7bdff5f2f8a0db0f772316b44d3e4f7833f72ff8328e95b30eb0ec";
+constexpr auto kLinuxControllerDbSha256 =
+  "dd4dd9dcb458aa4fbfd9b37ccdd4884b1e2e258edf8a16c3c4df3e77ac5174a0";
 
 QString cleanBundleName(QString title) {
   title = title.trimmed();
@@ -380,6 +389,18 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("  INTERFACE_INCLUDE_DIRECTORIES \"${sdl2source_SOURCE_DIR}/include\")\n");
     cmake += QStringLiteral("set(SDL2_INCLUDE_DIRS \"${sdl2source_SOURCE_DIR}/include\")\n");
     cmake += QStringLiteral("set(SDL2_LIBRARIES PSXSDL2)\n");
+    cmake += QStringLiteral("FetchContent_Declare(PSXControllerDB\n");
+    cmake += QStringLiteral("  URL %1\n")
+               .arg(cmakeQuoted(QString::fromLatin1(kLinuxControllerDbUrl)));
+    cmake += QStringLiteral("  URL_HASH SHA256=%1\n")
+               .arg(QString::fromLatin1(kLinuxControllerDbArchiveSha256));
+    cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
+    cmake += QStringLiteral("FetchContent_GetProperties(PSXControllerDB)\n");
+    cmake += QStringLiteral("if(NOT psxcontrollerdb_POPULATED)\n");
+    cmake += QStringLiteral("  FetchContent_Populate(PSXControllerDB)\nendif()\n");
+    cmake += QStringLiteral("set(_PSX_CONTROLLER_DB \"${psxcontrollerdb_SOURCE_DIR}/gamecontrollerdb.txt\")\n");
+    cmake += QStringLiteral("if(NOT EXISTS \"${_PSX_CONTROLLER_DB}\")\n");
+    cmake += QStringLiteral("  message(FATAL_ERROR \"The pinned controller database archive is incomplete\")\nendif()\n");
     cmake += QStringLiteral("set(THREADS_PREFER_PTHREAD_FLAG ON)\n");
     cmake += QStringLiteral("find_package(Threads REQUIRED)\n");
     cmake += QStringLiteral("set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)\n");
@@ -427,9 +448,11 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("target_link_options(psx-runtime PRIVATE -static-libgcc -static-libstdc++ -Wl,-z,origin)\n");
     cmake += QStringLiteral("install(TARGETS psx-runtime RUNTIME DESTINATION .)\n");
     cmake += QStringLiteral("install(FILES \"${_PSX_SDL2_LIBRARY}\" DESTINATION . RENAME \"libSDL2-2.0.so.0\")\n");
+    cmake += QStringLiteral("install(FILES \"${_PSX_CONTROLLER_DB}\" DESTINATION .)\n");
     cmake += QStringLiteral("install(FILES %1 DESTINATION .)\n").arg(cmakeQuoted(iconPath));
     cmake += QStringLiteral("install(FILES \"${sdl2source_SOURCE_DIR}/LICENSE.txt\" DESTINATION licenses RENAME \"SDL2.txt\")\n");
     cmake += QStringLiteral("install(FILES \"${sdl2linux_SOURCE_DIR}/pysdl2_dll-2.32.10.dist-info/licenses/LICENSE\" DESTINATION licenses RENAME \"pysdl2-dll.txt\")\n");
+    cmake += QStringLiteral("install(FILES \"${psxcontrollerdb_SOURCE_DIR}/LICENSE\" DESTINATION licenses RENAME \"SDL_GameControllerDB.txt\")\n");
   } else {
     cmake += QStringLiteral("set_source_files_properties(%1 PROPERTIES MACOSX_PACKAGE_LOCATION \"Resources\")\n")
                .arg(cmakeQuoted(iconPath));
@@ -1612,6 +1635,14 @@ void PipelineWorker::run(PipelineRequest request) {
         ? QString::fromLatin1(kSdl2SourceUrl) : QString() },
     { QStringLiteral("sdl2_library_sha256"), linuxTarget
         ? QString::fromLatin1(kLinuxSdl2LibrarySha256) : QString() },
+    { QStringLiteral("controller_db_commit"), linuxTarget
+        ? QString::fromLatin1(kLinuxControllerDbCommit) : QString() },
+    { QStringLiteral("controller_db_url"), linuxTarget
+        ? QString::fromLatin1(kLinuxControllerDbUrl) : QString() },
+    { QStringLiteral("controller_db_archive_sha256"), linuxTarget
+        ? QString::fromLatin1(kLinuxControllerDbArchiveSha256) : QString() },
+    { QStringLiteral("controller_db_sha256"), linuxTarget
+        ? QString::fromLatin1(kLinuxControllerDbSha256) : QString() },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("build_manifest.json")), buildManifest, error)) {
     fail(error, workspace);
@@ -1749,8 +1780,11 @@ void PipelineWorker::run(PipelineRequest request) {
   if (linuxTarget) {
     nextStage(QStringLiteral("Verify Linux package"));
     const QString stagedSdl = QDir(stageDir).filePath(QStringLiteral("libSDL2-2.0.so.0"));
-    if (!QFileInfo(mainExecutable).isExecutable() || !QFileInfo(stagedSdl).isFile()) {
-      fail(QStringLiteral("The staged Linux package is missing its executable or bundled SDL2 runtime."),
+    const QString stagedControllerDb =
+      QDir(stageDir).filePath(QStringLiteral("gamecontrollerdb.txt"));
+    if (!QFileInfo(mainExecutable).isExecutable() || !QFileInfo(stagedSdl).isFile() ||
+        !QFileInfo(stagedControllerDb).isFile()) {
+      fail(QStringLiteral("The staged Linux package is missing its executable, SDL2 runtime, or controller database."),
            workspace);
       return;
     }
@@ -1871,11 +1905,14 @@ void PipelineWorker::run(PipelineRequest request) {
 
     const QString stagedExeHash = sha256File(mainExecutable, error);
     const QString stagedSdlHash = sha256File(stagedSdl, error);
+    const QString stagedControllerDbHash = sha256File(stagedControllerDb, error);
     if (stagedExeHash.isEmpty() ||
         stagedSdlHash.compare(QString::fromLatin1(kLinuxSdl2LibrarySha256),
-                              Qt::CaseInsensitive) != 0) {
+                              Qt::CaseInsensitive) != 0 ||
+        stagedControllerDbHash.compare(QString::fromLatin1(kLinuxControllerDbSha256),
+                                       Qt::CaseInsensitive) != 0) {
       fail(error.isEmpty()
-             ? QStringLiteral("The bundled Linux SDL2 runtime does not match the pinned artifact.")
+             ? QStringLiteral("A bundled Linux input dependency does not match its pinned artifact.")
              : error,
            workspace);
       return;
@@ -1902,6 +1939,12 @@ void PipelineWorker::run(PipelineRequest request) {
       { QStringLiteral("sdl2"), QFileInfo(stagedSdl).fileName() },
       { QStringLiteral("sdl2_sha256"), stagedSdlHash },
       { QStringLiteral("sdl2_needed_libraries"), sdlNeededJson },
+      { QStringLiteral("controller_backend"), QStringLiteral("SDL evdev (HIDAPI disabled on Linux)") },
+      { QStringLiteral("controller_db"), QFileInfo(stagedControllerDb).fileName() },
+      { QStringLiteral("controller_db_commit"), QString::fromLatin1(kLinuxControllerDbCommit) },
+      { QStringLiteral("controller_db_sha256"), stagedControllerDbHash },
+      { QStringLiteral("automatic_keyboard_fallback"), true },
+      { QStringLiteral("event_backed_keyboard_state"), true },
       { QStringLiteral("origin_runtime_path"), true },
       { QStringLiteral("gcc_and_cxx_runtimes_static"), true },
       { QStringLiteral("signed"), false },
@@ -1932,11 +1975,14 @@ void PipelineWorker::run(PipelineRequest request) {
     const QString deliveredStagingExe = QDir(deliveryPackage).filePath(bundleName);
     const QString deliveredStagingSdl = QDir(deliveryPackage).filePath(
       QStringLiteral("libSDL2-2.0.so.0"));
+    const QString deliveredStagingControllerDb = QDir(deliveryPackage).filePath(
+      QStringLiteral("gamecontrollerdb.txt"));
     if (sha256File(deliveredStagingExe, error) != stagedExeHash ||
         sha256File(deliveredStagingSdl, error) != stagedSdlHash ||
+        sha256File(deliveredStagingControllerDb, error) != stagedControllerDbHash ||
         !QFileInfo(deliveredStagingExe).isExecutable()) {
       QDir(deliveryPackage).removeRecursively();
-      fail(QStringLiteral("The Linux executable or SDL2 runtime changed while staging the package for delivery."),
+      fail(QStringLiteral("A verified Linux executable or input dependency changed while staging the package for delivery."),
            workspace);
       return;
     }
@@ -1962,8 +2008,11 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     const QString outputExe = QDir(outputPackage).filePath(bundleName);
     const QString outputSdl = QDir(outputPackage).filePath(QStringLiteral("libSDL2-2.0.so.0"));
+    const QString outputControllerDb =
+      QDir(outputPackage).filePath(QStringLiteral("gamecontrollerdb.txt"));
     const bool deliveryVerified = sha256File(outputExe, error) == stagedExeHash &&
       sha256File(outputSdl, error) == stagedSdlHash &&
+      sha256File(outputControllerDb, error) == stagedControllerDbHash &&
       QFileInfo(outputExe).isExecutable() &&
       QFileInfo(QDir(outputPackage).filePath(QStringLiteral("PSXRecomp-Proof.zip"))).isFile();
     if (!deliveryVerified) {

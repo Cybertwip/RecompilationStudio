@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -18,6 +19,17 @@ struct Check {
     bool passed;
 };
 
+struct HardwareMetrics {
+    bool requested = false;
+    bool connected = false;
+    bool state_read = false;
+    int soak_ms = 0;
+    uint64_t connection_transitions = 0;
+    uint64_t disconnected_ms = 0;
+    uint64_t maximum_disconnected_span_ms = 0;
+    PsxGipGamepadDiagnostics diagnostics{};
+};
+
 void append_u16(std::vector<uint8_t>* packet, uint16_t value) {
     packet->push_back(static_cast<uint8_t>(value & 0xFFu));
     packet->push_back(static_cast<uint8_t>(value >> 8));
@@ -27,12 +39,24 @@ void append_s16(std::vector<uint8_t>* packet, int16_t value) {
     append_u16(packet, static_cast<uint16_t>(value));
 }
 
+const char* failure_stage_name(PsxGipFailureStage stage) {
+    switch (stage) {
+    case PSX_GIP_FAILURE_NONE:              return "none";
+    case PSX_GIP_FAILURE_OPEN_DEVICE:       return "open_device";
+    case PSX_GIP_FAILURE_CONFIGURE:         return "configure";
+    case PSX_GIP_FAILURE_CLAIM_INTERFACE:   return "claim_interface";
+    case PSX_GIP_FAILURE_INITIALIZE_READ:   return "initialize_read";
+    case PSX_GIP_FAILURE_INITIALIZE_WRITE:  return "initialize_write";
+    case PSX_GIP_FAILURE_LIVE_READ:         return "live_read";
+    case PSX_GIP_FAILURE_ACK_WRITE:         return "ack_write";
+    }
+    return "unknown";
+}
+
 bool write_proof(const char* path,
                  const std::vector<Check>& checks,
                  size_t enumerated_devices,
-                 bool hardware_requested,
-                 bool hardware_connected,
-                 bool hardware_state_read) {
+                 const HardwareMetrics& hardware) {
     if (!path || !path[0]) return true;
     std::ofstream out(path, std::ios::binary);
     if (!out) return false;
@@ -40,9 +64,10 @@ bool write_proof(const char* path,
     const libusb_version* version = libusb_get_version();
     size_t passed = 0;
     for (const Check& check : checks) if (check.passed) ++passed;
+    const PsxGipGamepadDiagnostics& d = hardware.diagnostics;
 
     out << "{\n";
-    out << "  \"schema\": 1,\n";
+    out << "  \"schema\": 2,\n";
     out << "  \"artifact\": \"macOS Xbox GIP protocol proof\",\n";
     out << "  \"date\": \"2026-07-15\",\n";
     out << "  \"libusb_version\": \""
@@ -50,11 +75,48 @@ bool write_proof(const char* path,
         << "." << version->nano << "\",\n";
     out << "  \"enumerated_supported_devices\": " << enumerated_devices << ",\n";
     out << "  \"hardware_probe_requested\": "
-        << (hardware_requested ? "true" : "false") << ",\n";
+        << (hardware.requested ? "true" : "false") << ",\n";
     out << "  \"hardware_connected\": "
-        << (hardware_connected ? "true" : "false") << ",\n";
+        << (hardware.connected ? "true" : "false") << ",\n";
     out << "  \"hardware_state_read\": "
-        << (hardware_state_read ? "true" : "false") << ",\n";
+        << (hardware.state_read ? "true" : "false") << ",\n";
+    out << "  \"hardware_soak_ms\": " << hardware.soak_ms << ",\n";
+    out << "  \"connection_transitions\": "
+        << hardware.connection_transitions << ",\n";
+    out << "  \"disconnected_ms\": " << hardware.disconnected_ms << ",\n";
+    out << "  \"maximum_disconnected_span_ms\": "
+        << hardware.maximum_disconnected_span_ms << ",\n";
+    out << "  \"transport\": {\n";
+    out << "    \"open_attempts\": " << d.open_attempts << ",\n";
+    out << "    \"open_failures\": " << d.open_failures << ",\n";
+    out << "    \"initialize_attempts\": " << d.initialize_attempts << ",\n";
+    out << "    \"initialize_failures\": " << d.initialize_failures << ",\n";
+    out << "    \"successful_connections\": " << d.successful_connections << ",\n";
+    out << "    \"disconnects\": " << d.disconnects << ",\n";
+    out << "    \"packets_received\": " << d.packets_received << ",\n";
+    out << "    \"input_packets\": " << d.input_packets << ",\n";
+    out << "    \"guide_packets\": " << d.guide_packets << ",\n";
+    out << "    \"other_packets\": " << d.other_packets << ",\n";
+    out << "    \"read_timeouts\": " << d.read_timeouts << ",\n";
+    out << "    \"read_errors\": " << d.read_errors << ",\n";
+    out << "    \"transient_read_recoveries\": "
+        << d.transient_read_recoveries << ",\n";
+    out << "    \"peak_consecutive_read_errors\": "
+        << d.peak_consecutive_read_errors << ",\n";
+    out << "    \"writes_attempted\": " << d.writes_attempted << ",\n";
+    out << "    \"write_errors\": " << d.write_errors << ",\n";
+    out << "    \"ack_requests\": " << d.ack_requests << ",\n";
+    out << "    \"ack_failures\": " << d.ack_failures << ",\n";
+    out << "    \"last_packet_age_ms\": " << d.last_packet_age_ms << ",\n";
+    out << "    \"maximum_packet_gap_ms\": " << d.maximum_packet_gap_ms << ",\n";
+    out << "    \"last_packet_command\": "
+        << static_cast<unsigned>(d.last_packet_command) << ",\n";
+    out << "    \"last_libusb_error\": " << d.last_libusb_error << ",\n";
+    out << "    \"last_libusb_error_name\": \""
+        << libusb_error_name(d.last_libusb_error) << "\",\n";
+    out << "    \"last_failure_stage\": \""
+        << failure_stage_name(d.last_failure_stage) << "\"\n";
+    out << "  },\n";
     out << "  \"checks_passed\": " << passed << ",\n";
     out << "  \"checks_total\": " << checks.size() << ",\n";
     out << "  \"checks\": [\n";
@@ -72,8 +134,14 @@ bool write_proof(const char* path,
 
 int main(int argc, char** argv) {
     const char* proof_path = argc >= 2 ? argv[1] : nullptr;
-    const bool hardware_requested = argc >= 3 &&
-                                    std::strcmp(argv[2], "--hardware") == 0;
+    HardwareMetrics hardware;
+    for (int i = 2; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--hardware") == 0) {
+            hardware.requested = true;
+        } else if (std::strcmp(argv[i], "--soak-ms") == 0 && i + 1 < argc) {
+            hardware.soak_ms = std::max(0, std::atoi(argv[++i]));
+        }
+    }
     std::vector<Check> checks;
 
     checks.push_back({"selector_auto",
@@ -165,38 +233,96 @@ int main(int argc, char** argv) {
     checks.push_back({"background_reader_lifecycle",
                       lifecycle != nullptr && lifecycle_ms < 1000});
 
-    bool hardware_connected = false;
-    bool hardware_state_read = false;
-    if (hardware_requested) {
+    if (hardware.requested) {
         checks.push_back({"hardware_device_present", enumerated_devices > 0});
     }
-    if (hardware_requested && enumerated_devices > 0) {
+    if (hardware.requested && enumerated_devices > 0) {
         PsxGipGamepad* gamepad = psx_gip_gamepad_open(devices[0].selector);
         checks.push_back({"hardware_reader_created", gamepad != nullptr});
         if (gamepad) {
             for (int i = 0; i < 800; ++i) {
                 if (psx_gip_gamepad_connection(gamepad) ==
                     PSX_GIP_CONNECTION_CONNECTED) {
-                    hardware_connected = true;
+                    hardware.connected = true;
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
+
+            if (hardware.connected && hardware.soak_ms > 0) {
+                using Clock = std::chrono::steady_clock;
+                const auto soak_start = Clock::now();
+                auto previous_tick = soak_start;
+                PsxGipGamepadConnection previous =
+                    psx_gip_gamepad_connection(gamepad);
+                bool disconnected = previous != PSX_GIP_CONNECTION_CONNECTED;
+                auto disconnected_start = soak_start;
+                while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                           Clock::now() - soak_start).count() < hardware.soak_ms) {
+                    const auto now = Clock::now();
+                    const auto elapsed = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - previous_tick).count());
+                    if (previous != PSX_GIP_CONNECTION_CONNECTED) {
+                        hardware.disconnected_ms += elapsed;
+                    }
+                    const PsxGipGamepadConnection current =
+                        psx_gip_gamepad_connection(gamepad);
+                    if (current != previous) {
+                        ++hardware.connection_transitions;
+                        if (current != PSX_GIP_CONNECTION_CONNECTED) {
+                            disconnected = true;
+                            disconnected_start = now;
+                        } else if (disconnected) {
+                            const uint64_t span = static_cast<uint64_t>(
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    now - disconnected_start).count());
+                            hardware.maximum_disconnected_span_ms = std::max(
+                                hardware.maximum_disconnected_span_ms, span);
+                            disconnected = false;
+                        }
+                    }
+                    previous = current;
+                    previous_tick = now;
+                    PsxGipGamepadState sample{};
+                    (void)psx_gip_gamepad_get_state(gamepad, &sample);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                if (disconnected) {
+                    const uint64_t span = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            Clock::now() - disconnected_start).count());
+                    hardware.maximum_disconnected_span_ms = std::max(
+                        hardware.maximum_disconnected_span_ms, span);
+                }
+            }
+
             PsxGipGamepadState hardware_state{};
-            hardware_state_read = psx_gip_gamepad_get_state(
+            hardware.state_read = psx_gip_gamepad_get_state(
                 gamepad, &hardware_state) != 0;
+            (void)psx_gip_gamepad_get_diagnostics(
+                gamepad, &hardware.diagnostics);
             psx_gip_gamepad_close(gamepad);
-            checks.push_back({"hardware_handshake", hardware_connected});
-            checks.push_back({"hardware_state_snapshot", hardware_state_read});
+            checks.push_back({"hardware_handshake", hardware.connected});
+            checks.push_back({"hardware_state_snapshot", hardware.state_read});
+            if (hardware.soak_ms > 0) {
+                checks.push_back({"hardware_soak_connection_stable",
+                                  hardware.diagnostics.disconnects == 0 &&
+                                  hardware.diagnostics.successful_connections == 1 &&
+                                  hardware.connection_transitions == 0});
+                checks.push_back({"hardware_soak_transient_errors_recovered",
+                                  hardware.diagnostics.disconnects == 0 &&
+                                  hardware.diagnostics.read_errors ==
+                                      hardware.diagnostics.transient_read_recoveries &&
+                                  hardware.diagnostics.write_errors == 0 &&
+                                  hardware.diagnostics.ack_failures == 0});
+            }
         }
     }
 
     bool passed = true;
     for (const Check& check : checks) passed = passed && check.passed;
-    const bool proof_written = write_proof(proof_path, checks,
-                                           enumerated_devices,
-                                           hardware_requested,
-                                           hardware_connected,
-                                           hardware_state_read);
+    const bool proof_written = write_proof(
+        proof_path, checks, enumerated_devices, hardware);
     return passed && proof_written ? 0 : 1;
 }

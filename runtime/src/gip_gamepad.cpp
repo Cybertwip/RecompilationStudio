@@ -166,6 +166,90 @@ enum class ReadResult {
     Error
 };
 
+struct TransportDiagnostics {
+    std::atomic<uint64_t> open_attempts{0};
+    std::atomic<uint64_t> open_failures{0};
+    std::atomic<uint64_t> initialize_attempts{0};
+    std::atomic<uint64_t> initialize_failures{0};
+    std::atomic<uint64_t> successful_connections{0};
+    std::atomic<uint64_t> disconnects{0};
+    std::atomic<uint64_t> packets_received{0};
+    std::atomic<uint64_t> input_packets{0};
+    std::atomic<uint64_t> guide_packets{0};
+    std::atomic<uint64_t> other_packets{0};
+    std::atomic<uint64_t> read_timeouts{0};
+    std::atomic<uint64_t> read_errors{0};
+    std::atomic<uint64_t> transient_read_recoveries{0};
+    std::atomic<uint64_t> peak_consecutive_read_errors{0};
+    std::atomic<uint64_t> writes_attempted{0};
+    std::atomic<uint64_t> write_errors{0};
+    std::atomic<uint64_t> ack_requests{0};
+    std::atomic<uint64_t> ack_failures{0};
+    std::atomic<uint64_t> last_packet_time_ms{0};
+    std::atomic<uint64_t> maximum_packet_gap_ms{0};
+    std::atomic<int32_t> last_libusb_error{LIBUSB_SUCCESS};
+    std::atomic<int> last_failure_stage{PSX_GIP_FAILURE_NONE};
+    std::atomic<uint8_t> last_packet_command{0};
+};
+
+uint64_t monotonic_ms() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void note_failure(TransportDiagnostics* diagnostics,
+                  PsxGipFailureStage stage,
+                  int libusb_error) {
+    if (!diagnostics) return;
+    diagnostics->last_failure_stage.store(stage, std::memory_order_release);
+    diagnostics->last_libusb_error.store(libusb_error, std::memory_order_release);
+}
+
+bool recoverable_live_read_error(int error) {
+    return error == LIBUSB_ERROR_IO ||
+           error == LIBUSB_ERROR_INTERRUPTED ||
+           error == LIBUSB_ERROR_OVERFLOW ||
+           error == LIBUSB_ERROR_PIPE;
+}
+
+void note_consecutive_read_errors(TransportDiagnostics* diagnostics,
+                                  uint64_t consecutive) {
+    if (!diagnostics) return;
+    uint64_t peak = diagnostics->peak_consecutive_read_errors.load(
+        std::memory_order_relaxed);
+    while (consecutive > peak &&
+           !diagnostics->peak_consecutive_read_errors.compare_exchange_weak(
+               peak, consecutive, std::memory_order_relaxed)) {
+    }
+}
+
+void note_packet(TransportDiagnostics* diagnostics,
+                 const std::vector<uint8_t>& packet) {
+    if (!diagnostics || packet.empty()) return;
+    diagnostics->packets_received.fetch_add(1, std::memory_order_relaxed);
+    diagnostics->last_packet_command.store(packet[0], std::memory_order_release);
+    if (packet[0] == kGipCommandInput) {
+        diagnostics->input_packets.fetch_add(1, std::memory_order_relaxed);
+    } else if (packet[0] == kGipCommandGuide) {
+        diagnostics->guide_packets.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        diagnostics->other_packets.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    const uint64_t now = monotonic_ms();
+    const uint64_t previous = diagnostics->last_packet_time_ms.exchange(
+        now, std::memory_order_acq_rel);
+    if (previous != 0 && now >= previous) {
+        const uint64_t gap = now - previous;
+        uint64_t maximum = diagnostics->maximum_packet_gap_ms.load(
+            std::memory_order_relaxed);
+        while (gap > maximum &&
+               !diagnostics->maximum_packet_gap_ms.compare_exchange_weak(
+                   maximum, gap, std::memory_order_relaxed)) {
+        }
+    }
+}
+
 void close_usb(UsbConnection* connection) {
     if (!connection) return;
     if (connection->handle) {
@@ -220,19 +304,38 @@ int transfer_out(UsbConnection& connection, const uint8_t* data, int size,
     return LIBUSB_ERROR_NOT_SUPPORTED;
 }
 
-bool send_packet(UsbConnection& connection, const uint8_t* packet, size_t size) {
+bool send_packet(UsbConnection& connection, const uint8_t* packet, size_t size,
+                 TransportDiagnostics* diagnostics,
+                 PsxGipFailureStage failure_stage) {
+    if (diagnostics) {
+        diagnostics->writes_attempted.fetch_add(1, std::memory_order_relaxed);
+    }
     if (!connection.handle || !connection.endpoint_out || !packet || size == 0 ||
         size > static_cast<size_t>(0x7FFFFFFF)) {
+        if (diagnostics) {
+            diagnostics->write_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+        note_failure(diagnostics, failure_stage, LIBUSB_ERROR_INVALID_PARAM);
         return false;
     }
     int transferred = 0;
     const int rc = transfer_out(connection, packet, static_cast<int>(size),
                                 &transferred, 200);
-    return rc == LIBUSB_SUCCESS && transferred == static_cast<int>(size);
+    if (rc != LIBUSB_SUCCESS || transferred != static_cast<int>(size)) {
+        if (diagnostics) {
+            diagnostics->write_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+        note_failure(diagnostics, failure_stage,
+                     rc == LIBUSB_SUCCESS ? LIBUSB_ERROR_IO : rc);
+        return false;
+    }
+    return true;
 }
 
 ReadResult read_packet(UsbConnection& connection, std::vector<uint8_t>* packet,
-                       unsigned timeout_ms) {
+                       unsigned timeout_ms,
+                       TransportDiagnostics* diagnostics,
+                       PsxGipFailureStage failure_stage) {
     if (!packet || !connection.handle || !connection.endpoint_in) {
         return ReadResult::Error;
     }
@@ -243,32 +346,47 @@ ReadResult read_packet(UsbConnection& connection, std::vector<uint8_t>* packet,
     const int rc = transfer_in(connection, packet->data(),
                                static_cast<int>(packet->size()),
                                &transferred, timeout_ms);
-    if (rc == LIBUSB_ERROR_TIMEOUT) {
-        packet->clear();
-        return ReadResult::Timeout;
-    }
-    if (rc == LIBUSB_ERROR_INTERRUPTED) {
+    if (rc == LIBUSB_ERROR_TIMEOUT || rc == LIBUSB_ERROR_INTERRUPTED) {
+        if (diagnostics) {
+            diagnostics->read_timeouts.fetch_add(1, std::memory_order_relaxed);
+        }
         packet->clear();
         return ReadResult::Timeout;
     }
     if (rc != LIBUSB_SUCCESS || transferred <= 0) {
+        if (diagnostics) {
+            diagnostics->read_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+        note_failure(diagnostics, failure_stage,
+                     rc == LIBUSB_SUCCESS ? LIBUSB_ERROR_IO : rc);
         packet->clear();
         return ReadResult::Error;
     }
     packet->resize(static_cast<size_t>(transferred));
+    note_packet(diagnostics, *packet);
     return ReadResult::Packet;
 }
 
 bool ack_if_needed(UsbConnection& connection,
                    const std::vector<uint8_t>& packet,
-                   uint8_t* sequence) {
+                   uint8_t* sequence,
+                   TransportDiagnostics* diagnostics) {
     if (!sequence) return false;
     uint8_t ack[13] = {0};
     const uint8_t next = static_cast<uint8_t>(*sequence + 1u);
     const size_t ack_size = psx_gip_gamepad_build_ack(
         next, packet.data(), packet.size(), ack);
     if (ack_size == 0) return true;
-    if (!send_packet(connection, ack, ack_size)) return false;
+    if (diagnostics) {
+        diagnostics->ack_requests.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!send_packet(connection, ack, ack_size, diagnostics,
+                     PSX_GIP_FAILURE_ACK_WRITE)) {
+        if (diagnostics) {
+            diagnostics->ack_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+        return false;
+    }
     *sequence = next;
     return true;
 }
@@ -289,51 +407,65 @@ bool drain_setup_packets(UsbConnection& connection,
                          int maximum_packets,
                          unsigned timeout_ms,
                          uint8_t* sequence,
-                         const std::atomic<bool>* stop) {
+                         const std::atomic<bool>* stop,
+                         TransportDiagnostics* diagnostics) {
     std::vector<uint8_t> packet;
     for (int i = 0; i < maximum_packets && !stop_requested(stop); ++i) {
-        const ReadResult result = read_packet(connection, &packet, timeout_ms);
+        const ReadResult result = read_packet(
+            connection, &packet, timeout_ms, diagnostics,
+            PSX_GIP_FAILURE_INITIALIZE_READ);
         if (result == ReadResult::Timeout) return true;
         if (result == ReadResult::Error) return false;
-        if (!ack_if_needed(connection, packet, sequence)) return false;
+        if (!ack_if_needed(connection, packet, sequence, diagnostics)) return false;
     }
     return !stop_requested(stop);
 }
 
 bool initialize_gip(UsbConnection& connection, uint8_t* sequence,
-                    const std::atomic<bool>* stop) {
+                    const std::atomic<bool>* stop,
+                    TransportDiagnostics* diagnostics) {
     std::vector<uint8_t> packet;
     for (int i = 0; i < 50 && !stop_requested(stop); ++i) {
-        const ReadResult result = read_packet(connection, &packet, 100);
+        const ReadResult result = read_packet(
+            connection, &packet, 100, diagnostics,
+            PSX_GIP_FAILURE_INITIALIZE_READ);
         if (result == ReadResult::Error) return false;
         if (result == ReadResult::Timeout) continue;
-        if (!ack_if_needed(connection, packet, sequence)) return false;
+        if (!ack_if_needed(connection, packet, sequence, diagnostics)) return false;
         if (packet.size() >= 4 && packet[0] == kGipCommandAnnounce) break;
     }
     if (stop_requested(stop)) return false;
 
     short_sleep(stop, 20);
     if (stop_requested(stop) ||
-        !send_packet(connection, kInitPower, sizeof(kInitPower))) return false;
+        !send_packet(connection, kInitPower, sizeof(kInitPower), diagnostics,
+                     PSX_GIP_FAILURE_INITIALIZE_WRITE)) return false;
     short_sleep(stop, 50);
-    if (!drain_setup_packets(connection, 30, 80, sequence, stop)) return false;
+    if (!drain_setup_packets(connection, 30, 80, sequence, stop,
+                             diagnostics)) return false;
 
     if (stop_requested(stop) ||
-        !send_packet(connection, kInitLong, sizeof(kInitLong))) return false;
+        !send_packet(connection, kInitLong, sizeof(kInitLong), diagnostics,
+                     PSX_GIP_FAILURE_INITIALIZE_WRITE)) return false;
     short_sleep(stop, 50);
-    if (!drain_setup_packets(connection, 30, 80, sequence, stop)) return false;
+    if (!drain_setup_packets(connection, 30, 80, sequence, stop,
+                             diagnostics)) return false;
 
     if (stop_requested(stop) ||
-        !send_packet(connection, kPdpLed, sizeof(kPdpLed))) return false;
+        !send_packet(connection, kPdpLed, sizeof(kPdpLed), diagnostics,
+                     PSX_GIP_FAILURE_INITIALIZE_WRITE)) return false;
     short_sleep(stop, 30);
     if (stop_requested(stop) ||
-        !send_packet(connection, kPdpAuth1, sizeof(kPdpAuth1))) return false;
+        !send_packet(connection, kPdpAuth1, sizeof(kPdpAuth1), diagnostics,
+                     PSX_GIP_FAILURE_INITIALIZE_WRITE)) return false;
     short_sleep(stop, 30);
     if (stop_requested(stop) ||
-        !send_packet(connection, kPdpAuth2, sizeof(kPdpAuth2))) return false;
+        !send_packet(connection, kPdpAuth2, sizeof(kPdpAuth2), diagnostics,
+                     PSX_GIP_FAILURE_INITIALIZE_WRITE)) return false;
     short_sleep(stop, 30);
 
-    return drain_setup_packets(connection, 30, 50, sequence, stop);
+    return drain_setup_packets(connection, 30, 50, sequence, stop,
+                               diagnostics);
 }
 
 bool find_endpoints(const libusb_config_descriptor* config,
@@ -386,7 +518,8 @@ bool find_endpoints(const libusb_config_descriptor* config,
 }
 
 bool open_usb(libusb_context* context, const std::string& selector,
-              UsbConnection* connection) {
+              UsbConnection* connection,
+              TransportDiagnostics* diagnostics) {
     if (!context || !connection) return false;
 
     uint16_t wanted_vendor = 0;
@@ -397,7 +530,11 @@ bool open_usb(libusb_context* context, const std::string& selector,
 
     libusb_device** devices = nullptr;
     const ssize_t count = libusb_get_device_list(context, &devices);
-    if (count < 0 || !devices) return false;
+    if (count < 0 || !devices) {
+        note_failure(diagnostics, PSX_GIP_FAILURE_OPEN_DEVICE,
+                     count < 0 ? static_cast<int>(count) : LIBUSB_ERROR_IO);
+        return false;
+    }
 
     libusb_device* exact = nullptr;
     libusb_device* product_fallback = nullptr;
@@ -420,6 +557,7 @@ bool open_usb(libusb_context* context, const std::string& selector,
     const int open_rc = selected ? libusb_open(selected, &handle)
                                  : LIBUSB_ERROR_NO_DEVICE;
     if (open_rc != LIBUSB_SUCCESS || !handle) {
+        note_failure(diagnostics, PSX_GIP_FAILURE_OPEN_DEVICE, open_rc);
         libusb_free_device_list(devices, 1);
         return false;
     }
@@ -437,8 +575,11 @@ bool open_usb(libusb_context* context, const std::string& selector,
             int current_configuration = 0;
             if (libusb_get_configuration(handle, &current_configuration) != LIBUSB_SUCCESS ||
                 current_configuration != config->bConfigurationValue) {
-                if (libusb_set_configuration(handle, config->bConfigurationValue) !=
-                    LIBUSB_SUCCESS) {
+                const int set_config_rc = libusb_set_configuration(
+                    handle, config->bConfigurationValue);
+                if (set_config_rc != LIBUSB_SUCCESS) {
+                    note_failure(diagnostics, PSX_GIP_FAILURE_CONFIGURE,
+                                 set_config_rc);
                     libusb_free_config_descriptor(config);
                     libusb_close(handle);
                     libusb_free_device_list(devices, 1);
@@ -459,22 +600,28 @@ bool open_usb(libusb_context* context, const std::string& selector,
         &endpoint_in, &transfer_type_in, &max_packet_in,
         &endpoint_out, &transfer_type_out);
     if (!endpoints_ok) {
+        note_failure(diagnostics, PSX_GIP_FAILURE_CONFIGURE,
+                     LIBUSB_ERROR_NOT_FOUND);
         if (config) libusb_free_config_descriptor(config);
         libusb_close(handle);
         libusb_free_device_list(devices, 1);
         return false;
     }
 
-    if (libusb_claim_interface(handle, kGipInterface) != LIBUSB_SUCCESS) {
+    const int claim_rc = libusb_claim_interface(handle, kGipInterface);
+    if (claim_rc != LIBUSB_SUCCESS) {
+        note_failure(diagnostics, PSX_GIP_FAILURE_CLAIM_INTERFACE, claim_rc);
         if (config) libusb_free_config_descriptor(config);
         libusb_close(handle);
         libusb_free_device_list(devices, 1);
         return false;
     }
-    if (interface_descriptor->bAlternateSetting != 0 &&
-        libusb_set_interface_alt_setting(handle, kGipInterface,
-                                         interface_descriptor->bAlternateSetting) !=
-            LIBUSB_SUCCESS) {
+    const int alt_setting_rc = interface_descriptor->bAlternateSetting != 0
+        ? libusb_set_interface_alt_setting(
+              handle, kGipInterface, interface_descriptor->bAlternateSetting)
+        : LIBUSB_SUCCESS;
+    if (alt_setting_rc != LIBUSB_SUCCESS) {
+        note_failure(diagnostics, PSX_GIP_FAILURE_CONFIGURE, alt_setting_rc);
         libusb_release_interface(handle, kGipInterface);
         if (config) libusb_free_config_descriptor(config);
         libusb_close(handle);
@@ -513,6 +660,7 @@ struct PsxGipGamepad {
     std::atomic<PsxGipGamepadConnection> connection{PSX_GIP_CONNECTION_SEARCHING};
     mutable std::mutex state_mutex;
     PsxGipGamepadState state{};
+    TransportDiagnostics diagnostics;
     std::thread worker;
 };
 
@@ -538,7 +686,11 @@ void gamepad_worker(PsxGipGamepad* gamepad) {
         UsbConnection usb;
         gamepad->connection.store(PSX_GIP_CONNECTION_SEARCHING,
                                   std::memory_order_release);
-        if (!open_usb(context, gamepad->selector, &usb)) {
+        gamepad->diagnostics.open_attempts.fetch_add(1, std::memory_order_relaxed);
+        if (!open_usb(context, gamepad->selector, &usb,
+                      &gamepad->diagnostics)) {
+            gamepad->diagnostics.open_failures.fetch_add(
+                1, std::memory_order_relaxed);
             set_neutral(gamepad);
             interruptible_sleep(gamepad->stop, 500);
             continue;
@@ -546,22 +698,57 @@ void gamepad_worker(PsxGipGamepad* gamepad) {
 
         gamepad->connection.store(PSX_GIP_CONNECTION_INITIALIZING,
                                   std::memory_order_release);
+        gamepad->diagnostics.initialize_attempts.fetch_add(
+            1, std::memory_order_relaxed);
         uint8_t host_sequence = 0;
-        if (!initialize_gip(usb, &host_sequence, &gamepad->stop)) {
+        if (!initialize_gip(usb, &host_sequence, &gamepad->stop,
+                            &gamepad->diagnostics)) {
+            gamepad->diagnostics.initialize_failures.fetch_add(
+                1, std::memory_order_relaxed);
             close_usb(&usb);
             set_neutral(gamepad);
             interruptible_sleep(gamepad->stop, 250);
             continue;
         }
 
+        gamepad->diagnostics.successful_connections.fetch_add(
+            1, std::memory_order_relaxed);
         gamepad->connection.store(PSX_GIP_CONNECTION_CONNECTED,
                                   std::memory_order_release);
         std::vector<uint8_t> packet;
+        bool transport_failed = false;
+        uint64_t consecutive_live_read_errors = 0;
+        constexpr uint64_t kMaximumTransientReadErrors = 8;
         while (!gamepad->stop.load(std::memory_order_acquire)) {
-            const ReadResult result = read_packet(usb, &packet, 8);
+            const ReadResult result = read_packet(
+                usb, &packet, 8, &gamepad->diagnostics,
+                PSX_GIP_FAILURE_LIVE_READ);
             if (result == ReadResult::Timeout) continue;
-            if (result == ReadResult::Error) break;
-            if (!ack_if_needed(usb, packet, &host_sequence)) break;
+            if (result == ReadResult::Error) {
+                const int error = gamepad->diagnostics.last_libusb_error.load(
+                    std::memory_order_acquire);
+                ++consecutive_live_read_errors;
+                note_consecutive_read_errors(
+                    &gamepad->diagnostics, consecutive_live_read_errors);
+                if (recoverable_live_read_error(error) &&
+                    consecutive_live_read_errors <= kMaximumTransientReadErrors) {
+                    gamepad->diagnostics.transient_read_recoveries.fetch_add(
+                        1, std::memory_order_relaxed);
+                    if (error == LIBUSB_ERROR_PIPE) {
+                        (void)libusb_clear_halt(usb.handle, usb.endpoint_in);
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
+                transport_failed = true;
+                break;
+            }
+            consecutive_live_read_errors = 0;
+            if (!ack_if_needed(usb, packet, &host_sequence,
+                               &gamepad->diagnostics)) {
+                transport_failed = true;
+                break;
+            }
 
             PsxGipGamepadState next{};
             {
@@ -574,6 +761,11 @@ void gamepad_worker(PsxGipGamepad* gamepad) {
             }
         }
 
+        if (transport_failed &&
+            !gamepad->stop.load(std::memory_order_acquire)) {
+            gamepad->diagnostics.disconnects.fetch_add(
+                1, std::memory_order_relaxed);
+        }
         close_usb(&usb);
         set_neutral(gamepad);
     }
@@ -658,6 +850,46 @@ extern "C" PsxGipGamepadConnection psx_gip_gamepad_connection(
     const PsxGipGamepad* gamepad) {
     if (!gamepad) return PSX_GIP_CONNECTION_UNAVAILABLE;
     return gamepad->connection.load(std::memory_order_acquire);
+}
+
+extern "C" int psx_gip_gamepad_get_diagnostics(
+    const PsxGipGamepad* gamepad,
+    PsxGipGamepadDiagnostics* out) {
+    if (!gamepad || !out) return 0;
+    const TransportDiagnostics& d = gamepad->diagnostics;
+    PsxGipGamepadDiagnostics snapshot{};
+    snapshot.open_attempts = d.open_attempts.load(std::memory_order_acquire);
+    snapshot.open_failures = d.open_failures.load(std::memory_order_acquire);
+    snapshot.initialize_attempts = d.initialize_attempts.load(std::memory_order_acquire);
+    snapshot.initialize_failures = d.initialize_failures.load(std::memory_order_acquire);
+    snapshot.successful_connections = d.successful_connections.load(std::memory_order_acquire);
+    snapshot.disconnects = d.disconnects.load(std::memory_order_acquire);
+    snapshot.packets_received = d.packets_received.load(std::memory_order_acquire);
+    snapshot.input_packets = d.input_packets.load(std::memory_order_acquire);
+    snapshot.guide_packets = d.guide_packets.load(std::memory_order_acquire);
+    snapshot.other_packets = d.other_packets.load(std::memory_order_acquire);
+    snapshot.read_timeouts = d.read_timeouts.load(std::memory_order_acquire);
+    snapshot.read_errors = d.read_errors.load(std::memory_order_acquire);
+    snapshot.transient_read_recoveries = d.transient_read_recoveries.load(
+        std::memory_order_acquire);
+    snapshot.peak_consecutive_read_errors = d.peak_consecutive_read_errors.load(
+        std::memory_order_acquire);
+    snapshot.writes_attempted = d.writes_attempted.load(std::memory_order_acquire);
+    snapshot.write_errors = d.write_errors.load(std::memory_order_acquire);
+    snapshot.ack_requests = d.ack_requests.load(std::memory_order_acquire);
+    snapshot.ack_failures = d.ack_failures.load(std::memory_order_acquire);
+    const uint64_t last_packet = d.last_packet_time_ms.load(std::memory_order_acquire);
+    const uint64_t now = monotonic_ms();
+    snapshot.last_packet_age_ms = last_packet != 0 && now >= last_packet
+        ? now - last_packet : 0;
+    snapshot.maximum_packet_gap_ms = d.maximum_packet_gap_ms.load(
+        std::memory_order_acquire);
+    snapshot.last_libusb_error = d.last_libusb_error.load(std::memory_order_acquire);
+    snapshot.last_failure_stage = static_cast<PsxGipFailureStage>(
+        d.last_failure_stage.load(std::memory_order_acquire));
+    snapshot.last_packet_command = d.last_packet_command.load(std::memory_order_acquire);
+    *out = snapshot;
+    return 1;
 }
 
 extern "C" int psx_gip_gamepad_get_state(const PsxGipGamepad* gamepad,

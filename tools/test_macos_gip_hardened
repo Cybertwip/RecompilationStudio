@@ -14,6 +14,7 @@ SCRIPT_DIR=$(cd -P "$(/usr/bin/dirname "$0")" && pwd)
 ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd)
 BINARY=${1:-"$ROOT/runtime/build/gip_gamepad_protocol_test"}
 PROOF=${2:-"$ROOT/docs/macos_gip_gamepad_proof.json"}
+SOAK_MS=${3:-30000}
 
 [[ -x "$BINARY" ]] || {
     printf 'test_macos_gip_hardened: test binary not found: %s\n' "$BINARY" >&2
@@ -45,14 +46,15 @@ PLIST
 /usr/bin/codesign --force --sign - --options runtime \
     --entitlements "$ENTITLEMENTS" "$SIGNED"
 /usr/bin/codesign --verify --strict --verbose=4 "$SIGNED"
-"$SIGNED" "$PROOF" --hardware
+"$SIGNED" "$PROOF" --hardware --soak-ms "$SOAK_MS"
 
-/usr/bin/python3 - "$PROOF" <<'PY'
+/usr/bin/python3 - "$PROOF" "$SOAK_MS" <<'PY'
 import json
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
+soak_ms = int(sys.argv[2])
 data = json.loads(path.read_text())
 data["schema"] = 2
 data["execution"] = {
@@ -61,6 +63,7 @@ data["execution"] = {
     "entitlements": ["com.apple.security.cs.disable-library-validation"],
     "codesign_verification": "strict passed",
     "hardware_command_exit_code": 0,
+    "soak_ms": soak_ms,
     "outbound_transfer_storage": "owned writable copy"
 }
 path.write_text(json.dumps(data, indent=2) + "\n")

@@ -56,6 +56,43 @@ typedef enum PsxGipGamepadConnection {
     PSX_GIP_CONNECTION_UNAVAILABLE = 3
 } PsxGipGamepadConnection;
 
+typedef enum PsxGipFailureStage {
+    PSX_GIP_FAILURE_NONE = 0,
+    PSX_GIP_FAILURE_OPEN_DEVICE = 1,
+    PSX_GIP_FAILURE_CONFIGURE = 2,
+    PSX_GIP_FAILURE_CLAIM_INTERFACE = 3,
+    PSX_GIP_FAILURE_INITIALIZE_READ = 4,
+    PSX_GIP_FAILURE_INITIALIZE_WRITE = 5,
+    PSX_GIP_FAILURE_LIVE_READ = 6,
+    PSX_GIP_FAILURE_ACK_WRITE = 7
+} PsxGipFailureStage;
+
+typedef struct PsxGipGamepadDiagnostics {
+    uint64_t open_attempts;
+    uint64_t open_failures;
+    uint64_t initialize_attempts;
+    uint64_t initialize_failures;
+    uint64_t successful_connections;
+    uint64_t disconnects;
+    uint64_t packets_received;
+    uint64_t input_packets;
+    uint64_t guide_packets;
+    uint64_t other_packets;
+    uint64_t read_timeouts;
+    uint64_t read_errors;
+    uint64_t transient_read_recoveries;
+    uint64_t peak_consecutive_read_errors;
+    uint64_t writes_attempted;
+    uint64_t write_errors;
+    uint64_t ack_requests;
+    uint64_t ack_failures;
+    uint64_t last_packet_age_ms;
+    uint64_t maximum_packet_gap_ms;
+    int32_t last_libusb_error;
+    PsxGipFailureStage last_failure_stage;
+    uint8_t last_packet_command;
+} PsxGipGamepadDiagnostics;
+
 typedef struct PsxGipGamepad PsxGipGamepad;
 
 /* Returns the total number of supported devices. At most `capacity` entries are
@@ -70,6 +107,10 @@ int psx_gip_gamepad_selector_supported(const char* selector);
 PsxGipGamepad* psx_gip_gamepad_open(const char* selector);
 void psx_gip_gamepad_close(PsxGipGamepad* gamepad);
 PsxGipGamepadConnection psx_gip_gamepad_connection(const PsxGipGamepad* gamepad);
+
+/* Copies monotonic transport counters without touching the controller state. */
+int psx_gip_gamepad_get_diagnostics(const PsxGipGamepad* gamepad,
+                                    PsxGipGamepadDiagnostics* out);
 
 /* Copies the latest coherent state. Returns 1 while the USB link is connected,
  * 0 while searching/initializing; disconnected state is always neutral. */

@@ -207,6 +207,20 @@ target_include_directories(l2_structural_test PRIVATE
 )
 target_link_libraries(l2_structural_test PRIVATE fmt rabbitizer)
 
+# Function discovery must reject data words that reuse a legal opcode/funct
+# while setting operand fields reserved by that instruction encoding.
+add_executable(function_analysis_validity_test
+    tests/function_analysis_validity_test.cpp
+    src/function_analysis.cpp
+)
+target_include_directories(function_analysis_validity_test PRIVATE
+    include
+    lib/rabbitizer/include
+    lib/rabbitizer/cplusplus/include
+    lib/fmt/include
+)
+target_link_libraries(function_analysis_validity_test PRIVATE fmt rabbitizer)
+
 # Runtime config regression: packaged [controller] device defaults must reach
 # RuntimeConfig so launcher-less Studio exports can activate auto/GIP routing.
 add_executable(config_loader_controller_test
@@ -224,3 +238,4 @@ target_link_libraries(config_loader_controller_test PRIVATE fmt)
 
 enable_testing()
 add_test(NAME config_loader_controller COMMAND config_loader_controller_test)
+add_test(NAME function_analysis_validity COMMAND function_analysis_validity_test)

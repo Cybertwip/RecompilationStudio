@@ -1,4 +1,6 @@
 #include "function_analysis.h"
+#include "rabbitizer.hpp"
+#include "instructions/InstructionR3000GTE.hpp"
 #include <algorithm>
 #include <map>
 #include <queue>
@@ -53,6 +55,28 @@ bool FunctionAnalyzer::is_epilogue(uint32_t instr, int32_t& stack_size) {
     return false;
 }
 
+static bool has_valid_operand_encoding(uint32_t instr) {
+    // Opcode/funct recognition alone is not enough for code/data discovery.
+    // SPECIAL instructions reserve fields that are absent from their operand
+    // format (for example JR requires rt/rd/sa == 0). Packed game data often
+    // happens to carry a legal funct while setting those reserved bits; treating
+    // such a word as control flow can mint a large false function. Rabbitizer's
+    // validity check masks every field that belongs to the decoded instruction
+    // and rejects any remaining non-zero bits.
+    // Rabbitizer's generic CPU decoder does not model the R3000A-only RFE
+    // opcode. Its one canonical encoding remains valid for the PS1.
+    if (instr == 0x42000010u) return true;
+
+    const uint32_t opcode = (instr >> 26) & 0x3Fu;
+    const bool gte_command = opcode == 0x12u && ((instr >> 25) & 1u) != 0;
+    if (gte_command) {
+        rabbitizer::InstructionR3000GTE decoded(instr, 0);
+        return decoded.isValid();
+    }
+    rabbitizer::InstructionCpu decoded(instr, 0);
+    return decoded.isValid();
+}
+
 bool FunctionAnalyzer::is_valid_mips_word(uint32_t instr) {
     if (instr == 0xFFFFFFFFu || instr == 0xFFFFFFFDu) return false;
 
@@ -70,13 +94,15 @@ bool FunctionAnalyzer::is_valid_mips_word(uint32_t instr) {
         case 0x20u: case 0x21u: case 0x22u: case 0x23u:
         case 0x24u: case 0x25u: case 0x26u: case 0x27u:
         case 0x2Au: case 0x2Bu:
-            return true;
+            return has_valid_operand_encoding(instr);
         default:
             return false;
         }
     }
     if (opcode == 0x01u) {
-        return rt == 0x00u || rt == 0x01u || rt == 0x10u || rt == 0x11u;
+        const bool known_regimm =
+            rt == 0x00u || rt == 0x01u || rt == 0x10u || rt == 0x11u;
+        return known_regimm && has_valid_operand_encoding(instr);
     }
 
     switch (opcode) {
@@ -91,7 +117,7 @@ bool FunctionAnalyzer::is_valid_mips_word(uint32_t instr) {
     case 0x2Eu:
     case 0x30u: case 0x31u: case 0x32u:
     case 0x38u: case 0x39u: case 0x3Au:
-        return true;
+        return has_valid_operand_encoding(instr);
     default:
         return false;
     }

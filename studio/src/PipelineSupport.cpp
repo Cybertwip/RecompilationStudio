@@ -96,6 +96,23 @@ QString runtimeBootToml(bool skipBiosBoot) {
   return text;
 }
 
+QString defaultControllerToml() {
+  /* A generated title has no game-specific pad compatibility declaration yet.
+   * Boot a config-capable DualShock and expose Hybrid so both pre-DualShock
+   * digital controls and games that initialize a DualShock can negotiate the
+   * controller they expect. A plain digital pad intentionally ignores command
+   * 0x43; making that the Studio-wide default leaves DualShock-aware games such
+   * as Sonic Wings Special in a permanent pad-detection loop. */
+  return QStringLiteral(
+    "[controller]\n"
+    "p1_device = \"auto\"\n"
+    "p2_device = \"none\"\n"
+    "default_mode = \"hybrid\"\n"
+    "deadzone = 12000\n"
+    "allow_hybrid = true\n"
+    "lock_mode = false\n\n");
+}
+
 QString macosGipCmakeOption(bool enabled) {
   return QStringLiteral("set(PSX_MACOS_GIP_GAMEPAD %1 CACHE BOOL \"\" FORCE)\n")
     .arg(enabled ? QStringLiteral("ON") : QStringLiteral("OFF"));

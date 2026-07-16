@@ -16,6 +16,7 @@ QString cmakeQuoted(const QString& value);
 QString tomlQuoted(const QString& value);
 QString hex32(quint32 value);
 QString runtimeBootToml(bool skipBiosBoot);
+QString defaultControllerToml();
 QString macosGipCmakeOption(bool enabled);
 bool nmOutputHasMacosGipBackend(const QByteArray& output);
 bool writeBytes(const QString& path, const QByteArray& bytes, QString& error);

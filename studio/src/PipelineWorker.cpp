@@ -225,13 +225,7 @@ QString makeGameToml(const PipelineRequest& request,
   text += QStringLiteral("antialiasing = false\n");
   text += QStringLiteral("texture_filtering = \"nearest\"\n");
   text += QStringLiteral("aspect_ratio = \"4:3\"\n\n");
-  text += QStringLiteral("[controller]\n");
-  text += QStringLiteral("p1_device = \"auto\"\n");
-  text += QStringLiteral("p2_device = \"none\"\n");
-  text += QStringLiteral("default_mode = \"digital\"\n");
-  text += QStringLiteral("deadzone = 12000\n");
-  text += QStringLiteral("allow_hybrid = false\n");
-  text += QStringLiteral("lock_mode = false\n\n");
+  text += defaultControllerToml();
   text += QStringLiteral("[audit]\n\n");
   text += QStringLiteral("[[audit.regions]]\n");
   text += QStringLiteral("name = \"Text\"\n");

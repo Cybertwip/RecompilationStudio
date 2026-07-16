@@ -4245,6 +4245,11 @@ void debug_server_send_line(const char *json)
 {
     if (!s_in_command) return;
     size_t len = strlen(json);
+    /* A response is framed here, exactly once. Several older handlers pass a
+     * trailing newline even though this function owns line termination. Strip
+     * it so clients never receive an empty second response line. */
+    while (len > 0 && (json[len - 1] == '\n' || json[len - 1] == '\r'))
+        len--;
     size_t need = s_resp_len + len + 2;          /* + '\n' + NUL */
     if (need > s_resp_cap) {
         size_t cap = s_resp_cap ? s_resp_cap : 65536;

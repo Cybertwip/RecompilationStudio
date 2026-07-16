@@ -122,6 +122,12 @@ int main(int argc, char** argv) {
           directBoot.contains(QStringLiteral("fast_boot = true")),
         QStringLiteral("direct-to-game boot TOML"));
 
+  const QString controllerDefaults = psxstudio::defaultControllerToml();
+  check(controllerDefaults.contains(QStringLiteral("default_mode = \"hybrid\"")) &&
+          controllerDefaults.contains(QStringLiteral("allow_hybrid = true")) &&
+          !controllerDefaults.contains(QStringLiteral("default_mode = \"digital\"")),
+        QStringLiteral("Studio exports a config-capable Hybrid pad by default"));
+
   check(psxstudio::macosGipCmakeOption(true).contains(
           QStringLiteral("PSX_MACOS_GIP_GAMEPAD ON")),
         QStringLiteral("Studio enables macOS GIP CMake option"));

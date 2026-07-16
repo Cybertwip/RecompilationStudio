@@ -7,7 +7,7 @@
     "keyboard_event_evidence": "Alt+Enter toggles fullscreen",
     "reported_failures": [
       "PSX keyboard controls inactive",
-      "gamepad not detected"
+      "PDP Xbox Atomic controller is detected but its controls are inactive"
     ]
   },
   "implementation_manifest": {
@@ -35,6 +35,19 @@
     "maximum_observed_glibc": "2.25",
     "bundled_sdl2_sha256": "0d7d4648b31ebabb8943d9cd5e72f15b74b5e0369c43dfa603202adf1aead69c",
     "controller_database_fetch_and_hash_verified": true,
-    "physical_ubuntu_retest": "pending"
+    "physical_ubuntu_retest": "failed: host keyboard and detected controller did not affect the game",
+    "diagnostic_boundary_manifest": [
+      "SDL keyboard event shadow",
+      "SDL controller button and axis state",
+      "mapped keyboard pad word",
+      "mapped physical-controller pad word",
+      "routed pad word",
+      "SIO-visible pad word and pad type",
+      "controlled debug-input Start pulse"
+    ],
+    "diagnostic_executable_sha256": "17d1d0cb1fdd995bed8720897f5e0d43063b242cada1709b073ec49074a101e9",
+    "diagnostic_probe_sha256": "efd2f7d69de802762533545f0dc3b6d508cef90a490bc9140b70e19440cfe662",
+    "diagnostic_archive_sha256": "34eb4b18640392f74ce0b919f8722e9caafce2193abf1656a42d9226faefdc34",
+    "diagnostic_ubuntu_sample": "pending"
   }
 }

@@ -316,6 +316,11 @@ typedef struct FrontendInputTraceEntry {
 static FrontendInputTraceEntry g_frontend_input_trace[FRONTEND_INPUT_TRACE_CAP];
 static uint64_t g_frontend_input_seq = 0;
 static uint16_t g_frontend_last_pad = 0xFFFF;
+static uint16_t g_frontend_keyboard_pad = 0xFFFF;
+static uint16_t g_frontend_physical_pad = 0xFFFF;
+static uint16_t g_frontend_routed_pad = 0xFFFF;
+static uint32_t g_frontend_sdl_buttons = 0;
+static std::array<int16_t, SDL_CONTROLLER_AXIS_MAX> g_frontend_sdl_axes{};
 
 static void frontend_input_trace_note(uint8_t kind, SDL_Scancode sc,
                                       uint16_t mask, uint16_t pad_word) {
@@ -394,11 +399,23 @@ extern "C" int frontend_input_state_json(char *out, int cap) {
         "\"edge_mask\":\"0x%04X\",\"edge_frames\":%u,"
         "\"video_driver\":\"%s\",\"joysticks\":%d,"
         "\"external_controller_mappings\":%d,\"p1_sdl_attached\":%s,"
+        "\"keyboard_pad\":\"0x%04X\",\"physical_pad\":\"0x%04X\","
+        "\"routed_pad\":\"0x%04X\",\"sdl_buttons\":\"0x%08X\","
+        "\"sio_pad\":\"0x%04X\",\"sio_connected\":%s,\"sio_analog\":%s,"
+        "\"sdl_axes\":[%d,%d,%d,%d,%d,%d],"
         "\"entries\":[",
         (unsigned long long)total, g_players[0].kind, g_players[0].mode,
         g_keyboard_edge_mask[0], (unsigned)g_keyboard_edge_frames[0],
         video_driver ? video_driver : "", joystick_count,
-        g_external_controller_mappings, p1_sdl_attached ? "true" : "false");
+        g_external_controller_mappings, p1_sdl_attached ? "true" : "false",
+        g_frontend_keyboard_pad, g_frontend_physical_pad,
+        g_frontend_routed_pad, g_frontend_sdl_buttons,
+        sio_get_pad_buttons_slot(0),
+        sio_get_pad_connected(0) ? "true" : "false",
+        sio_get_pad_analog(0) ? "true" : "false",
+        (int)g_frontend_sdl_axes[0], (int)g_frontend_sdl_axes[1],
+        (int)g_frontend_sdl_axes[2], (int)g_frontend_sdl_axes[3],
+        (int)g_frontend_sdl_axes[4], (int)g_frontend_sdl_axes[5]);
     for (uint64_t i = 0; i < count && n < cap - 256; i++) {
         const FrontendInputTraceEntry *e =
             &g_frontend_input_trace[(start + i) & (FRONTEND_INPUT_TRACE_CAP - 1u)];
@@ -2230,6 +2247,25 @@ static void sample_pad_into_sio(int override) {
         const bool dev_here = (dev_any_input_enabled() && s == 0);
         if (p.kind == 0 && !dev_here) continue;  /* no device in this port */
 
+        if (s == 0) {
+            g_frontend_keyboard_pad = pad_from_keyboard(1);
+            g_frontend_physical_pad = physical_pad_buttons(p);
+            g_frontend_sdl_buttons = 0;
+            g_frontend_sdl_axes.fill(0);
+            if (p.handle && SDL_GameControllerGetAttached(p.handle)) {
+                for (int button = 0; button < SDL_CONTROLLER_BUTTON_MAX; ++button) {
+                    if (SDL_GameControllerGetButton(
+                            p.handle, (SDL_GameControllerButton)button)) {
+                        g_frontend_sdl_buttons |= 1u << button;
+                    }
+                }
+                for (int axis = 0; axis < SDL_CONTROLLER_AXIS_MAX; ++axis) {
+                    g_frontend_sdl_axes[(size_t)axis] = SDL_GameControllerGetAxis(
+                        p.handle, (SDL_GameControllerAxis)axis);
+                }
+            }
+        }
+
         /* Buttons: merge the assigned device with the keyboard (PSX pad word is
          * active-low, so AND combines "pressed on either source"). In dev mode P1
          * also folds in the keyboard binds and EVERY connected controller. */
@@ -2240,6 +2276,7 @@ static void sample_pad_into_sio(int override) {
             btn &= pad_from_keyboard(1);           /* keyboard drives P1 binds     */
             btn &= dev_all_controllers_buttons();  /* any plugged-in controller too */
         }
+        if (s == 0) g_frontend_routed_pad = btn;
         if (s == 0 && btn != g_frontend_last_pad) {
             g_frontend_last_pad = btn;
             frontend_input_trace_note(2, SDL_SCANCODE_UNKNOWN, 0, btn);

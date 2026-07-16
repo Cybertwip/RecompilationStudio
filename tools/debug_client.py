@@ -36,6 +36,12 @@ Commands (shared — identical on both servers):
     get_snapshots               Show snapshot region config
     input <buttons_hex>         Override controller input
     clear_input                 Remove input override
+    sio_state                   SIO register and transaction counters
+    pad_status                  PSX-visible pad word/type for both ports
+    frontend_input_state        SDL-to-SIO frontend input boundary state
+    sio_trace [count]           Recent SIO TX/RX byte transactions
+    sio_pc_trace [count]        Recent guest PCs driving SIO
+    bioscall_dump [tail]        BIOS call summary or recent call entries
     quit                        Quit game
 
 Tier 1 write trace commands:
@@ -300,6 +306,18 @@ def build_cmd(args):
         return d, pretty_json
     elif cmd == "sio_state":
         return {"cmd": "sio_state"}, pretty_json
+    elif cmd in ("pad_status", "frontend_input_state"):
+        return {"cmd": cmd}, pretty_json
+    elif cmd in ("sio_trace", "sio_pc_trace"):
+        d = {"cmd": cmd}
+        if len(args) > 1:
+            d["count"] = int(args[1])
+        return d, pretty_json
+    elif cmd == "bioscall_dump":
+        d = {"cmd": "bioscall_dump"}
+        if len(args) > 1:
+            d["tail"] = int(args[1])
+        return d, pretty_json
     elif cmd == "bios_wait_state":
         return {"cmd": "bios_wait_state"}, pretty_json
     elif cmd == "memcard_log":

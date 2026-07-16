@@ -115,9 +115,9 @@ mode. Per-install `settings.toml` values override these defaults.
 [controller]
 p1_device = "auto"       # none | keyboard | auto | SDL GUID | gip: selector
 p2_device = "none"
-default_mode = "digital" # hybrid | analog | digital
+default_mode = "hybrid"  # hybrid | analog | digital
 deadzone = 12000
-allow_hybrid = false
+allow_hybrid = true
 lock_mode = false
 ```
 

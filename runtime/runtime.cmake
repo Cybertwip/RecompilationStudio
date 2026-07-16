@@ -330,7 +330,7 @@ endif()
 function(psxrecomp_add_runtime_target target)
     set(has_game_dispatch FALSE)
     set(has_overlay_dispatch FALSE)
-    set(options ORACLE COSIM)
+    set(options ORACLE COSIM MACOSX_BUNDLE)
     set(oneValueArgs
         GAME_GENERATED_FULL_C
         GAME_GENERATED_DISPATCH_C
@@ -407,7 +407,17 @@ function(psxrecomp_add_runtime_target target)
         set(mode_sources)
     endif()
 
-    add_executable(${target}
+    if(PSXRT_MACOSX_BUNDLE AND NOT APPLE)
+        message(FATAL_ERROR
+            "psxrecomp_add_runtime_target: MACOSX_BUNDLE is only valid on macOS")
+    endif()
+    if(PSXRT_MACOSX_BUNDLE)
+        set(_psxrt_executable_kind MACOSX_BUNDLE)
+    else()
+        set(_psxrt_executable_kind)
+    endif()
+
+    add_executable(${target} ${_psxrt_executable_kind}
         ${PSXRECOMP_RUNTIME_SOURCES}
         ${mode_sources}
         ${generated_sources}
@@ -580,12 +590,21 @@ function(psxrecomp_add_runtime_target target)
         if(PSX_SETTINGS_MENU)
             target_compile_definitions(${target} PRIVATE PSX_SETTINGS_MENU=1)
         endif()
-        # Ship the launcher assets (RML/RCSS/fonts) next to the exe.
+        # Ship immutable frontend assets beside a normal executable, but inside
+        # Contents/Resources for a macOS app bundle. Contents/MacOS is reserved
+        # for code; putting img/fonts/RML there makes codesign --deep --strict
+        # interpret those directories as unsigned nested code.
+        if(PSXRT_MACOSX_BUNDLE)
+            set(_psxrt_frontend_assets_dir
+                "$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Resources")
+        else()
+            set(_psxrt_frontend_assets_dir "$<TARGET_FILE_DIR:${target}>")
+        endif()
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${PSXRECOMP_ROOT}/runtime/launcher/assets"
-                "$<TARGET_FILE_DIR:${target}>"
-            COMMENT "Copying launcher assets next to ${target}")
+                "${_psxrt_frontend_assets_dir}"
+            COMMENT "Copying frontend assets for ${target}")
     endif()
 
     if(WIN32 OR MINGW)

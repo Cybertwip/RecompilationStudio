@@ -412,6 +412,7 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += macosGipCmakeOption(macosTarget && request.macosGipGamepad);
   cmake += QStringLiteral("include(${PSXRECOMP_ROOT}/runtime/runtime.cmake)\n");
   cmake += QStringLiteral("psxrecomp_add_runtime_target(psx-runtime\n");
+  if (macosTarget) cmake += QStringLiteral("  MACOSX_BUNDLE\n");
   cmake += QStringLiteral("  BIOS_GENERATED_FULL_C %1\n").arg(cmakeQuoted(biosFull));
   cmake += QStringLiteral("  BIOS_GENERATED_DISPATCH_C %1\n").arg(cmakeQuoted(biosDispatch));
   cmake += QStringLiteral("  GAME_GENERATED_FULL_C %1\n").arg(cmakeQuoted(gameFull));

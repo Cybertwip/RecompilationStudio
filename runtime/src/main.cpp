@@ -689,6 +689,22 @@ static std::filesystem::path exe_dir_from_argv(const char* argv0) {
     return exe_dir;
 }
 
+// Frontend files are immutable bundle resources, not executable content. Studio
+// exports put them in Contents/Resources on macOS; ordinary developer builds
+// and the Windows/Linux packages keep them beside the executable.
+static std::filesystem::path frontend_assets_dir_from_argv(const char* argv0) {
+    namespace fs = std::filesystem;
+    const fs::path exe_dir = exe_dir_from_argv(argv0);
+#ifdef __APPLE__
+    std::error_code ec;
+    const fs::path bundle_resources = exe_dir.parent_path() / "Resources";
+    if (fs::is_regular_file(bundle_resources / "launcher.rml", ec)) {
+        return bundle_resources;
+    }
+#endif
+    return exe_dir;
+}
+
 static void load_external_controller_mappings(const char* argv0) {
     static bool attempted = false;
     if (attempted) return;
@@ -4043,7 +4059,7 @@ int main(int argc, char** argv) {
                 if (lctx) {
                     SDL_GL_MakeCurrent(lwin, lctx);
                     SDL_GL_SetSwapInterval(1);
-                    std::string assets = exe_dir_from_argv(argv[0]).string();
+                    std::string assets = frontend_assets_dir_from_argv(argv[0]).string();
                     psx_launcher::GameInfo ginfo;
                     ginfo.name             = game_name.empty() ? nullptr : game_name.c_str();
                     ginfo.expected_serial  = game_id.empty()   ? nullptr : game_id.c_str();
@@ -4109,7 +4125,7 @@ int main(int argc, char** argv) {
 #endif
 
 #if defined(PSX_SETTINGS_MENU)
-    g_pause_assets_dir = exe_dir_from_argv(argv[0]).string();
+    g_pause_assets_dir = frontend_assets_dir_from_argv(argv[0]).string();
     g_pause_game_name = game_name.empty() ? std::string("PSX") : game_name;
     g_pause_allow_hybrid = ctrl_allow_hybrid;
     g_pause_lock_mode = ctrl_lock_mode;

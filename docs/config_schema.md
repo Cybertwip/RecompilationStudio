@@ -113,16 +113,19 @@ mode. Per-install `settings.toml` values override these defaults.
 
 ```toml
 [controller]
-p1_device = "auto"       # none | keyboard | auto | SDL GUID | gip: selector
-p2_device = "none"
-default_mode = "hybrid"  # hybrid | analog | digital
+p1_device = "auto"       # none | keyboard | auto | persistent SDL id | gip: selector
+p2_device = "auto"
+default_mode = "analog"  # hybrid | analog | digital
 deadzone = 12000
 allow_hybrid = true
 lock_mode = false
 ```
 
-On a macOS build with `PSX_MACOS_GIP_GAMEPAD=ON`, `auto` tries SDL first and
-then starts the direct libusb GIP reader when SDL exposes no controller.
+Automatic routing assigns the first two connected controllers exclusively to
+P1/P2 and persists their identities. P1 uses the keyboard while its remembered
+controller is absent; P2 remains disconnected until a second input is assigned.
+On a macOS build with `PSX_MACOS_GIP_GAMEPAD=ON`, direct libusb GIP selectors
+remain available for controllers SDL cannot expose.
 
 Reserved future fields:
 - `default_disc_path` — game runtimes can pre-mount a disc

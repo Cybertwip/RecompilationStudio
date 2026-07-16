@@ -8,6 +8,7 @@
 #include "launcher.h"
 
 #include "config_loader.h"
+#include "controller_identity.h"
 #include "disc_identity.h"
 #if defined(PSX_HAVE_GIP_GAMEPAD)
 #include "gip_gamepad.h"
@@ -101,7 +102,8 @@ public:
 
 // Mirror of the user-tunable settings, in the value shapes the RML binds to.
 struct LauncherModel {
-    int  renderer        = 0;  // 0=software, 1=opengl
+    bool pause_mode      = false;
+    int  renderer        = 1;  // 0=software, 1=opengl
     int  supersampling   = 1;  // 1..4
     bool antialiasing    = true;
     int  texture_filter  = 0;  // 0=nearest, 1=bilinear
@@ -159,18 +161,18 @@ struct LauncherModel {
 
     // Player cards — real device routing. Each port picks a device (None /
     // Keyboard / SDL controller / macOS direct-USB GIP controller) and pad type.
-    int  p1_dev_index = 1;     // index into the shared device option list
-    int  p2_dev_index = 0;
-    // Pad input mode (PSXRecompV4::PadMode): 0=hybrid (default), 1=analog,
+    int  p1_dev_index = 2;     // Automatic (keyboard fallback while no P1 pad)
+    int  p2_dev_index = 2;     // Automatic (disconnected while no P2 pad)
+    // Pad input mode (PSXRecompV4::PadMode): 0=hybrid, 1=analog (default),
     // 2=digital. Bound to the segmented 3-way selector in each player card.
-    int  p1_mode      = 0;
-    int  p2_mode      = 0;
+    int  p1_mode      = 1;
+    int  p2_mode      = 1;
     bool allow_hybrid = true;  // game.allow_hybrid: when false the Hybrid segment is hidden
     bool mode_selectable = true; // game.lock_mode == false: when false the whole pad-mode selector is hidden
     bool device_locked   = false; // game.lock_device: when true the Player 1/2 cards are hidden entirely (fixed, auto-bound pad type)
     int  deadzone_pct = 37;    // analog-stick deadzone 0-100% (raw = pct*32767/100)
-    Rml::String p1_dev_label = "Keyboard";
-    Rml::String p2_dev_label = "None";
+    Rml::String p1_dev_label = "Automatic";
+    Rml::String p2_dev_label = "Automatic";
     Rml::String p1_status, p2_status;        // resolved status line
     Rml::String p1_dot, p2_dot;              // "" (on) | "off"
     Rml::String p1_options, p2_options;      // data-rml option-list markup
@@ -274,43 +276,44 @@ void refresh_memcard(LauncherModel& m, int slot /*0|1*/) {
                         : Rml::String("Last modified — " + when);
 }
 
-// ---- input-device enumeration (None / Keyboard / physical controllers) ----
+// ---- input-device enumeration (None / Keyboard / Automatic / controllers) ----
 struct DeviceOption {
-    int         kind;       // 0=none, 1=keyboard, 2=SDL, 3=direct USB GIP
-    std::string selector;   // SDL GUID or a gip: selector
-    std::string label;      // display name
+    int         kind;        // HostInputRoute values
+    std::string selector;    // persistent SDL id or a gip: selector
+    std::string legacy_guid; // old settings.toml compatibility for SDL pads
+    std::string label;       // display name
+    bool        available;   // false only for a remembered, unplugged device
 };
 
 std::vector<DeviceOption> enumerate_devices() {
     std::vector<DeviceOption> opts;
-    opts.push_back({0, "", "None"});
-    opts.push_back({1, "", "Keyboard"});
+    opts.push_back({0, "", "", "None", true});
+    opts.push_back({1, "", "", "Keyboard", true});
+    opts.push_back({4, "auto", "", "Automatic", true});
     const int n = SDL_NumJoysticks();
     for (int i = 0; i < n; i++) {
-        if (!SDL_IsGameController(i)) continue;
-        SDL_JoystickGUID g = SDL_JoystickGetDeviceGUID(i);
-        char buf[40] = {0};
-        SDL_JoystickGetGUIDString(g, buf, sizeof(buf));
-        const char* nm = SDL_GameControllerNameForIndex(i);
-        opts.push_back({2, std::string(buf),
-                        nm ? std::string(nm) : std::string("Controller")});
+        const auto identity = PSXRecompV4::describe_sdl_controller(i);
+        if (identity.persistent_id.empty()) continue;
+        opts.push_back({2, identity.persistent_id, identity.legacy_guid,
+                        identity.name, true});
     }
 #if defined(PSX_HAVE_GIP_GAMEPAD)
     std::array<PsxGipGamepadInfo, 16> direct{};
     const size_t total = psx_gip_gamepad_enumerate(direct.data(), direct.size());
     const size_t visible = std::min(total, direct.size());
     for (size_t i = 0; i < visible; ++i) {
-        opts.push_back({3, direct[i].selector,
-                        std::string(direct[i].name) + " (direct USB)"});
+        opts.push_back({3, direct[i].selector, "",
+                        std::string(direct[i].name) + " (direct USB)", true});
     }
 #endif
     return opts;
 }
 
-// The settings device string ("none"/"keyboard"/<SDL GUID>/<gip selector>).
+// The settings device string ("none"/"keyboard"/"auto"/persistent id).
 std::string device_string(const DeviceOption& option) {
     if (option.kind == 0) return "none";
     if (option.kind == 1) return "keyboard";
+    if (option.kind == 4) return "auto";
     return option.selector;
 }
 
@@ -335,13 +338,17 @@ std::string rml_escape(const std::string& s) {
 int find_or_add_device_index(std::vector<DeviceOption>& opts, const std::string& dev) {
     if (dev.empty() || dev == "none") return 0;
     if (dev == "keyboard") return 1;
+    if (dev == "auto" || dev == "gamepad" || dev == "controller") return 2;
     for (size_t i = 0; i < opts.size(); i++) {
-        if (opts[i].kind >= 2 && opts[i].selector == dev) return (int)i;
+        if ((opts[i].kind == 2 || opts[i].kind == 3) &&
+            (opts[i].selector == dev || opts[i].legacy_guid == dev ||
+             (!opts[i].legacy_guid.empty() &&
+              "sdl:" + opts[i].legacy_guid == dev))) return (int)i;
     }
     const bool direct = dev.rfind("gip:", 0) == 0;
-    opts.push_back({direct ? 3 : 2, dev,
+    opts.push_back({direct ? 3 : 2, dev, "",
                     direct ? "Saved direct USB controller (offline)"
-                           : "Saved controller (offline)"});
+                           : "Saved controller (offline)", false});
     return (int)opts.size() - 1;
 }
 
@@ -380,7 +387,14 @@ void refresh_player(LauncherModel& m, int player, const std::vector<DeviceOption
                                  : "hybrid (auto analog/d-pad)";
     if (o.kind == 0)      { status = "No device — port empty"; dot = "off"; }
     else if (o.kind == 1) { status = Rml::String("Keyboard \xE2\x80\x94 ") + type; dot = ""; }
-    else                  { status = o.label + Rml::String(" \xE2\x80\x94 ") + type; dot = ""; }
+    else if (o.kind == 4) {
+        status = player == 0
+            ? Rml::String("First available controller; keyboard fallback \xE2\x80\x94 ") + type
+            : Rml::String("Second available controller \xE2\x80\x94 ") + type;
+        dot = "";
+    }
+    else if (!o.available) { status = "Remembered controller — unplugged"; dot = "off"; }
+    else { status = o.label + Rml::String(" \xE2\x80\x94 ") + type; dot = ""; }
 }
 
 // Recompute the language button's label from lang_index (Settings cycle toggle).
@@ -679,7 +693,7 @@ namespace psx_launcher {
 
 Result run(SDL_Window* window, void* gl_context,
            PSXRecompV4::UserSettings& io,
-           const GameInfo& game, const char* assets_dir)
+           const GameInfo& game, const char* assets_dir, Mode mode)
 {
     (void)gl_context;  // already created + current; we only need the window.
 
@@ -733,7 +747,12 @@ Result run(SDL_Window* window, void* gl_context,
 
     // ---- Seed the model from the effective settings ----
     LauncherModel m;
-    m.renderer       = io.renderer;
+    m.pause_mode     = mode == Mode::PauseMenu;
+    m.view           = "dashboard";
+    /* The user-facing menu intentionally exposes only the two supported
+     * choices requested here. Any stale experimental Vulkan value is clamped
+     * to software rather than creating a third/invalid XOR cycle state. */
+    m.renderer       = io.renderer == 1 ? 1 : 0;
     m.supersampling  = io.supersampling;
     m.antialiasing   = io.antialiasing;
     m.texture_filter = io.texture_filter;
@@ -772,8 +791,8 @@ Result run(SDL_Window* window, void* gl_context,
 
     // ---- Seed the controller slots: enumerate devices, resolve selections ----
     std::vector<DeviceOption> dev_opts = enumerate_devices();
-    m.p1_mode = io.has_p1_mode ? io.p1_mode : PSXRecompV4::PAD_MODE_HYBRID;
-    m.p2_mode = io.has_p2_mode ? io.p2_mode : PSXRecompV4::PAD_MODE_HYBRID;
+    m.p1_mode = io.has_p1_mode ? io.p1_mode : PSXRecompV4::PAD_MODE_ANALOG;
+    m.p2_mode = io.has_p2_mode ? io.p2_mode : PSXRecompV4::PAD_MODE_ANALOG;
     // When the game hides Hybrid, never leave a port selected on it (a stale
     // settings.toml or the Hybrid default would otherwise highlight nothing).
     m.allow_hybrid = game.allow_hybrid;
@@ -796,10 +815,11 @@ Result run(SDL_Window* window, void* gl_context,
     if (io.has_p1_device) {
         m.p1_dev_index = find_or_add_device_index(dev_opts, io.p1_device);
     } else {
-        // Zero-config default: first plugged-in controller, else keyboard.
-        m.p1_dev_index = (dev_opts.size() > 2) ? 2 : 1;
+        // Zero-config default: exclusive automatic assignment; P1 uses the
+        // keyboard while no physical controller is attached.
+        m.p1_dev_index = 2;
     }
-    m.p2_dev_index = io.has_p2_device ? find_or_add_device_index(dev_opts, io.p2_device) : 0;
+    m.p2_dev_index = io.has_p2_device ? find_or_add_device_index(dev_opts, io.p2_device) : 2;
     refresh_player(m, 0, dev_opts);
     refresh_player(m, 1, dev_opts);
 
@@ -819,6 +839,7 @@ Result run(SDL_Window* window, void* gl_context,
     }
     Rml::String title = game.name ? Rml::String(game.name) : Rml::String("PSX");
     c.BindFunc("game_name", [title](Rml::Variant& out) { out = title; });
+    c.Bind("pause_mode",     &m.pause_mode);
     c.Bind("supersampling",  &m.supersampling);
     c.Bind("antialiasing",   &m.antialiasing);
     c.Bind("auto_skip_fmv",  &m.auto_skip_fmv);
@@ -1124,8 +1145,21 @@ Result run(SDL_Window* window, void* gl_context,
         const char* v1[] = {"p2_dev_label","p2_status","p2_dot","p2_options","p2_mode"};
         for (const char* v : (player == 0 ? v0 : v1)) handle.DirtyVariable(v);
     };
-    // dev_opts is captured by value: the device list is fixed for the launcher
-    // session (a hot-plug here would require a re-enumerate, deferred).
+    auto refresh_device_options = [&]() mutable {
+        const int old_i1 = (m.p1_dev_index >= 0 && m.p1_dev_index < (int)dev_opts.size())
+                             ? m.p1_dev_index : 0;
+        const int old_i2 = (m.p2_dev_index >= 0 && m.p2_dev_index < (int)dev_opts.size())
+                             ? m.p2_dev_index : 0;
+        const std::string p1 = device_string(dev_opts[old_i1]);
+        const std::string p2 = device_string(dev_opts[old_i2]);
+        dev_opts = enumerate_devices();
+        m.p1_dev_index = find_or_add_device_index(dev_opts, p1);
+        m.p2_dev_index = find_or_add_device_index(dev_opts, p2);
+        refresh_player(m, 0, dev_opts);
+        refresh_player(m, 1, dev_opts);
+        dirty_player(0);
+        dirty_player(1);
+    };
     c.BindEventCallback("open_dd",
         [&m, handle](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList& args) mutable {
             const int player = args.empty() ? 0 : (int)args[0].Get<int>();
@@ -1138,11 +1172,20 @@ Result run(SDL_Window* window, void* gl_context,
             m.dd_open = Rml::String(); handle.DirtyVariable("dd_open");
         });
     c.BindEventCallback("pick_device",
-        [&m, handle, dev_opts, dirty_player](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList& args) mutable {
+        [&m, handle, &dev_opts, dirty_player](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList& args) mutable {
             if (args.size() < 2) return;
             const int player = (int)args[0].Get<int>();
             const int idx    = (int)args[1].Get<int>();
             (player == 0 ? m.p1_dev_index : m.p2_dev_index) = idx;
+            const int other = player == 0 ? m.p2_dev_index : m.p1_dev_index;
+            if (idx >= 0 && idx < (int)dev_opts.size() &&
+                dev_opts[idx].kind != 4 && dev_opts[idx].kind >= 2 &&
+                other >= 0 && other < (int)dev_opts.size() &&
+                device_string(dev_opts[idx]) == device_string(dev_opts[other])) {
+                (player == 0 ? m.p2_dev_index : m.p1_dev_index) = 2;
+                refresh_player(m, player ^ 1, dev_opts);
+                dirty_player(player ^ 1);
+            }
             refresh_player(m, player, dev_opts);
             m.dd_open = Rml::String();
             dirty_player(player);
@@ -1161,12 +1204,12 @@ Result run(SDL_Window* window, void* gl_context,
     // Pad-mode segmented selector: each segment passes its mode (0=hybrid,
     // 1=analog, 2=digital) so any mode is one click away.
     c.BindEventCallback("set_mode_p1",
-        [&m, handle, dev_opts, dirty_player](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList& args) mutable {
+        [&m, handle, &dev_opts, dirty_player](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList& args) mutable {
             if (args.empty()) return;
             m.p1_mode = (int)args[0].Get<int>(); refresh_player(m, 0, dev_opts); dirty_player(0);
         });
     c.BindEventCallback("set_mode_p2",
-        [&m, handle, dev_opts, dirty_player](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList& args) mutable {
+        [&m, handle, &dev_opts, dirty_player](Rml::DataModelHandle, Rml::Event&, const Rml::VariantList& args) mutable {
             if (args.empty()) return;
             m.p2_mode = (int)args[0].Get<int>(); refresh_player(m, 1, dev_opts); dirty_player(1);
         });
@@ -1290,9 +1333,20 @@ Result run(SDL_Window* window, void* gl_context,
                 if (ev.type == SDL_KEYDOWN) handle_scan_key(ev.key);
                 continue;
             }
+            if (m.pause_mode && ev.type == SDL_KEYDOWN &&
+                ev.key.keysym.sym == SDLK_ESCAPE && !ev.key.repeat) {
+                m.launch_requested = true;
+                continue;
+            }
             switch (ev.type) {
             case SDL_QUIT:
-                m.quit_requested = true;
+                if (m.pause_mode) m.launch_requested = true;
+                else              m.quit_requested = true;
+                break;
+            case SDL_CONTROLLERDEVICEADDED:
+            case SDL_CONTROLLERDEVICEREMOVED:
+                refresh_device_options();
+                RmlSDL::InputEventHandler(context, ev);
                 break;
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {

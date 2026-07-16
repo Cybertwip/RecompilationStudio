@@ -2,17 +2,15 @@
 
 Branch: `feat/gl-renderer` (both psxrecomp and TombaRecomp).
 Last commits this session: `0631538`..`45cc5c3` (psxrecomp).
-Status: **v2 architecture, opt-in, rendering cleanly on every screen
-tested.** Software renderer is still the committed default; OpenGL is
-selected per-game via `[video] renderer = "opengl"`. TombaRecomp
-`game.toml` has LOCAL (uncommitted) overrides (`renderer = "opengl"`,
-`texture_filtering = "bilinear"`, `supersampling = 2`) for testing — do
-NOT commit those; committed defaults are `software` / `nearest`.
+Status: **v2 architecture, rendering cleanly on every screen tested.**
+OpenGL became the framework default on 2026-07-16, with automatic software
+fallback; `[video] renderer = "software"` remains available per game or in
+the ESC settings menu. Texture filtering remains nearest by default.
 
 Goal: a hardware (OpenGL) renderer as a *selectable option* alongside
 software, enabling higher internal-resolution scaling without the software
-renderer's per-pixel CPU cost. Make it default-with-software-fallback only
-after broad visual validation.
+renderer's per-pixel CPU cost. Broad visual validation is complete; the
+default-with-software-fallback transition described above is now active.
 
 ---
 

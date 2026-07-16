@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "artifact": "settings_input_menu",
+  "date": "2026-07-16",
+  "scope": "host frontend, input routing, and user settings only",
+  "architecture": {
+    "bios_path_changed": false,
+    "generated_code_changed": false,
+    "hle_or_guest_shims_added": false,
+    "host_hardware_interaction": [
+      "SDL keyboard events",
+      "SDL game-controller enumeration and hot-plug events",
+      "macOS direct-USB GIP enumeration when compiled",
+      "SDL fullscreen and presentation filtering"
+    ]
+  },
+  "manifest": {
+    "pause_menu": {
+      "trigger": "Escape key-down",
+      "pause_boundary": "runtime vblank callback",
+      "audio_paused": true,
+      "pages": ["Controllers", "Keyboard", "Video"],
+      "resume_triggers": ["Escape", "Resume button", "menu window close"]
+    },
+    "input": {
+      "maximum_physical_controllers": 2,
+      "default_p1_route": "auto with keyboard fallback",
+      "default_p2_route": "auto, disconnected until assigned",
+      "default_pad_mode": "analog DualShock",
+      "identity_priority": ["controller serial", "platform device path", "legacy GUID"],
+      "new_controller_policy": "replace the most recently unplugged eligible slot",
+      "third_live_controller_policy": "remain unassigned"
+    },
+    "video": {
+      "default_renderer": "opengl",
+      "fallback_renderer": "software",
+      "pause_menu_options": ["fullscreen", "renderer", "antialiasing"],
+      "live_options": ["fullscreen", "antialiasing"],
+      "next_launch_options": ["renderer"]
+    },
+    "persistence": ["settings.toml", "keybinds.ini"]
+  },
+  "proof": {
+    "host_input_policy": {
+      "checks": 27,
+      "failures": 0,
+      "covers": [
+        "P1 keyboard fallback without a controller",
+        "exclusive first/second controller assignment",
+        "maximum of two live controllers",
+        "remembered-controller reconnect",
+        "last-unplugged replacement",
+        "serial/path identity fingerprints",
+        "legacy GUID compatibility",
+        "event-backed keyboard mapping"
+      ]
+    },
+    "config_round_trip": {
+      "passed": true,
+      "covers": [
+        "persistent P1/P2 identity strings",
+        "analog pad mode",
+        "OpenGL renderer",
+        "automatic defaults"
+      ]
+    },
+    "frontend_framebuffer": {
+      "target": "frontend_menu_smoke_test",
+      "result": "passed",
+      "resolution": [1280, 800],
+      "visible_pixels": 1023984,
+      "bright_ui_pixels": 29595,
+      "settings_model_committed": true
+    },
+    "rml_document": {
+      "xmllint": "passed"
+    },
+    "runtime_non_gui_tests": {
+      "passed": 5,
+      "failed": 0
+    },
+    "integration_compile": {
+      "main_cpp_object": "passed",
+      "launcher_cpp_object": "passed",
+      "frontend_smoke_link": "passed"
+    }
+  },
+  "environment_note": {
+    "framework_runtime_link": "not available in this checkout",
+    "reason": "generated/SCPH1001_full.c and generated/SCPH1001_dispatch.c are absent",
+    "response": "No generated artifact was hand-created or replaced with a stub; task integration was compiled at object level and the complete frontend was linked and rendered independently."
+  }
+}

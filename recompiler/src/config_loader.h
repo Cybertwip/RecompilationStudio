@@ -31,9 +31,11 @@ namespace PSXRecompV4 {
 //             press the D-pad -> report a digital pad (0x41) so the game runs
 //             its OWN d-pad path at true digital sensitivity. Mirrors a
 //             DualShock's analog LED toggling on/off (and Tomba Special
-//             Edition's auto-detect). Default.
+//             Edition's auto-detect).
 //   analog  — always present a DualShock/analog pad (id 0x73). The D-pad is
 //             folded onto the stick at full deflection so it still moves you.
+//             This is the host default unless a game explicitly locks another
+//             mode.
 //   digital — always present a digital pad (id 0x41); sticks disabled.
 enum PadMode { PAD_MODE_HYBRID = 0, PAD_MODE_ANALOG = 1, PAD_MODE_DIGITAL = 2 };
 
@@ -176,10 +178,10 @@ struct RuntimeConfig {
     // (smooths textures and 2D backgrounds). Stored as 0/1.
     int                   video_texture_filter = 0;
 
-    // renderer: "software" (default) | "opengl". Selects the rasterizer/present
-    // backend. The OpenGL backend is a hardware-accelerated alternative; the
-    // software rasterizer remains the fallback. Stored as 0=software, 1=opengl.
-    int                   video_renderer = 0;
+    // renderer: "software" | "opengl" (default). Selects the rasterizer/present
+    // backend. The software rasterizer remains the fallback. Stored as
+    // 0=software, 1=opengl.
+    int                   video_renderer = 1;
 
     // low_latency_input: re-sample the pad after the wall-clock pacer (just
     // before present) so the next CPU frame reads near-fresh input instead of
@@ -258,13 +260,13 @@ struct RuntimeConfig {
     // settings.toml values still override these. "auto" means SDL first with
     // the macOS direct-USB GIP backend as fallback when it is compiled.
     bool                  has_p1_device = false;
-    std::string           default_p1_device = "keyboard";
+    std::string           default_p1_device = "auto";
     bool                  has_p2_device = false;
-    std::string           default_p2_device = "none";
+    std::string           default_p2_device = "auto";
 
     // default_mode: the pad input mode this game ships with (see PadMode):
-    // "hybrid" (default) auto-switches DualShock/digital from the player's
-    // input, "analog" pins DualShock (0x73), "digital" pins a digital pad
+    // "hybrid" auto-switches DualShock/digital from the player's input,
+    // "analog" (default) pins DualShock (0x73), "digital" pins a digital pad
     // (0x41). A stick-capable title (e.g. Tomba) ships "hybrid" so the stick
     // gives variable run speed yet the D-pad keeps its classic digital feel,
     // with no launcher toggling. Per-install settings.toml [controller]
@@ -272,8 +274,8 @@ struct RuntimeConfig {
     // `p1_mode`/`p2_mode` set one. Legacy `default_analog`/`p1_analog`/
     // `p2_analog` booleans are still accepted (true->analog, false->digital).
     bool                  has_default_mode = false;
-    int                   default_p1_mode  = PAD_MODE_HYBRID;
-    int                   default_p2_mode  = PAD_MODE_HYBRID;
+    int                   default_p1_mode  = PAD_MODE_ANALOG;
+    int                   default_p2_mode  = PAD_MODE_ANALOG;
 
     // allow_hybrid: whether the launcher offers the "Hybrid" pad mode at all.
     // Default true (Hybrid | Analog | D-Pad). A game that needs an explicit
@@ -631,7 +633,7 @@ struct GameConfig {
 // are NOT resolved against a project root.
 struct UserSettings {
     // [video]
-    bool has_renderer       = false; int  renderer       = 0; // 0=software,1=opengl
+    bool has_renderer       = false; int  renderer       = 1; // 0=software,1=opengl
     bool has_supersampling  = false; int  supersampling  = 1; // 1..4
     // Window size: width in px; height is always width*3/4 (PSX 4:3). Applies to
     // both the launcher and the emulator window so they boot at the same size.
@@ -684,18 +686,19 @@ struct UserSettings {
     // [controller] — per-player input device + pad type. device is one of:
     //   "none"     — no pad in this port (port not connected)
     //   "keyboard" — driven by the keyboard map (input.ini)
-    //   "<GUID>"   — an SDL game-controller GUID (SDL_JoystickGetGUIDString)
+    //   "sdl:..."  — a persistent SDL controller identity (legacy GUIDs read)
     //   "gip:..."   — a macOS direct-USB Xbox GIP selector emitted by the launcher
     //   "auto"      — SDL first, then direct USB GIP when the macOS backend exists
     // p1_mode/p2_mode select the emulated pad behaviour (see PadMode):
-    // hybrid (default) / analog / digital. Defaults: P1 keyboard, P2 none.
-    bool has_p1_device = false; std::string p1_device = "keyboard";
-    bool has_p2_device = false; std::string p2_device = "none";
-    // Pad input mode per player (see PadMode): hybrid (default) / analog /
+    // hybrid / analog (default) / digital. Automatic routing remembers at most
+    // two physical pads; P1 falls back to keyboard while its pad is absent.
+    bool has_p1_device = false; std::string p1_device = "auto";
+    bool has_p2_device = false; std::string p2_device = "auto";
+    // Pad input mode per player (see PadMode): hybrid / analog (default) /
     // digital. Persisted as p1_mode/p2_mode strings. Legacy p1_analog/p2_analog
     // booleans are still read for back-compat (true->analog, false->digital).
-    bool has_p1_mode = false; int p1_mode = PAD_MODE_HYBRID;
-    bool has_p2_mode = false; int p2_mode = PAD_MODE_HYBRID;
+    bool has_p1_mode = false; int p1_mode = PAD_MODE_ANALOG;
+    bool has_p2_mode = false; int p2_mode = PAD_MODE_ANALOG;
     // Analog-stick deadzone, raw SDL axis units (0..32767). The launcher edits
     // this as 0-100% (raw = pct*32767/100), mirroring snesrecomp's GamepadDeadzone.
     bool has_deadzone  = false; int  deadzone  = 12000;

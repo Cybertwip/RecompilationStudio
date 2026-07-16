@@ -138,6 +138,7 @@ endif()
 # lib/RmlUi + lib/freetype submodules. ON by default; 
 # Turn OFF for a launcher-less runtime (boots straight in).
 option(PSX_LAUNCHER "Build the integrated RmlUi launcher UI" ON)
+option(PSX_SETTINGS_MENU "Build the ESC pause/settings menu" ON)
 
 # Build the vendored RmlUi + FreeType once per CMake project (idempotent — the
 # rmlui_core target guards re-entry). Both are linked statically into the exe so
@@ -240,6 +241,7 @@ set(PSXRECOMP_RUNTIME_SOURCES
     ${PSXRECOMP_ROOT}/runtime/src/event_ring.c
     ${PSXRECOMP_ROOT}/runtime/src/game_options.c
     ${PSXRECOMP_ROOT}/runtime/src/psx_keybinds.c
+    ${PSXRECOMP_ROOT}/runtime/src/controller_identity.cpp
     ${PSXRECOMP_ROOT}/recompiler/src/config_loader.cpp
     ${PSXRECOMP_ROOT}/recompiler/src/ps1_exe_parser.cpp
     # Tier-2 in-process JIT backend (sljit, BSD-2-Clause). Single TU; sljit
@@ -546,8 +548,10 @@ function(psxrecomp_add_runtime_target target)
         target_compile_definitions(${target} PRIVATE PSX_COSIM=1 PSX_NO_DEBUG_TOOLS=1)
     endif()
 
-    # Integrated RmlUi launcher (not in the oracle build — that's headless).
-    if(PSX_LAUNCHER AND NOT PSXRT_ORACLE)
+    # Shared RmlUi frontend. The pre-launch dashboard is optional, while the
+    # in-session ESC settings menu is independently selectable and on by
+    # default. Neither belongs in the headless oracle build.
+    if((PSX_LAUNCHER OR PSX_SETTINGS_MENU) AND NOT PSXRT_ORACLE)
         psxrecomp_ensure_launcher_libs()
         target_sources(${target} PRIVATE
             ${PSXRECOMP_ROOT}/runtime/launcher/launcher.cpp
@@ -569,7 +573,13 @@ function(psxrecomp_add_runtime_target target)
             ${PSXRECOMP_ROOT}/runtime/launcher
         )
         target_link_libraries(${target} PRIVATE RmlUi::Core)
-        target_compile_definitions(${target} PRIVATE PSX_LAUNCHER=1)
+        target_compile_definitions(${target} PRIVATE PSX_FRONTEND_UI=1)
+        if(PSX_LAUNCHER)
+            target_compile_definitions(${target} PRIVATE PSX_LAUNCHER=1)
+        endif()
+        if(PSX_SETTINGS_MENU)
+            target_compile_definitions(${target} PRIVATE PSX_SETTINGS_MENU=1)
+        endif()
         # Ship the launcher assets (RML/RCSS/fonts) next to the exe.
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory

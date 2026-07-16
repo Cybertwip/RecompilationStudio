@@ -65,6 +65,7 @@ if(BUILD_TESTING)
     add_executable(host_input_policy_test
         tests/host_input_policy_test.cpp
         src/psx_keybinds.c
+        src/controller_identity.cpp
     )
     target_include_directories(host_input_policy_test PRIVATE
         include
@@ -72,6 +73,59 @@ if(BUILD_TESTING)
     )
     target_link_libraries(host_input_policy_test PRIVATE ${SDL2_LIBRARIES})
     add_test(NAME host_input_policy COMMAND host_input_policy_test)
+
+    if(PSX_SETTINGS_MENU)
+        psxrecomp_ensure_launcher_libs()
+        add_executable(frontend_menu_smoke_test
+            tests/frontend_menu_smoke_test.cpp
+            launcher/launcher.cpp
+            launcher/stb_image_impl.cpp
+            ${PSXRECOMP_ROOT}/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
+            ${PSXRECOMP_ROOT}/lib/RmlUi/Backends/RmlUi_Renderer_GL3.cpp
+            src/controller_identity.cpp
+            src/disc_identity.cpp
+            src/crc32.c
+            src/memcard.c
+            src/psx_keybinds.c
+            ${PSXRECOMP_ROOT}/recompiler/src/config_loader.cpp
+            ${PSXRECOMP_ROOT}/recompiler/src/ps1_exe_parser.cpp
+        )
+        target_include_directories(frontend_menu_smoke_test PRIVATE
+            include
+            launcher
+            ${PSXRECOMP_ROOT}/recompiler/src
+            ${PSXRECOMP_ROOT}/recompiler/include
+            ${PSXRECOMP_ROOT}/recompiler/lib/fmt/include
+            ${PSXRECOMP_ROOT}/recompiler/lib/toml11
+            ${PSXRECOMP_ROOT}/lib/RmlUi/Include
+            ${PSXRECOMP_ROOT}/lib/RmlUi/Backends
+            ${SDL2_INCLUDE_DIRS}
+        )
+        target_compile_definitions(frontend_menu_smoke_test PRIVATE
+            FMT_HEADER_ONLY=1
+            PSX_TEST_ASSETS_DIR="${PSXRECOMP_ROOT}/runtime/launcher/assets"
+        )
+        if(NOT MSVC)
+            set_source_files_properties(
+                ${PSXRECOMP_ROOT}/lib/RmlUi/Backends/RmlUi_Renderer_GL3.cpp
+                PROPERTIES COMPILE_OPTIONS "-include;algorithm")
+        endif()
+        target_link_libraries(frontend_menu_smoke_test PRIVATE
+            RmlUi::Core ${SDL2_LIBRARIES})
+        if(SDL2_LIBRARY_DIRS)
+            target_link_directories(frontend_menu_smoke_test PRIVATE ${SDL2_LIBRARY_DIRS})
+        endif()
+        if(WIN32 OR MINGW)
+            target_link_libraries(frontend_menu_smoke_test PRIVATE comdlg32 opengl32)
+        elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            find_package(OpenGL)
+            if(OpenGL_FOUND)
+                target_link_libraries(frontend_menu_smoke_test PRIVATE OpenGL::GL)
+            endif()
+        endif()
+        # Deliberately not registered with CTest: it needs a real WindowServer/X
+        # display and is a manual visual-proof target for developer machines.
+    endif()
 
     add_executable(text_xlate_policy_test
         tests/text_xlate_policy_test.cpp

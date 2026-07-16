@@ -331,18 +331,18 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
         // Preferred string form.
         if (ct.contains("default_mode")) {
             const int m = pad_mode_from_string(
-                toml::find<std::string>(ct, "default_mode"), PAD_MODE_HYBRID);
+                toml::find<std::string>(ct, "default_mode"), PAD_MODE_ANALOG);
             rt.default_p1_mode = rt.default_p2_mode = m;
             rt.has_default_mode = true;
         }
         if (ct.contains("p1_mode")) {
             rt.default_p1_mode = pad_mode_from_string(
-                toml::find<std::string>(ct, "p1_mode"), PAD_MODE_HYBRID);
+                toml::find<std::string>(ct, "p1_mode"), PAD_MODE_ANALOG);
             rt.has_default_mode = true;
         }
         if (ct.contains("p2_mode")) {
             rt.default_p2_mode = pad_mode_from_string(
-                toml::find<std::string>(ct, "p2_mode"), PAD_MODE_HYBRID);
+                toml::find<std::string>(ct, "p2_mode"), PAD_MODE_ANALOG);
             rt.has_default_mode = true;
         }
         if (ct.contains("allow_hybrid")) {
@@ -1207,12 +1207,12 @@ UserSettings load_user_settings(const fs::path& path) {
         });
         if (ct.contains("p1_mode")) try_get([&]{
             s.p1_mode = pad_mode_from_string(
-                toml::find<std::string>(ct, "p1_mode"), PAD_MODE_HYBRID);
+                toml::find<std::string>(ct, "p1_mode"), PAD_MODE_ANALOG);
             s.has_p1_mode = true;
         });
         if (ct.contains("p2_mode")) try_get([&]{
             s.p2_mode = pad_mode_from_string(
-                toml::find<std::string>(ct, "p2_mode"), PAD_MODE_HYBRID);
+                toml::find<std::string>(ct, "p2_mode"), PAD_MODE_ANALOG);
             s.has_p2_mode = true;
         });
         if (ct.contains("deadzone")) try_get([&]{

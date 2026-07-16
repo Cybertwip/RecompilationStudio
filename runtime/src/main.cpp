@@ -53,10 +53,11 @@
 #include "iso_reader.h"      /* text-image guard: extract the boot EXE from the disc */
 #include "psx_keybinds.h"    /* configurable keyboard->DualShock keybinds (keybinds.ini) */
 #include "host_input_policy.h"
+#include "controller_identity.h"
 #if defined(PSX_HAVE_GIP_GAMEPAD)
 #include "gip_gamepad.h"      /* macOS direct-USB Xbox GIP controllers */
 #endif
-#if defined(PSX_LAUNCHER)
+#if defined(PSX_FRONTEND_UI)
 #include "launcher.h"
 #endif
 #include <SDL.h>
@@ -276,17 +277,16 @@ struct PlayerInput {
     /* 0=none, 1=keyboard, 2=SDL controller, 3=direct USB GIP,
      * 4=automatic (SDL first, then direct USB GIP on supported macOS builds). */
     int   kind = 0;
-    char  guid[40] = {0};      /* SDL joystick GUID for kind 2 */
+    std::string device_id;      /* persistent SDL id or direct-USB selector */
 #if defined(PSX_HAVE_GIP_GAMEPAD)
-    char  gip_selector[PSX_GIP_SELECTOR_CAPACITY] = {0};
     PsxGipGamepad* gip = nullptr;
 #endif
-    /* Pad input mode (PSXRecompV4::PadMode): 0=hybrid (default), 1=analog,
+    /* Pad input mode (PSXRecompV4::PadMode): 0=hybrid, 1=analog (default),
      * 2=digital. hybrid_analog is the per-frame auto-switch latch used only in
      * hybrid mode: true => currently presenting DualShock (stick was the last
      * input), false => currently presenting a digital pad (D-pad was last). */
-    int   mode = PSXRecompV4::PAD_MODE_HYBRID;
-    bool  hybrid_analog = false;
+    int   mode = PSXRecompV4::PAD_MODE_ANALOG;
+    bool  hybrid_analog = true;
     SDL_GameController* handle = nullptr;
     SDL_JoystickID      instance = -1;
 };
@@ -296,12 +296,12 @@ static PlayerInput g_players[2];
 static uint16_t g_keyboard_edge_mask[2] = { 0, 0 };  /* active-high PSX bits */
 static uint8_t  g_keyboard_edge_frames[2] = { 0, 0 };
 static int      g_external_controller_mappings = 0;
-#if defined(__linux__)
-/* The frontend shortcuts prove the SDL key event stream is live on Linux.
- * Keep PSX held-key state on that same stream instead of depending on a second
- * polled snapshot with separate backend/compositor behavior. */
-static PSXRecompV4::HostKeyboardState g_linux_keyboard_state;
-#endif
+/* Keep guest keyboard state on the same SDL event stream that drives frontend
+ * shortcuts. This guarantees that a working Alt+Enter path also means the PSX
+ * key map receives the event, independent of platform polling quirks. */
+static PSXRecompV4::HostKeyboardState g_host_keyboard_state;
+static std::filesystem::path g_user_settings_path;
+static int g_last_unplugged_slot = -1;
 
 
 typedef struct FrontendInputTraceEntry {
@@ -341,26 +341,15 @@ static SDL_Scancode host_event_scancode(const SDL_KeyboardEvent& event) {
 }
 
 static void host_keyboard_event(const SDL_KeyboardEvent& event, bool pressed) {
-#if defined(__linux__)
-    g_linux_keyboard_state.update(event, pressed);
-#else
-    (void)event;
-    (void)pressed;
-#endif
+    g_host_keyboard_state.update(event, pressed);
 }
 
 static void host_keyboard_reset(void) {
-#if defined(__linux__)
-    g_linux_keyboard_state.reset();
-#endif
+    g_host_keyboard_state.reset();
 }
 
 static const Uint8* host_keyboard_state(void) {
-#if defined(__linux__)
-    return g_linux_keyboard_state.data();
-#else
-    return SDL_GetKeyboardState(NULL);
-#endif
+    return g_host_keyboard_state.data();
 }
 
 static void configure_sdl_input_hints(void) {
@@ -440,8 +429,16 @@ static uint32_t*     sdl_pixel_buf = nullptr;
 static int           g_video_scale = 1;     /* internal-resolution SSAA factor */
 static bool          g_video_aa    = true;  /* linear present filtering */
 static int           g_video_texfilter = 0; /* 0=nearest, 1=bilinear */
-static int           g_video_renderer = 0;  /* 0=software, 1=opengl (requested) */
+static int           g_video_renderer = 1;  /* 0=software, 1=opengl (requested) */
 static int           g_fullscreen     = 0;  /* launch the game window in desktop fullscreen */
+#if defined(PSX_SETTINGS_MENU)
+static std::string   g_pause_assets_dir;
+static std::string   g_pause_game_name = "PSX";
+static bool          g_pause_allow_hybrid = true;
+static bool          g_pause_lock_mode = false;
+static bool          g_pause_lock_device = false;
+static int           g_pause_locked_mode = PSXRecompV4::PAD_MODE_ANALOG;
+#endif
 
 /* SDL GL attributes must be set BEFORE creating the window. The launcher used
  * to do this incidentally, so no-launcher builds created a legacy 2.1 context
@@ -1703,53 +1700,68 @@ static void close_controller(void) {
     close_player(g_players[1]);
 }
 
-/* Open the configured physical source. SDL GUID routing remains unchanged.
- * Automatic routing prefers SDL and uses direct USB GIP only when SDL exposes
- * no controller, which avoids double-opening devices SDL already supports. */
-static void open_player(PlayerInput& p, const PlayerInput& other) {
-    const bool wants_sdl = p.kind == 2 || p.kind == 4;
-#if defined(PSX_HAVE_GIP_GAMEPAD)
-    const bool wants_gip = p.kind == 3 || p.kind == 4;
-    if ((p.handle || p.gip) || (!wants_sdl && !wants_gip)) return;
-#else
-    if (p.handle || !wants_sdl) return;
-#endif
+static std::string player_route_string(const PlayerInput& p) {
+    if (p.kind == PSXRecompV4::HOST_INPUT_NONE) return "none";
+    if (p.kind == PSXRecompV4::HOST_INPUT_KEYBOARD) return "keyboard";
+    if (p.kind == PSXRecompV4::HOST_INPUT_AUTOMATIC) return "auto";
+    return p.device_id;
+}
 
-    if (wants_sdl) {
-        int chosen = -1, fallback = -1;
-        const int joysticks = SDL_NumJoysticks();
-        for (int i = 0; i < joysticks; i++) {
-            if (!SDL_IsGameController(i)) continue;
-            SDL_JoystickGUID g = SDL_JoystickGetDeviceGUID(i);
-            char buf[40] = {0};
-            SDL_JoystickGetGUIDString(g, buf, sizeof(buf));
-            /* Skip a device already opened by the other player. */
-            SDL_JoystickID inst = SDL_JoystickGetDeviceInstanceID(i);
-            if (other.handle && other.instance == inst) continue;
-            if (p.guid[0] && std::strcmp(buf, p.guid) == 0) { chosen = i; break; }
-            if (fallback < 0) fallback = i;
-        }
-        if (chosen < 0) chosen = fallback;
-        if (chosen >= 0) {
-            p.handle = SDL_GameControllerOpen(chosen);
-            if (p.handle) {
-                SDL_Joystick* joy = SDL_GameControllerGetJoystick(p.handle);
-                p.instance = joy ? SDL_JoystickInstanceID(joy) : -1;
-                const char* name = SDL_GameControllerName(p.handle);
-                std::fprintf(stdout, "psxrecomp runtime: opened controller for slot: %s\n",
-                             name ? name : "(unnamed)");
-                return;
-            }
-        }
-    }
-
+static bool player_physical_attached(const PlayerInput& p) {
+    if (p.handle && SDL_GameControllerGetAttached(p.handle)) return true;
 #if defined(PSX_HAVE_GIP_GAMEPAD)
-    if (wants_gip) {
-        const char* selector = p.kind == 3 && p.gip_selector[0]
-                                 ? p.gip_selector : "gip:auto";
-        p.gip = psx_gip_gamepad_open(selector);
-    }
+    if (p.gip && psx_gip_gamepad_connection(p.gip) == PSX_GIP_CONNECTION_CONNECTED)
+        return true;
 #endif
+    return false;
+}
+
+static bool player_route_claimed(const PlayerInput& p) {
+    if (p.handle) return true;
+#if defined(PSX_HAVE_GIP_GAMEPAD)
+    if (p.gip) return true;
+#endif
+    return false;
+}
+
+static bool player_keyboard_fallback(const PlayerInput& p, int slot) {
+    return PSXRecompV4::host_route_uses_keyboard(
+        p.kind, player_physical_attached(p), slot);
+}
+
+static void persist_controller_settings(void) {
+    if (g_user_settings_path.empty()) return;
+    PSXRecompV4::UserSettings settings =
+        PSXRecompV4::load_user_settings(g_user_settings_path);
+    settings.p1_device = player_route_string(g_players[0]);
+    settings.p2_device = player_route_string(g_players[1]);
+    settings.has_p1_device = true;
+    settings.has_p2_device = true;
+    settings.p1_mode = g_players[0].mode;
+    settings.p2_mode = g_players[1].mode;
+    settings.has_p1_mode = true;
+    settings.has_p2_mode = true;
+    PSXRecompV4::save_user_settings(g_user_settings_path, settings);
+}
+
+static void persist_fullscreen_setting(bool fullscreen) {
+    if (g_user_settings_path.empty()) return;
+    PSXRecompV4::UserSettings settings =
+        PSXRecompV4::load_user_settings(g_user_settings_path);
+    settings.fullscreen = fullscreen;
+    settings.has_fullscreen = true;
+    PSXRecompV4::save_user_settings(g_user_settings_path, settings);
+}
+
+static bool open_sdl_player(PlayerInput& p,
+                            const PSXRecompV4::SdlControllerIdentity& identity) {
+    if (identity.device_index < 0) return false;
+    SDL_GameController* handle = SDL_GameControllerOpen(identity.device_index);
+    if (!handle) return false;
+    p.handle = handle;
+    SDL_Joystick* joy = SDL_GameControllerGetJoystick(handle);
+    p.instance = joy ? SDL_JoystickInstanceID(joy) : identity.instance_id;
+    return true;
 }
 
 /* The pad type a mode reports before any input has been sampled (boot /
@@ -1766,11 +1778,124 @@ static int pad_mode_boot_analog(int mode) {
 /* Open/close physical handles so they match g_players, and (re)assert each
  * slot's PSX connection + pad type. Safe to call repeatedly (hotplug, boot). */
 static void refresh_player_devices(void) {
+    bool routes_changed = false;
+
+    for (PlayerInput& p : g_players) {
+        if (p.handle && !SDL_GameControllerGetAttached(p.handle)) close_player(p);
+        if (p.kind == PSXRecompV4::HOST_INPUT_NONE ||
+            p.kind == PSXRecompV4::HOST_INPUT_KEYBOARD) {
+            close_player(p);
+        }
+    }
+
+    std::vector<PSXRecompV4::SdlControllerIdentity> live;
+    const int joystick_count = SDL_NumJoysticks();
+    live.reserve((size_t)std::max(0, joystick_count));
+    for (int i = 0; i < joystick_count; ++i) {
+        auto identity = PSXRecompV4::describe_sdl_controller(i);
+        if (!identity.persistent_id.empty()) live.push_back(std::move(identity));
+    }
+
+    std::vector<bool> claimed(live.size(), false);
+    for (int slot = 0; slot < 2; ++slot) {
+        PlayerInput& p = g_players[slot];
+        if (p.handle) {
+            for (size_t i = 0; i < live.size(); ++i)
+                if (live[i].instance_id == p.instance) claimed[i] = true;
+            continue;
+        }
+        if (p.kind != PSXRecompV4::HOST_INPUT_SDL_CONTROLLER) continue;
+        for (size_t i = 0; i < live.size(); ++i) {
+            if (claimed[i] ||
+                !PSXRecompV4::sdl_controller_id_matches(p.device_id, live[i]))
+                continue;
+            if (open_sdl_player(p, live[i])) {
+                claimed[i] = true;
+                if (p.device_id != live[i].persistent_id) {
+                    p.device_id = live[i].persistent_id;
+                    routes_changed = true;
+                }
+            }
+            break;
+        }
+    }
+
+    for (size_t i = 0; i < live.size(); ++i) {
+        if (claimed[i]) continue;
+        std::array<std::string, 2> routes = {
+            player_route_string(g_players[0]), player_route_string(g_players[1])};
+        std::array<bool, 2> connected = {
+            player_route_claimed(g_players[0]),
+            player_route_claimed(g_players[1])};
+        const int slot = PSXRecompV4::host_controller_assignment_slot(
+            routes, connected, g_last_unplugged_slot, live[i].persistent_id);
+        if (slot < 0) continue;
+
+        PlayerInput& p = g_players[slot];
+        close_player(p);
+        p.kind = PSXRecompV4::HOST_INPUT_SDL_CONTROLLER;
+        p.device_id = live[i].persistent_id;
+        if (open_sdl_player(p, live[i])) {
+            claimed[i] = true;
+            routes_changed = true;
+            if (g_last_unplugged_slot == slot) g_last_unplugged_slot = -1;
+        }
+    }
+
+#if defined(PSX_HAVE_GIP_GAMEPAD)
+    /* Direct-USB routes retain the same selector across disconnect/reconnect;
+     * the GIP transport object waits for that exact controller to return. */
+    for (PlayerInput& p : g_players) {
+        if (p.kind == PSXRecompV4::HOST_INPUT_DIRECT_USB && !p.gip &&
+            !p.device_id.empty()) {
+            p.gip = psx_gip_gamepad_open(p.device_id.c_str());
+        }
+    }
+
+    /* Controllers that SDL cannot expose (wired Xbox GIP devices on macOS)
+     * participate in the same exclusive two-slot assignment policy. */
+    std::array<PsxGipGamepadInfo, 16> direct{};
+    const size_t direct_total = psx_gip_gamepad_enumerate(
+        direct.data(), direct.size());
+    const size_t direct_count = std::min(direct_total, direct.size());
+    for (size_t i = 0; i < direct_count; ++i) {
+        const std::string selector = direct[i].selector;
+        bool already_claimed = false;
+        for (const PlayerInput& p : g_players) {
+            if (p.kind == PSXRecompV4::HOST_INPUT_DIRECT_USB &&
+                p.device_id == selector) {
+                already_claimed = true;
+                break;
+            }
+        }
+        if (already_claimed) continue;
+
+        std::array<std::string, 2> routes = {
+            player_route_string(g_players[0]), player_route_string(g_players[1])};
+        std::array<bool, 2> connected = {
+            player_route_claimed(g_players[0]),
+            player_route_claimed(g_players[1])};
+        const int slot = PSXRecompV4::host_controller_assignment_slot(
+            routes, connected, g_last_unplugged_slot, selector);
+        if (slot < 0) continue;
+
+        PlayerInput& p = g_players[slot];
+        close_player(p);
+        p.kind = PSXRecompV4::HOST_INPUT_DIRECT_USB;
+        p.device_id = selector;
+        p.gip = psx_gip_gamepad_open(selector.c_str());
+        if (p.gip) {
+            routes_changed = true;
+            if (g_last_unplugged_slot == slot) g_last_unplugged_slot = -1;
+        }
+    }
+#endif
+
     for (int s = 0; s < 2; s++) {
         PlayerInput& p = g_players[s];
-        if (p.kind < 2 || p.kind > 4) close_player(p);
-        else open_player(p, g_players[s ^ 1]);
-        sio_set_pad_connected(s, p.kind != 0 ? 1 : 0);
+        const bool connected = player_physical_attached(p) ||
+                               player_keyboard_fallback(p, s);
+        sio_set_pad_connected(s, connected ? 1 : 0);
         sio_set_pad_analog(s, pad_mode_boot_analog(p.mode), 0x80, 0x80, 0x80, 0x80);
         /* DIGITAL mode == a plain digital controller that ignores the DualShock
          * config-mode commands (real SCPH-1080 behaviour); ANALOG/HYBRID == a
@@ -1778,20 +1903,20 @@ static void refresh_player_devices(void) {
          * sent Tomba 2's pad driver down the config path -> phantom 0x00 reads. */
         sio_set_pad_config_capable(s, p.mode != PSXRecompV4::PAD_MODE_DIGITAL);
     }
+    if (routes_changed) persist_controller_settings();
 }
 
 /* Parse a [controller] device string into a player slot:
  *   "none" -> no pad; "keyboard" -> keyboard map; "auto" -> SDL then GIP;
- *   "gip:..." -> direct USB GIP; otherwise an SDL GUID. */
+ *   "gip:..." -> direct USB GIP; otherwise a persistent SDL id (legacy bare
+ *   GUIDs remain accepted by the matcher). */
 static void set_player_device(PlayerInput& p, const std::string& dev, int mode) {
+    close_player(p);
     p.mode = mode;
     /* Hybrid starts in ANALOG (analog LED on); the auto-switch drops to digital
      * only when the player uses the d-pad. */
     p.hybrid_analog = true;
-    p.guid[0] = '\0';
-#if defined(PSX_HAVE_GIP_GAMEPAD)
-    p.gip_selector[0] = '\0';
-#endif
+    p.device_id.clear();
     std::string d = lower_copy(trim_copy(dev));
     if (d.empty() || d == "none") { p.kind = 0; }
     else if (d == "keyboard")     { p.kind = 1; }
@@ -1801,13 +1926,12 @@ static void set_player_device(PlayerInput& p, const std::string& dev, int mode) 
 #if defined(PSX_HAVE_GIP_GAMEPAD)
     else if (d.rfind("gip:", 0) == 0) {
         p.kind = 3;
-        std::snprintf(p.gip_selector, sizeof(p.gip_selector), "%s",
-                      trim_copy(dev).c_str());
+        p.device_id = trim_copy(dev);
     }
 #endif
     else {
         p.kind = 2;
-        std::snprintf(p.guid, sizeof(p.guid), "%s", trim_copy(dev).c_str());
+        p.device_id = trim_copy(dev);
     }
 }
 
@@ -1948,19 +2072,14 @@ static uint16_t physical_pad_buttons(const PlayerInput& p) {
 }
 
 static bool player_has_physical_input(const PlayerInput& p) {
-    if (p.handle && SDL_GameControllerGetAttached(p.handle)) return true;
-#if defined(PSX_HAVE_GIP_GAMEPAD)
-    if (p.gip && psx_gip_gamepad_connection(p.gip) == PSX_GIP_CONNECTION_CONNECTED)
-        return true;
-#endif
-    return false;
+    return player_physical_attached(p);
 }
 
-static bool player_uses_keyboard(const PlayerInput& p) {
-    /* Automatic routing is controller-first with a real keyboard fallback.
-     * This is release behavior, not the PSX_DEV_INPUT developer merge. */
+static bool player_uses_keyboard(const PlayerInput& p, int player) {
+    /* P1 always has a real keyboard fallback while an automatic/remembered
+     * physical pad is absent. P2 only uses keyboard when explicitly selected. */
     return PSXRecompV4::host_route_uses_keyboard(
-        p.kind, player_has_physical_input(p));
+        p.kind, player_has_physical_input(p), player - 1);
 }
 
 /* Radial deadzone: process a stick's X and Y together so the dead region is a
@@ -1995,7 +2114,7 @@ static void axes_to_pad_pair(int16_t vx, int16_t vy, uint8_t* obx, uint8_t* oby)
 /* Buttons for a player's selected device (0xFFFF = none pressed). `player` is
  * 1 or 2 — selects which keybinds.ini section drives a keyboard port. */
 static uint16_t pad_buttons_for(const PlayerInput& p, int player) {
-    if (player_uses_keyboard(p)) return pad_from_keyboard(player);
+    if (player_uses_keyboard(p, player)) return pad_from_keyboard(player);
     if (p.kind >= 2 && p.kind <= 4) return physical_pad_buttons(p);
     return 0xFFFF;
 }
@@ -2015,7 +2134,7 @@ static uint16_t pad_buttons_for(const PlayerInput& p, int player) {
  * — they are that player's only stick source. */
 static void pad_sticks_for(const PlayerInput& p, int player, uint8_t out[4], bool fold_dpad) {
     out[0] = out[1] = out[2] = out[3] = 0x80;
-    if (player_uses_keyboard(p)) {
+    if (player_uses_keyboard(p, player)) {
         /* Keyboard analog: the configurable left/right stick-direction binds
          * (default = arrow keys on the LEFT stick; RIGHT stick unbound), so the
          * old keyboard analog behaviour is preserved unless the user rebinds. */
@@ -2097,7 +2216,7 @@ static bool hybrid_dpad_active(const PlayerInput& p, int player, bool kb_always)
         }
     }
 #endif
-    if (player_uses_keyboard(p) || kb_always) {
+    if (player_uses_keyboard(p, player) || kb_always) {
         const Uint8* keys = host_keyboard_state();
         if (psx_keybinds_dpad_active(keys, player)) return true;
     }
@@ -2121,13 +2240,14 @@ static bool hybrid_dpad_active(const PlayerInput& p, int player, bool kb_always)
  * pad TYPE is left unchanged: a launcher-assigned analog DualShock still presents
  * as analog (so the game's analog input path / SIO handshake cadence is preserved
  * exactly), and merged sources only contribute button/stick STATE, never a type
- * downgrade. Controlled by PSX_DEV_INPUT (default ON for the dev workflow); set
- * PSX_DEV_INPUT=0 to restore strict single-device-per-port routing. */
+ * downgrade. Controlled by PSX_DEV_INPUT and OFF by default; set
+ * PSX_DEV_INPUT=1 only for an explicit diagnostic all-devices merge. */
 static bool dev_any_input_enabled() {
     static int cached = -1;
     if (cached < 0) {
         const char* e = std::getenv("PSX_DEV_INPUT");
-        cached = (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F')) ? 0 : 1;
+        cached = (e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' ||
+                        e[0] == 't' || e[0] == 'T')) ? 1 : 0;
     }
     return cached != 0;
 }
@@ -2270,7 +2390,7 @@ static void sample_pad_into_sio(int override) {
          * active-low, so AND combines "pressed on either source"). In dev mode P1
          * also folds in the keyboard binds and EVERY connected controller. */
         uint16_t btn = (p.kind != 0) ? pad_buttons_for(p, player) : (uint16_t)0xFFFF;
-        if (player_uses_keyboard(p) || dev_here)
+        if (player_uses_keyboard(p, player) || dev_here)
             btn &= (uint16_t)~g_keyboard_edge_mask[s];
         if (dev_here) {
             btn &= pad_from_keyboard(1);           /* keyboard drives P1 binds     */
@@ -2345,6 +2465,130 @@ static void sample_headless_pad_into_sio(int override) {
     sio_set_pad_state_slot(0, 0xFFFFu);
     sio_set_pad_state_slot(1, 0xFFFFu);
 }
+
+#if defined(PSX_SETTINGS_MENU)
+/* Run the shared RmlUi frontend in pause-menu mode on a short-lived GL window.
+ * The guest is blocked in this vblank callback for the entire loop, so CPU,
+ * timers, CD, and SIO all remain paused together. A dedicated frontend window
+ * keeps the menu renderer-independent: it works whether the game window uses
+ * OpenGL or the SDL software present path, and renderer changes can be safely
+ * persisted for the next launch without tearing down live guest hardware. */
+static void open_pause_settings_menu(void) {
+    if (!sdl_window || g_pause_assets_dir.empty()) return;
+
+    const bool was_fullscreen =
+        (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+    int old_x = SDL_WINDOWPOS_CENTERED, old_y = SDL_WINDOWPOS_CENTERED;
+    int old_w = 1280, old_h = 960;
+    SDL_GetWindowPosition(sdl_window, &old_x, &old_y);
+    SDL_GetWindowSize(sdl_window, &old_w, &old_h);
+
+    PSXRecompV4::UserSettings settings =
+        PSXRecompV4::load_user_settings(g_user_settings_path);
+    if (!settings.has_renderer) {
+        settings.renderer = g_video_renderer;
+        settings.has_renderer = true;
+    }
+    settings.supersampling = g_video_scale;       settings.has_supersampling = true;
+    settings.antialiasing = g_video_aa;           settings.has_antialiasing = true;
+    settings.texture_filter = g_video_texfilter;  settings.has_texture_filter = true;
+    settings.screen_kind = g_video_screen;        settings.has_screen_kind = true;
+    settings.auto_skip_fmv = g_auto_skip_fmv != 0;
+    settings.has_auto_skip_fmv = true;
+    settings.turbo_loads = g_turbo_loads_enabled != 0;
+    settings.has_turbo_loads = true;
+    settings.fullscreen = was_fullscreen;         settings.has_fullscreen = true;
+    settings.window_width = g_video_win_w;        settings.has_window_width = true;
+    settings.frame_interpolation = g_frame_interpolation != 0;
+    settings.has_frame_interpolation = true;
+    settings.frame_interpolation_fps = g_frame_interpolation_fps;
+    settings.has_frame_interpolation_fps = true;
+    settings.aspect_num = g_video_aspect_num;
+    settings.aspect_den = g_video_aspect_den;      settings.has_aspect_ratio = true;
+    settings.spu_hq = g_audio_spu_hq;             settings.has_spu_hq = true;
+    settings.p1_device = player_route_string(g_players[0]);
+    settings.p2_device = player_route_string(g_players[1]);
+    settings.has_p1_device = settings.has_p2_device = true;
+    settings.p1_mode = g_players[0].mode;
+    settings.p2_mode = g_players[1].mode;
+    settings.has_p1_mode = settings.has_p2_mode = true;
+    settings.deadzone = controller_deadzone;      settings.has_deadzone = true;
+
+    psx_launcher::GameInfo game;
+    game.name = g_pause_game_name.c_str();
+    game.allow_hybrid = g_pause_allow_hybrid;
+    game.lock_mode = g_pause_lock_mode;
+    game.locked_mode = g_pause_locked_mode;
+    game.lock_device = g_pause_lock_device;
+
+    if (sdl_audio_device) SDL_PauseAudioDevice(sdl_audio_device, 1);
+    host_keyboard_reset();
+    g_keyboard_edge_mask[0] = g_keyboard_edge_mask[1] = 0;
+    g_keyboard_edge_frames[0] = g_keyboard_edge_frames[1] = 0;
+
+    SDL_GLContext previous_context = SDL_GL_GetCurrentContext();
+    SDL_Window* previous_window = SDL_GL_GetCurrentWindow();
+    if (was_fullscreen) SDL_SetWindowFullscreen(sdl_window, 0);
+    SDL_HideWindow(sdl_window);
+
+    configure_gl_window_attributes();
+    int menu_w = std::max(old_w, 1280);
+    int menu_h = std::max(old_h, 800);
+    const std::string title = g_pause_game_name + " — Paused";
+    SDL_Window* menu_window = SDL_CreateWindow(
+        title.c_str(), old_x, old_y, menu_w, menu_h,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE |
+        SDL_WINDOW_ALWAYS_ON_TOP);
+
+    psx_launcher::Result result = psx_launcher::Result::Unavailable;
+    SDL_GLContext menu_context = nullptr;
+    if (menu_window) {
+        menu_context = SDL_GL_CreateContext(menu_window);
+        if (menu_context) {
+            SDL_GL_MakeCurrent(menu_window, menu_context);
+            SDL_GL_SetSwapInterval(1);
+            result = psx_launcher::run(
+                menu_window, menu_context, settings, game,
+                g_pause_assets_dir.c_str(), psx_launcher::Mode::PauseMenu);
+        }
+    }
+    if (menu_context) SDL_GL_DeleteContext(menu_context);
+    if (menu_window) SDL_DestroyWindow(menu_window);
+    SDL_GL_ResetAttributes();
+    if (previous_context && previous_window)
+        SDL_GL_MakeCurrent(previous_window, previous_context);
+
+    if (result == psx_launcher::Result::Launch) {
+        g_video_aa = settings.antialiasing;
+        g_fullscreen = settings.fullscreen ? 1 : 0;
+        if (sdl_texture) {
+            SDL_SetTextureScaleMode(sdl_texture,
+                g_video_aa ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        }
+
+        set_player_device(g_players[0], settings.p1_device, settings.p1_mode);
+        set_player_device(g_players[1], settings.p2_device, settings.p2_mode);
+        controller_deadzone = std::max(0, std::min(32767, settings.deadzone));
+        g_last_unplugged_slot = -1;
+        PSXRecompV4::save_user_settings(g_user_settings_path, settings);
+        refresh_player_devices();
+    } else {
+        g_fullscreen = was_fullscreen ? 1 : 0;
+    }
+
+    SDL_ShowWindow(sdl_window);
+    SDL_SetWindowFullscreen(sdl_window,
+        g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    SDL_RaiseWindow(sdl_window);
+    if (result == psx_launcher::Result::Unavailable) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Settings unavailable",
+            "The settings menu could not initialize. The game has been resumed.",
+            sdl_window);
+    }
+    host_keyboard_reset();
+    if (sdl_audio_device) SDL_PauseAudioDevice(sdl_audio_device, 0);
+}
+#endif
 
 /* PSX native vblank cadence: NTSC ≈ 59.94 Hz. Wall-clock target keeps
  * audio sample generation (735 samples/vblank * 60 = 44100/sec) matched
@@ -2603,11 +2847,14 @@ static void sdl_vblank_present(void) {
             } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
                 refresh_player_devices();
             } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-                if (ev.cdevice.which == g_players[0].instance ||
-                    ev.cdevice.which == g_players[1].instance) {
-                    close_controller();
-                    refresh_player_devices();
+                for (int slot = 0; slot < 2; ++slot) {
+                    if (ev.cdevice.which == g_players[slot].instance) {
+                        close_player(g_players[slot]);
+                        g_last_unplugged_slot = slot;
+                        break;
+                    }
                 }
+                refresh_player_devices();
             } else if (ev.type == SDL_WINDOWEVENT &&
                        ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
                 host_keyboard_reset();
@@ -2618,10 +2865,17 @@ static void sdl_vblank_present(void) {
                 const SDL_Scancode event_scancode = host_event_scancode(ev.key);
                 const Uint16 mod = ev.key.keysym.mod;
                 bool shortcut = false;
+#if defined(PSX_SETTINGS_MENU)
+                if (ev.key.keysym.sym == SDLK_ESCAPE && !ev.key.repeat) {
+                    open_pause_settings_menu();
+                    shortcut = true;
+                }
+#endif
                 /* Save states: Shift+F1-F12 = save slot 0-11, F1-F12 = load.
                  * (F11 is a save slot per the user's spec, so fullscreen is
                  * Alt+Enter / Cmd+Ctrl+F only — no F11.) */
-                if (ev.key.keysym.sym >= SDLK_F1 && ev.key.keysym.sym <= SDLK_F12) {
+                if (!shortcut && ev.key.keysym.sym >= SDLK_F1 &&
+                    ev.key.keysym.sym <= SDLK_F12) {
                     int slot = (int)(ev.key.keysym.sym - SDLK_F1);   /* 0..11 */
                     if (mod & KMOD_SHIFT) savestate_request_save(slot);
                     else                  savestate_request_load(slot);
@@ -2634,9 +2888,17 @@ static void sdl_vblank_present(void) {
                          (ev.key.keysym.sym == SDLK_f && (mod & (KMOD_GUI | KMOD_CTRL)))) {
                     Uint32 is_fs = SDL_GetWindowFlags(sdl_window) &
                                    SDL_WINDOW_FULLSCREEN_DESKTOP;
-                    SDL_SetWindowFullscreen(sdl_window,
-                        is_fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                    g_fullscreen = is_fs ? 0 : 1;
+                    SDL_SetWindowFullscreen(sdl_window, g_fullscreen
+                        ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                    persist_fullscreen_setting(g_fullscreen != 0);
                     shortcut = true;
+                }
+                if (shortcut) {
+                    /* Frontend shortcuts are never guest inputs even when the
+                     * same key is mapped in keybinds.ini (notably Return/Start
+                     * for Alt+Enter). The real KEYUP will repeat this harmlessly. */
+                    host_keyboard_event(ev.key, false);
                 }
                 if (!shortcut && !ev.key.repeat) {
                     uint16_t p1_mask = 0;
@@ -3243,21 +3505,13 @@ int main(int argc, char** argv) {
     std::filesystem::path memcard2_path;   /* explicit slot-2 .mcd (empty => dir/card2.mcd) */
     bool memcard1_enabled = true;
     bool memcard2_enabled = true;
-    /* [controller] device routing (defaults: P1 keyboard/digital, P2 none). */
-    /* Dev builds default Player 1 to the first connected controller ("auto"):
-     * combined with dev-any-input (dev_any_input_enabled(), default ON) the
-     * selected controller, EVERY other plugged-in controller, AND the keyboard
-     * all drive P1 with no launcher setup. If no controller is present, "auto"
-     * opens nothing and the keyboard/any-controller merge still drives P1.
-     * Release keeps "keyboard" (the launcher assigns devices). */
-#if defined(PSX_DEBUG_TOOLS)
+    /* [controller] device routing. Two automatic slots claim controllers in
+     * connection order and persist their identities. With no P1 controller,
+     * keyboard is the live fallback; P2 remains disconnected until assigned. */
     std::string p1_device = "auto";
-#else
-    std::string p1_device = "keyboard";
-#endif
-    std::string p2_device = "none";
-    int  p1_mode = PSXRecompV4::PAD_MODE_HYBRID;
-    int  p2_mode = PSXRecompV4::PAD_MODE_HYBRID;
+    std::string p2_device = "auto";
+    int  p1_mode = PSXRecompV4::PAD_MODE_ANALOG;
+    int  p2_mode = PSXRecompV4::PAD_MODE_ANALOG;
     bool ctrl_allow_hybrid = true;  /* game.toml [controller] allow_hybrid; false hides Hybrid in the launcher */
     bool ctrl_lock_mode    = false; /* game.toml [controller] lock_mode; true hides the whole pad-mode selector */
     bool ctrl_lock_device  = false; /* game.toml [controller] lock_device; true hides the Player controller cards entirely */
@@ -3265,8 +3519,8 @@ int main(int argc, char** argv) {
      * settings.toml overrides below. Under lock_mode these are the only valid
      * modes (the game supports exactly one pad type), so they are what the
      * runtime clamps to and what the launcher locks its selector to. */
-    int  ctrl_locked_p1_mode = PSXRecompV4::PAD_MODE_HYBRID;
-    int  ctrl_locked_p2_mode = PSXRecompV4::PAD_MODE_HYBRID;
+    int  ctrl_locked_p1_mode = PSXRecompV4::PAD_MODE_ANALOG;
+    int  ctrl_locked_p2_mode = PSXRecompV4::PAD_MODE_ANALOG;
     bool ws_offered = true; /* game.toml [widescreen] offer; false hides the launcher toggle + clamps 4:3 */
     bool ws_ultrawide_offered = false;
     int  resolved_deadzone = -1;  /* <0 => keep input.ini/runtime default (12000) */
@@ -3583,6 +3837,7 @@ int main(int argc, char** argv) {
     {
         std::filesystem::path settings_path =
             runtime_writable_dir(argv[0]) / "settings.toml";
+        g_user_settings_path = settings_path;
         const PSXRecompV4::UserSettings us =
             PSXRecompV4::load_user_settings(settings_path);
         if (us.has_skip_launcher)  skip_launcher_setting = us.skip_launcher;
@@ -3853,6 +4108,15 @@ int main(int argc, char** argv) {
     }
 #endif
 
+#if defined(PSX_SETTINGS_MENU)
+    g_pause_assets_dir = exe_dir_from_argv(argv[0]).string();
+    g_pause_game_name = game_name.empty() ? std::string("PSX") : game_name;
+    g_pause_allow_hybrid = ctrl_allow_hybrid;
+    g_pause_lock_mode = ctrl_lock_mode;
+    g_pause_lock_device = ctrl_lock_device;
+    g_pause_locked_mode = p1_mode;
+#endif
+
     /* Re-apply the resolved language to the translation layer. text_xlate_init
      * (at config load) only saw the game.toml default; this folds in the
      * settings.toml override and the launcher's choice. No-op when unchanged. */
@@ -3898,8 +4162,8 @@ int main(int argc, char** argv) {
     }
 #endif
     /* Select the renderer backend BEFORE gpu_init() (which runs gr_init ->
-     * the backend's init on the VRAM buffer). Software is the default and the
-     * fallback; an unavailable OpenGL backend reverts to software. */
+     * the backend's init on the VRAM buffer). OpenGL is the default; software
+     * remains the fallback when a GL context cannot be created. */
     gr_set_backend(g_video_renderer == 2 ? GR_BACKEND_VULKAN :
                    g_video_renderer == 1 ? GR_BACKEND_OPENGL : GR_BACKEND_SOFTWARE);
     std::fprintf(stdout, "psxrecomp: renderer backend requested: %s\n",
@@ -3954,10 +4218,10 @@ int main(int argc, char** argv) {
     set_player_device(g_players[0], p1_device, p1_mode);
     set_player_device(g_players[1], p2_device, p2_mode);
     for (int s = 0; s < 2; s++) {
-        /* Dev-any-input keeps P1 connected even with no assigned controller so the
-         * keyboard / any plugged-in controller can drive port 1 standalone. */
-        const bool dev_p1 = (dev_any_input_enabled() && s == 0);
-        sio_set_pad_connected(s, (g_players[s].kind != 0 || dev_p1) ? 1 : 0);
+        const bool keyboard = PSXRecompV4::host_route_uses_keyboard(
+            g_players[s].kind, false, s);
+        sio_set_pad_connected(s,
+            (g_players[s].kind == PSXRecompV4::HOST_INPUT_KEYBOARD || keyboard) ? 1 : 0);
         sio_set_pad_analog(s, pad_mode_boot_analog(g_players[s].mode), 0x80, 0x80, 0x80, 0x80);
     }
     /* SPU float-shadow gate must be set before spu_init() (which runs

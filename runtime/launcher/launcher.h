@@ -24,9 +24,14 @@ namespace PSXRecompV4 { struct UserSettings; }
 namespace psx_launcher {
 
 enum class Result {
-    Launch,  // user pressed LAUNCH — proceed to boot with `io`
+    Launch,  // user pressed LAUNCH/RESUME — commit `io`
     Quit,    // user closed the window — caller should exit
     Unavailable, // launcher could not initialise (assets/GL); caller boots as if skipped
+};
+
+enum class Mode {
+    Launcher,
+    PauseMenu,
 };
 
 // Static facts about the game the launcher is configuring. Drives the title and
@@ -38,7 +43,7 @@ struct GameInfo {
     bool        has_expected_crc = false;    // whether expected_crc is meaningful
     bool        allow_hybrid     = true;     // offer the "Hybrid" pad mode (false => Analog | D-Pad only)
     bool        lock_mode        = false;    // hide the whole pad-mode selector and force locked_mode (single-pad-type games)
-    int         locked_mode      = 2;        // PAD_MODE_DIGITAL; the mode forced when lock_mode is true
+    int         locked_mode      = 1;        // PAD_MODE_ANALOG; mode forced when lock_mode is true
     bool        lock_device      = false;    // hide the Player 1/2 controller cards entirely (fixed, auto-bound pad type; e.g. Ape Escape DualShock)
     bool        ws_offered       = true;     // offer the EXPERIMENTAL Widescreen toggle (false = hidden, game ships 4:3 only)
     bool        ws_ultrawide_offered = false; // separately offer experimental 21:9
@@ -58,6 +63,7 @@ struct GameInfo {
 // is the directory holding launcher.rml / .rcss / fonts.
 Result run(SDL_Window* window, void* gl_context,
            PSXRecompV4::UserSettings& io,
-           const GameInfo& game, const char* assets_dir);
+           const GameInfo& game, const char* assets_dir,
+           Mode mode = Mode::Launcher);
 
 } // namespace psx_launcher

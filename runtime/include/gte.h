@@ -173,5 +173,13 @@ uint32_t gte_mfc2(GTEState* gte, uint8_t reg);
 void gte_ctc2(GTEState* gte, uint8_t reg, uint32_t value);
 uint32_t gte_cfc2(GTEState* gte, uint8_t reg);
 
+// Exact bulk form of the 32 MTC2 + 32 CTC2 bridge used by gte_execute and the
+// special-register accessors. This preserves the public CPUState register-file
+// representation while avoiding 64 non-inlined switch calls per GTE command.
+void gte_unpack_registers(GTEState* gte, const uint32_t data[32],
+                          const uint32_t ctrl[32], bool preserve_flag);
+void gte_pack_registers(const GTEState* gte, uint32_t data[32],
+                        uint32_t ctrl[32]);
+
 } // namespace GTE
 } // namespace PSXRecomp

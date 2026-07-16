@@ -427,6 +427,10 @@ static int s_wtrace_trans_range_count = 0;
 
 /* Function attribution global — set by psx_dispatch() before each call. */
 uint32_t g_debug_current_func_addr = 0;
+/* Most recently entered statically recompiled basic block. Updated only in
+ * diagnostics builds by the generated per-block hook and sampled off-thread by
+ * phase_static_hot; production generated code compiles the hook out. */
+static volatile uint32_t s_phase_static_block = 0;
 
 /* Last store PC — set by recompiler emitter before every store instruction. */
 uint32_t g_debug_last_store_pc = 0;
@@ -2218,11 +2222,13 @@ void debug_server_cyc_observe(uint32_t block_leader_phys) {
     (void)block_leader_phys;
     return;
 #else
-    cyc_watch_observe(block_leader_phys & 0x1FFFFFFFu);
+    block_leader_phys &= 0x1FFFFFFFu;
+    s_phase_static_block = block_leader_phys;
+    cyc_watch_observe(block_leader_phys);
     /* #2 lockstep comparator: per-basic-block compiled-vs-interp check. Self-gates
      * on the armed frame window; ~free (one branch) when disarmed. */
     { extern void ls_at_leader(uint32_t, CPUState*); extern CPUState *debug_cpu_ptr;
-      ls_at_leader(block_leader_phys & 0x1FFFFFFFu, debug_cpu_ptr); }
+      ls_at_leader(block_leader_phys, debug_cpu_ptr); }
 #endif
 }
 
@@ -5551,6 +5557,25 @@ static void handle_gte_latch_dump(int id, const char *json)
     snprintf(reply, BUF + 128u, "{\"id\":%d,\"ok\":true,\"latch_total\":%llu,\"emitted\":%d,\"entries\":[%s]}",
              id, gte_latch_total(), emitted, body);
     debug_server_send_line(reply); free(body); free(reply);
+}
+
+/* Raw GTE projection/INTPL rings are expensive authoring diagnostics and are
+ * disabled during normal play. gte_trace {"enabled":0|1,"reset":0|1}. */
+static void handle_gte_trace(int id, const char *json)
+{
+    extern void gte_trace_set_enabled(int enabled);
+    extern int gte_trace_get_enabled(void);
+    extern void gte_trace_reset(void);
+    extern unsigned long long gte_rtp_ring_total(void);
+    extern unsigned long long gte_intpl_ring_total(void);
+    int enabled = json_get_int(json, "enabled", -1);
+    int reset = json_get_int(json, "reset", 0);
+    if (enabled >= 0) gte_trace_set_enabled(enabled != 0);
+    if (reset) gte_trace_reset();
+    send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%s,"
+             "\"rtp_total\":%llu,\"intpl_total\":%llu}",
+             id, gte_trace_get_enabled() ? "true" : "false",
+             gte_rtp_ring_total(), gte_intpl_ring_total());
 }
 
 static void handle_sio_state(int id, const char *json)
@@ -9956,6 +9981,8 @@ static void handle_mdec_state(int id, const char *json)
              "\"decode_macroblocks\":%u,\"decode_blocks\":%u,"
              "\"decode_stop_reason\":%u,\"decode_input_pos\":%u,\"decode_input_end\":%u,"
              "\"dma_in_words\":%u,\"dma_out_words\":%u,\"dma_read_underflows\":%u,"
+             "\"decode_calls_total\":%llu,\"decode_us_total\":%llu,"
+             "\"decode_us_max\":%llu,\"decode_us_last\":%llu,"
              "\"trace_total\":%llu}",
              id, s.command, s.expected_halfwords, s.input_count,
              s.output_size, s.output_pos, s.output_depth, s.output_signed,
@@ -9964,6 +9991,10 @@ static void handle_mdec_state(int id, const char *json)
              s.decode_blocks, s.decode_stop_reason, s.decode_input_pos,
              s.decode_input_end, s.dma_in_words, s.dma_out_words,
              s.dma_read_underflows,
+             (unsigned long long)s.decode_calls_total,
+             (unsigned long long)s.decode_us_total,
+             (unsigned long long)s.decode_us_max,
+             (unsigned long long)s.decode_us_last,
              (unsigned long long)mdec_debug_get_event_total());
 }
 
@@ -11543,7 +11574,7 @@ static void handle_game_options(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"go\":%s}", id, buf);
 }
 
-/* On-the-fly string translation (text_xlate.cpp). Always-on capture inventory +
+/* On-the-fly string translation (text_xlate.cpp). Opt-in authoring inventory +
  * apply stats/dump, queried over TCP (no log files — Rule 3). sub: stats (def) |
  * dump | todo | reload. */
 static void handle_xlate(int id, const char *json)
@@ -11715,6 +11746,13 @@ static volatile uint32_t s_phot_addr[PHOT_SLOTS];
 static volatile uint64_t s_phot_cnt [PHOT_SLOTS];
 static volatile uint64_t s_phot_native_total = 0, s_phot_drops = 0;
 
+/* Static-code hot-block histogram. The generated per-basic-block hook records
+ * the active block in s_phase_static_block; the 1 kHz sampler buckets that PC
+ * only when the innermost phase is compiled static code. */
+static volatile uint32_t s_pshot_addr[PHOT_SLOTS];
+static volatile uint64_t s_pshot_cnt [PHOT_SLOTS];
+static volatile uint64_t s_pshot_static_total = 0, s_pshot_drops = 0;
+
 static void phot_add(uint32_t addr)
 {
     if (!addr) return;
@@ -11726,6 +11764,19 @@ static void phot_add(uint32_t addr)
         if (a == 0)    { s_phot_addr[i] = addr; s_phot_cnt[i] = 1; return; }
     }
     s_phot_drops++;
+}
+
+static void pshot_add(uint32_t addr)
+{
+    if (!addr) return;
+    uint32_t h = (addr >> 2) * 2654435761u;
+    for (uint32_t p = 0; p < 16; p++) {
+        uint32_t i = (h + p) & (PHOT_SLOTS - 1u);
+        uint32_t a = s_pshot_addr[i];
+        if (a == addr) { s_pshot_cnt[i]++; return; }
+        if (a == 0)    { s_pshot_addr[i] = addr; s_pshot_cnt[i] = 1; return; }
+    }
+    s_pshot_drops++;
 }
 
 #ifdef _WIN32
@@ -11761,7 +11812,10 @@ static void *phase_sampler_main(void *arg)
                 s_phot_native_total++;
                 phot_add(overlay_loader_native_inprogress());
                 break;
-        case 3: s_phase_static[slot]++; break;
+        case 3: s_phase_static[slot]++;
+                s_pshot_static_total++;
+                pshot_add(s_phase_static_block);
+                break;
         case 4: s_phase_gpu[slot]++; break;
         default: break;                          /* 0 = host/other */
         }
@@ -11867,6 +11921,50 @@ static void handle_phase_hot(int id, const char *json)
     send_fmt("%s", buf);
 }
 
+/* phase_static_hot: hottest statically recompiled basic blocks by sampled wall
+ * time. Cumulative since boot; clients can diff two snapshots for a scene. */
+static void handle_phase_static_hot(int id, const char *json)
+{
+    int top = json_get_int(json, "top", 20);
+    if (top < 1)  top = 1;
+    if (top > 64) top = 64;
+    uint32_t best_addr[64] = {0};
+    uint64_t best_cnt[64] = {0};
+    int n = 0;
+    for (int i = 0; i < PHOT_SLOTS; i++) {
+        uint32_t a = s_pshot_addr[i];
+        if (!a) continue;
+        uint64_t c = s_pshot_cnt[i];
+        int j = n < top ? n : top - 1;
+        if (n < top) n++;
+        else if (c <= best_cnt[j]) continue;
+        while (j > 0 && best_cnt[j - 1] < c) {
+            best_addr[j] = best_addr[j - 1];
+            best_cnt[j]  = best_cnt[j - 1];
+            j--;
+        }
+        best_addr[j] = a;
+        best_cnt[j]  = c;
+    }
+    uint64_t tot = s_pshot_static_total;
+    char buf[4096];
+    int len = snprintf(buf, sizeof(buf),
+                       "{\"id\":%d,\"ok\":true,\"static_samples_total\":%llu,"
+                       "\"hash_drops\":%llu,\"top\":[",
+                       id, (unsigned long long)tot,
+                       (unsigned long long)s_pshot_drops);
+    for (int i = 0; i < n && len < (int)sizeof(buf) - 96; i++) {
+        len += snprintf(buf + len, sizeof(buf) - (size_t)len,
+                        "%s{\"addr\":\"0x%08X\",\"samples\":%llu,\"share\":%.4f}",
+                        i ? "," : "", best_addr[i],
+                        (unsigned long long)best_cnt[i],
+                        tot ? (double)best_cnt[i] / (double)tot : 0.0);
+    }
+    len += snprintf(buf + len, sizeof(buf) - (size_t)len, "]}");
+    (void)len;
+    send_fmt("%s", buf);
+}
+
 /* idle_skip: idle-loop cycle-skip status + runtime toggle.
  *   {"cmd":"idle_skip"}              -> counters
  *   {"cmd":"idle_skip","enable":0|1} -> toggle, then counters */
@@ -11889,6 +11987,7 @@ static void handle_idle_skip(int id, const char *json)
 static const CmdEntry s_commands[] = {
     { "phase_profile",     handle_phase_profile },
     { "phase_hot",         handle_phase_hot },
+    { "phase_static_hot",  handle_phase_static_hot },
     { "idle_skip",         handle_idle_skip },
     { "lockstep",          handle_lockstep },
     { "lockstep_func",     handle_lockstep_func },
@@ -12115,6 +12214,7 @@ static const CmdEntry s_commands[] = {
     { "gte_intpl_dump",    handle_gte_intpl_dump },
     { "gte_frame_stats",   handle_gte_frame_stats },
     { "gte_latch_dump",    handle_gte_latch_dump },
+    { "gte_trace",         handle_gte_trace },
     { "quit",              handle_quit },
     { "dispatch_stats",    handle_dispatch_stats },
     { "dispatch_check",    handle_dispatch_check },

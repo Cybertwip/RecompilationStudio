@@ -2,6 +2,7 @@
  * See text_xlate.h + docs/STRING_TRANSLATION.md. */
 
 #include "text_xlate.h"
+#include "text_xlate_policy.h"
 #include "cpu_state.h"
 
 #include <cstdint>
@@ -417,7 +418,7 @@ std::atomic<int>                         g_msg_sep_pending{0}; // unpatched coun
 std::mutex g_mtx;
 
 std::atomic<bool>     g_apply_armed{false};   // table non-empty AND language enabled
-std::atomic<bool>     g_capture_on{true};     // always-on inventory (default)
+std::atomic<bool>     g_capture_on{false};    // authoring-only; PSX_XLATE_CAPTURE=1
 std::atomic<uint64_t> g_calls{0};
 std::atomic<uint64_t> g_hits{0};
 std::string           g_lang = "en";
@@ -481,7 +482,6 @@ void load_tables_locked() {
     for (auto& kv : g_inv) kv.second.translated = false;
     if (g_dir.empty() || !fs::exists(g_dir)) { g_apply_armed.store(false); return; }
     const bool lang_off = g_lang.empty() || g_lang == "jp" || g_lang == "off";
-    size_t files = 0, entries = 0, glyphs = 0, vpatches = 0;
     std::error_code ec;
     for (auto& de : fs::directory_iterator(g_dir, ec)) {
         if (!de.is_regular_file()) continue;
@@ -489,7 +489,6 @@ void load_tables_locked() {
         toml::value data;
         try { data = toml::parse(de.path().string()); }
         catch (...) { continue; }
-        ++files;
         if (!data.contains("entry")) continue;
         const auto& arr = toml::find(data, "entry");
         if (!arr.is_array()) continue;
@@ -517,7 +516,6 @@ void load_tables_locked() {
             }
             uint64_t key = fnv1a(bytes.data(), (uint32_t)bytes.size());
             g_table[key] = TableEntry{ std::move(tgt), term };
-            ++entries;
         }
         // Per-glyph label source-patch entries (RAM-patch layer). Only load when
         // a target for the active language exists; otherwise the slot stays JP.
@@ -539,7 +537,6 @@ void load_tables_locked() {
                 gl.src    = std::move(gbytes);
                 gl.target = std::move(tgt);
                 g_glyph_labels.push_back(std::move(gl));
-                ++glyphs;
             }
         }
         // VRAM-strip patch entries (pre-rendered-pixel layer). The replacement
@@ -563,7 +560,6 @@ void load_tables_locked() {
                 size_t need = (size_t)vp.w * (size_t)vp.h;
                 if (vp.src.size() != need || vp.rep.size() != need) continue;
                 g_vram_patches.push_back(std::move(vp));
-                ++vpatches;
             }
         }
         // Inter-message NUL separators (structure fix for packed message chunks).
@@ -590,10 +586,6 @@ void load_tables_locked() {
     // Mark inventory records that now have a translation.
     for (auto& kv : g_inv)
         kv.second.translated = (g_table.find(kv.first) != g_table.end());
-    std::fprintf(stderr,
-        "[xlate] loaded %zu entries + %zu glyph-labels + %zu vram-patches + %zu msg-inplace from %zu file(s) in %s (lang=%s apply=%s)\n",
-        entries, glyphs, vpatches, g_msg_inplace.size(), files, g_dir.c_str(), g_lang.c_str(),
-        g_apply_armed.load() ? "on" : "off");
 }
 
 // ---------------------------------------------------------------------------
@@ -858,7 +850,7 @@ extern "C" void text_xlate_on_dispatch(CPUState* cpu, uint32_t target) {
         if (!g_prof->read_record(ram, va, buf, &len, &term)) continue;
         uint64_t key = fnv1a(buf, len);
 
-        // CAPTURE (always-on inventory): ingest each real string ONCE at its
+        // CAPTURE (explicit authoring mode): ingest each real string ONCE at its
         // genuine record start, and only if it clears the noise gate. The
         // canonical-start test collapses the partial-offset explosion (the same
         // record was previously re-ingested at every offset a register landed on).
@@ -913,7 +905,8 @@ extern "C" void text_xlate_init(const char* project_root, const char* language) 
     if (project_root && *project_root)
         g_dir = (fs::path(project_root) / "translations").string();
     const char* capenv = std::getenv("PSX_XLATE_CAPTURE");
-    if (capenv && capenv[0] == '0') g_capture_on.store(false);
+    g_capture_on.store(text_xlate_capture_requested(capenv) != 0,
+                       std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(g_mtx);
     load_tables_locked();
 }

@@ -4,8 +4,9 @@
  * memory and substitute translated bytes on the fly so a JP-only title can be
  * played in the target language. See docs/STRING_TRANSLATION.md for the design.
  *
- * Mechanism (all always-on, hung off the psx_dispatch chokepoint):
- *  - CAPTURE: on every dispatch, scan the arg registers for pointers to source
+ * Mechanism (hung off the psx_dispatch chokepoint):
+ *  - CAPTURE (authoring opt-in via PSX_XLATE_CAPTURE=1): on every dispatch,
+ *    scan the arg registers for pointers to source
  *    text records (encoding-profile validated). Every distinct record is hashed
  *    (FNV-1a64) and recorded into an in-memory inventory ring queryable over the
  *    TCP debug server (the "enumerate every string" authoring source). Never
@@ -58,9 +59,9 @@ void text_xlate_on_dispatch(struct CPUState* cpu, uint32_t target);
 
 /* One-time init. Loads every translations/ *.toml under project_root and
  * selects the active `language` column. language "jp"/"off"/"" (or no tables)
- * disables APPLY; CAPTURE still runs (always-on inventory). The PSX_LANG env
- * var overrides `language` when set. Safe to call once at startup; copies what
- * it needs. */
+ * disables APPLY. CAPTURE is disabled in normal builds and is enabled only by
+ * PSX_XLATE_CAPTURE=1. The PSX_LANG env var overrides `language` when set. Safe
+ * to call once at startup; copies what it needs. */
 void text_xlate_init(const char* project_root, const char* language);
 
 /* Switch the active language and reload the translation tables. For the launcher:

@@ -21,10 +21,10 @@ the PSX framework.
 
 ## 0. TL;DR architecture
 
-Three always-on subsystems hung off the **`psx_dispatch` call chokepoint** (the
-one place every guest function call funnels through — see §3.1):
+Three subsystems hung off the **`psx_dispatch` call chokepoint** (the one place
+every guest function call funnels through — see §3.1):
 
-1. **Capture ring (always-on).** On every dispatch, scan the argument registers
+1. **Capture ring (authoring opt-in).** With `PSX_XLATE_CAPTURE=1`, scan the argument registers
    (and a few stack slots) for pointers to Shift-JIS text records. Hash each
    distinct record (FNV-1a64 over its raw bytes), record `{hash, bytes, addr,
    target-PC, call-site}`, persist immediately. This *enumerates every string to
@@ -40,6 +40,10 @@ one place every guest function call funnels through — see §3.1):
    into transient guest scratch (below `$sp`), repoints the arg register, and
    lets the **original** draw routine render it. No regen, no engine change,
    unbounded replacement length, dynamic format strings preserved.
+
+Capture is deliberately off in production: its per-dispatch string scan caused
+measured FMV frame-time spikes in titles with no translation tables. Authored
+translation application remains automatic when a table is present.
 
 The only title-specific pieces are (a) the translation table and (b) the font
 situation (§4). Everything else — capture ring, apply hook, config, coverage
@@ -292,18 +296,17 @@ and is a Phase-0 deliverable.)
 
 ## 3. Framework design (PSX)
 
-Shared module, proposed location: `runtime/src/text_xlate.c` +
-`runtime/include/text_xlate.h` (peers of `fntrace.*` and `bios_hle.*`).
+Shared module: `runtime/src/text_xlate.cpp` +
+`runtime/include/text_xlate.h` (peer of `fntrace.*`).
 
 ### 3.1 The hook point — `psx_dispatch`
 
 `psx_dispatch` / `psx_dispatch_impl` (declared `cpu_state.h:164`) is the single
 chokepoint every guest call routes through. Two precedents already hang off it:
 
-- **`fntrace_record(cpu, target)`** (`fntrace.c:58`) — an **always-on ring** of
-  every dispatch (`{frame, target, ra, a0..a3, s3, sp}`), explicitly designed as
-  "record from boot, query the window after the fact" (the project ring-buffer
-  rule). This is the capture analogue.
+- **`fntrace_record(cpu, target)`** (`fntrace.c:58`) — the dispatch hook used by
+  opt-in control-flow tracing and the translation layer. Disarmed runs record
+  nothing.
 - **`g_psx_bios_hle_hook`** (`bios_hle.h:54`) — a hook slot consulted at the top
   of `psx_dispatch_impl` with the pre-normalize physical address; it can
   intercept/replace the target (HLE call + boot shell-skip). This is the apply
@@ -312,7 +315,7 @@ chokepoint every guest call routes through. Two precedents already hang off it:
 The translation module adds the same two shapes, so it needs **no per-function
 codegen** and works in Release.
 
-### 3.2 Capture subsystem (always-on ring)
+### 3.2 Capture subsystem (authoring opt-in)
 
 Add `text_capture_record(cpu, target)` called from `psx_dispatch` right beside
 `fntrace_record` (or fold into it):
@@ -325,16 +328,16 @@ Add `text_capture_record(cpu, target)` called from `psx_dispatch` right beside
      lead+trail, or known control byte. Reject on any non-textish byte (filters
      structs/pointers). Require ≥1 real text char.
 2. Hash the record bytes: **`h = fnv1a64(bytes, len)`**.
-3. Upsert into an **always-on inventory ring** `{h, bytes[≤64 sample], full-len,
-   src_addr, target_pc, ra, first_frame, count}`; on first sight, append to a
-   persistent `tsumu_stringdump.log` (flush immediately — crash-safe, per the
-   ring-buffer rule).
+3. Upsert into an in-memory inventory `{h, bytes[≤64 sample], full-len,
+   src_addr, target_pc, ra, first_frame, count}` exposed by the TCP debug
+   server's `xlate dump/todo` commands.
 4. `textpc_add(target)` into a lock-free set so the apply hook only scans args on
    proven text PCs.
 
-This runs from boot for every player (no arm gate). "Enumerate every string" =
-drive the game (§6) and read the ever-growing inventory; "find untranslated" =
-query the ring for records with no table entry.
+This runs only when an author launches with `PSX_XLATE_CAPTURE=1`. "Enumerate
+every string" = drive the game (§6) and query the inventory; "find
+untranslated" = query records with no table entry. Normal players never pay
+the per-dispatch scan cost.
 
 **Coord/`_Printf` disambiguation:** reuse PMS's precision filters adapted to
 PSX — a coordinate gate (`a0,a1 < 0x1000`) for the class-1 drawer, plus explicit
@@ -444,9 +447,9 @@ the top of `psx_dispatch_impl` **after** the BIOS-HLE hook, gated by a lock-free
 
 The loop to reach "all strings target-language" (§0 goal):
 
-1. **Capture pass.** Fresh run; drive every screen/menu/tutorial/dialogue/ending
+1. **Capture pass.** Fresh run with `PSX_XLATE_CAPTURE=1`; drive every screen/menu/tutorial/dialogue/ending
    (self-driven via the debug port + input injection, or a scripted playthrough).
-   The always-on ring logs every distinct record to `tsumu_stringdump.log`.
+   Query every distinct record through the TCP debug server.
 2. **Decode + author.** `text_xlate_decode.py` → master TSV (Japanese visible).
    Fill translations; `text_xlate_build.py` → `tsumu.toml`.
 3. **Apply + verify.** Re-run with the table; the hook substitutes. **Verify
@@ -531,9 +534,9 @@ core.
 
 ## 6. Phased implementation plan
 
-- **Phase 0 — Discovery (runtime census).** Add the capture ring +
+- **Phase 0 — Discovery (runtime census).** Add the capture inventory +
   `sjis_read_record` + inventory persistence + text-PC census. Drive Tsumu; dump
-  `tsumu_stringdump.log`. Pin the text-draw PC(s), the string-arg register, the
+  it through the TCP debug server. Pin the text-draw PC(s), the string-arg register, the
   control-code set, and the font situation (`MOJI.BIN` dump). Deliver the encoding
   profile. *(No visible change yet — pure observability.)*
 - **Phase 1 — Apply (pointer-swap).** Install `g_psx_text_xlate_hook`; implement
@@ -561,7 +564,8 @@ the real game (these correct/extend §2, which was written pre-implementation):
 
 - **Hook point (as specced):** `text_xlate_on_dispatch()` is called from
   `fntrace_record()` at the `psx_dispatch` chokepoint. No generated-code edits,
-  no BIOS regen, works in the Release build. Capture + apply confirmed live.
+  no BIOS regen, works in the Release build. Capture is enabled for authoring
+  with `PSX_XLATE_CAPTURE=1`; apply is armed automatically by loaded tables.
 - **Two encodings, two endiannesses.** The EXE menu labels (e.g. `0x80010C5C`
   `ＴＳＵＭＵ ｌｉｇｈｔ`) are **big-endian** Shift-JIS, NUL-terminated. The
   message-table text (tutorial/hint/dialogue, drawn via a string pointer) is
@@ -587,7 +591,7 @@ the real game (these correct/extend §2, which was written pre-implementation):
   concrete form of the §5.4 "dynamically-composed / struct" risk.
 - **Capture quality gate.** The relaxed reader admits vertex/coordinate binary
   that passes by chance (~20k records). A gate requiring ≥2 hiragana/katakana/
-  fullwidth chars (SJIS lead `0x82`/`0x83`) keeps the always-on inventory a clean
+  fullwidth chars (SJIS lead `0x82`/`0x83`) keeps the authoring inventory a clean
   enumeration (~52 real records). Authoring reads it via TCP `xlate dump/todo`.
 - **Verification.** Framed tutorial hints apply on real draws (hits climb, game
   stays alive, English written little-endian). These particular hints are
@@ -685,8 +689,8 @@ slots, and screenshot the level-select / HUD.
 - `translations.json` — table format.
 
 **psxrecomp hook points** (`F:\Projects\psxrecomp\_wt-tsumu\psxrecomp\`):
-- `runtime/include/fntrace.h` + `runtime/src/fntrace.c:58` — always-on dispatch
-  ring (capture analogue).
+- `runtime/include/fntrace.h` + `runtime/src/fntrace.c:58` — dispatch hook and
+  opt-in trace ring.
 - `runtime/include/bios_hle.h:54` (`g_psx_bios_hle_hook`) + `runtime/src/bios_hle.c:297`
   — dispatch hook slot precedent (apply analogue).
 - `runtime/include/cpu_state.h:164` — `psx_dispatch` / `psx_dispatch_call`.

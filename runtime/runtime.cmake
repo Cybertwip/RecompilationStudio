@@ -294,7 +294,9 @@ set(PSXRECOMP_BIOS_GENERATED
 # fingerprint in generated/SCPH1001.emitter.sha; recompute it here and WARN on a
 # mismatch so the staleness is impossible to miss. Non-fatal: a stale-but-consistent
 # BIOS still builds; opt out with -DPSXRECOMP_SKIP_BIOS_STALE_CHECK=ON.
-if(NOT PSXRECOMP_SKIP_BIOS_STALE_CHECK)
+if(NOT PSXRECOMP_SKIP_BIOS_STALE_CHECK AND
+   EXISTS "${PSXRECOMP_ROOT}/generated/${PSXRECOMP_BIOS_STEM}_full.c" AND
+   EXISTS "${PSXRECOMP_ROOT}/generated/${PSXRECOMP_BIOS_STEM}_dispatch.c")
     find_program(_psxrt_bash NAMES bash)
     set(_psxrt_stamp "${PSXRECOMP_ROOT}/generated/${PSXRECOMP_BIOS_STEM}.emitter.sha")
     if(_psxrt_bash AND EXISTS "${PSXRECOMP_ROOT}/tools/bios_emitter_fingerprint.sh")

@@ -72,4 +72,23 @@ if(BUILD_TESTING)
     )
     target_link_libraries(host_input_policy_test PRIVATE ${SDL2_LIBRARIES})
     add_test(NAME host_input_policy COMMAND host_input_policy_test)
+
+    add_executable(text_xlate_policy_test
+        tests/text_xlate_policy_test.cpp
+    )
+    target_include_directories(text_xlate_policy_test PRIVATE include)
+    add_test(NAME text_xlate_policy COMMAND text_xlate_policy_test)
+
+    add_executable(gte_trace_policy_test
+        tests/gte_trace_policy_test.cpp
+    )
+    target_include_directories(gte_trace_policy_test PRIVATE include)
+    add_test(NAME gte_trace_policy COMMAND gte_trace_policy_test)
+
+    add_executable(gte_register_file_test
+        tests/gte_register_file_test.cpp
+        src/gte.cpp
+    )
+    target_include_directories(gte_register_file_test PRIVATE include)
+    add_test(NAME gte_register_file COMMAND gte_register_file_test)
 endif()

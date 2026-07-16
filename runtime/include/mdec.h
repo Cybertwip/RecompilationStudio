@@ -44,6 +44,10 @@ typedef struct MDECDebugState {
     uint32_t dma_in_words;
     uint32_t dma_out_words;
     uint32_t dma_read_underflows;
+    uint64_t decode_calls_total;
+    uint64_t decode_us_total;
+    uint64_t decode_us_max;
+    uint64_t decode_us_last;
 } MDECDebugState;
 
 typedef struct MDECDebugEvent {

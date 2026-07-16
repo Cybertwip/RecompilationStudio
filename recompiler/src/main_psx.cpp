@@ -1104,8 +1104,10 @@ int main(int argc, char** argv) {
         // Materialize one sorted data table for dispatch and entry probes. A
         // giant sparse switch is catastrophically slow in Debug/-O0 builds:
         // GCC lowers X4's roughly 60K cases to a multi-megabyte linear compare
-        // chain. Binary search stays O(log N) at every optimizer level and
-        // avoids emitting the same case set twice.
+        // chain. Every CPS call/return enters this lookup, so even O(log N)
+        // binary search is expensive for games with thousands of continuation
+        // records. The generated open-addressed table below keeps exact address
+        // semantics while reducing the common lookup to one hash and one probe.
         struct DispatchRecord {
             uint32_t addr;
             uint32_t resume;
@@ -1128,6 +1130,64 @@ int main(int argc, char** argv) {
                       return a.addr < b.addr;
                   });
 
+        // A maximum load of 1/2 guarantees at least one empty sentinel and
+        // keeps linear-probe clusters short. Slots store record_index + 1 so a
+        // zero-initialized entry means empty. Hash arithmetic is deliberately
+        // uint32_t so generator placement and generated C have identical wrap.
+        size_t hash_size = 1;
+        while (hash_size < records.size() * 2u) hash_size <<= 1u;
+        if (hash_size > 0x100000000ull) {
+            fmt::print(stderr, "ERROR: dispatch hash exceeds 32-bit address space\n");
+            return 1;
+        }
+        const uint32_t hash_mask = static_cast<uint32_t>(hash_size - 1u);
+        std::vector<uint32_t> hash_slots(hash_size, 0u);
+        std::vector<uint32_t> record_slots(records.size(), 0u);
+        std::vector<uint32_t> record_probes(records.size(), 0u);
+        uint32_t max_probe = 0;
+        for (size_t i = 0; i < records.size(); ++i) {
+            uint32_t slot = ((records[i].addr >> 2u) * 2654435761u) & hash_mask;
+            uint32_t probe = 0;
+            while (hash_slots[slot] != 0u) {
+                slot = (slot + 1u) & hash_mask;
+                ++probe;
+            }
+            hash_slots[slot] = static_cast<uint32_t>(i + 1u);
+            record_slots[i] = slot;
+            record_probes[i] = probe;
+            max_probe = std::max(max_probe, probe);
+        }
+
+        // Generator-side proof: resolve every manifested address through the
+        // same algorithm before writing C. Any mismatch is a hard codegen error.
+        for (size_t expected = 0; expected < records.size(); ++expected) {
+            const uint32_t addr = records[expected].addr;
+            uint32_t slot = ((addr >> 2u) * 2654435761u) & hash_mask;
+            bool found = false;
+            for (size_t probe = 0; probe < hash_size; ++probe) {
+                const uint32_t encoded = hash_slots[slot];
+                if (encoded == 0u) break;
+                const size_t index = static_cast<size_t>(encoded - 1u);
+                if (records[index].addr == addr) {
+                    if (index != expected) {
+                        fmt::print(stderr,
+                                   "ERROR: dispatch hash address 0x{:08X} resolved to duplicate record\n",
+                                   addr);
+                        return 1;
+                    }
+                    found = true;
+                    break;
+                }
+                slot = (slot + 1u) & hash_mask;
+            }
+            if (!found) {
+                fmt::print(stderr,
+                           "ERROR: dispatch hash failed self-check for 0x{:08X}\n",
+                           addr);
+                return 1;
+            }
+        }
+
         ds << "typedef void (*PsxGameDispatchFn)(CPUState* cpu);\n";
         ds << "typedef struct {\n";
         ds << "    uint32_t addr;\n";
@@ -1140,17 +1200,35 @@ int main(int argc, char** argv) {
                               rec.addr, rec.resume, rec.owner);
         }
         ds << "};\n";
-        ds << fmt::format("#define PSX_GAME_DISPATCH_COUNT {}u\n\n", records.size());
+        ds << fmt::format("#define PSX_GAME_DISPATCH_COUNT {}u\n", records.size());
+        ds << fmt::format("#define PSX_GAME_DISPATCH_HASH_SIZE {}u\n", hash_size);
+        ds << fmt::format("#define PSX_GAME_DISPATCH_HASH_MASK 0x{:08X}u\n", hash_mask);
+        ds << fmt::format("#define PSX_GAME_DISPATCH_MAX_PROBE {}u\n\n", max_probe);
+
+        const bool compact_hash = records.size() <= 65535u;
+        ds << fmt::format("static const {} k_psx_game_dispatch_hash[PSX_GAME_DISPATCH_HASH_SIZE] = {{\n",
+                          compact_hash ? "uint16_t" : "uint32_t");
+        constexpr size_t kSlotsPerLine = 16;
+        for (size_t i = 0; i < hash_slots.size(); ++i) {
+            if ((i % kSlotsPerLine) == 0u) ds << "    ";
+            ds << fmt::format("{}u", hash_slots[i]);
+            if (i + 1u != hash_slots.size()) ds << ", ";
+            if ((i % kSlotsPerLine) == kSlotsPerLine - 1u ||
+                i + 1u == hash_slots.size()) {
+                ds << "\n";
+            }
+        }
+        ds << "};\n\n";
+
         ds << "static const PsxGameDispatchEntry* psx_game_find_entry(uint32_t addr) {\n";
-        ds << "    uint32_t lo = 0, hi = PSX_GAME_DISPATCH_COUNT;\n";
-        ds << "    while (lo < hi) {\n";
-        ds << "        uint32_t mid = lo + (hi - lo) / 2;\n";
-        ds << "        uint32_t key = k_psx_game_dispatch[mid].addr;\n";
-        ds << "        if (addr < key) hi = mid;\n";
-        ds << "        else if (addr > key) lo = mid + 1;\n";
-        ds << "        else return &k_psx_game_dispatch[mid];\n";
+        ds << "    uint32_t slot = ((addr >> 2u) * 2654435761u) & PSX_GAME_DISPATCH_HASH_MASK;\n";
+        ds << "    for (;;) {\n";
+        ds << "        uint32_t encoded = k_psx_game_dispatch_hash[slot];\n";
+        ds << "        if (encoded == 0u) return 0;\n";
+        ds << "        const PsxGameDispatchEntry* entry = &k_psx_game_dispatch[encoded - 1u];\n";
+        ds << "        if (entry->addr == addr) return entry;\n";
+        ds << "        slot = (slot + 1u) & PSX_GAME_DISPATCH_HASH_MASK;\n";
         ds << "    }\n";
-        ds << "    return 0;\n";
         ds << "}\n\n";
 
         ds << "/* Maps PS1 address to compiled game code. Returns 1 if dispatched, 0 if unknown. */\n";
@@ -1191,11 +1269,54 @@ int main(int argc, char** argv) {
         if (dispatch_file.is_open()) {
             dispatch_file << ds.str();
             dispatch_file.close();
-            fmt::print("✓ Dispatch table written ({} entries)\n\n",
-                       dispatch_addrs.size());
+            fmt::print("✓ Dispatch table written ({} records, {} hash slots, max probe {})\n\n",
+                       records.size(), hash_size, max_probe);
         } else {
-            fmt::print(stderr, "⚠ Failed to write dispatch file\n\n");
+            fmt::print(stderr, "ERROR: failed to write dispatch file\n\n");
+            return 1;
         }
+
+        // Indirect-dispatch manifest and proof artifact. It records every exact
+        // target plus its hash placement, and states how many lookups passed the
+        // generator-side replay above.
+        std::filesystem::path manifest_filename =
+            out_dir / (exe_stem + "_dispatch_manifest.json");
+        std::ofstream manifest_file(manifest_filename);
+        if (!manifest_file.is_open()) {
+            fmt::print(stderr, "ERROR: failed to write dispatch manifest {}\n",
+                       manifest_filename.string());
+            return 1;
+        }
+        manifest_file << "{\n";
+        manifest_file << "  \"schema\": 1,\n";
+        manifest_file << "  \"lookup\": \"open_addressed_linear_probe\",\n";
+        manifest_file << "  \"hash\": \"((addr >> 2) * 2654435761) & (table_size - 1)\",\n";
+        manifest_file << "  \"sentinel\": \"record_index_plus_one; zero_is_empty\",\n";
+        manifest_file << "  \"exact_address_match\": true,\n";
+        manifest_file << fmt::format("  \"record_count\": {},\n", records.size());
+        manifest_file << fmt::format("  \"table_size\": {},\n", hash_size);
+        manifest_file << fmt::format("  \"load_factor\": {:.6f},\n",
+                                     static_cast<double>(records.size()) /
+                                         static_cast<double>(hash_size));
+        manifest_file << fmt::format("  \"index_bits\": {},\n",
+                                     compact_hash ? 16 : 32);
+        manifest_file << fmt::format("  \"max_probe\": {},\n", max_probe);
+        manifest_file << fmt::format("  \"verified_record_lookups\": {},\n",
+                                     records.size());
+        manifest_file << "  \"entries\": [\n";
+        for (size_t i = 0; i < records.size(); ++i) {
+            const auto& rec = records[i];
+            manifest_file << fmt::format(
+                "    {{\"address\":\"0x{:08X}\",\"resume_pc\":\"0x{:08X}\","
+                "\"owner\":\"0x{:08X}\",\"slot\":{},\"probe\":{}}}{}\n",
+                rec.addr, rec.resume, rec.owner, record_slots[i], record_probes[i],
+                (i + 1u == records.size()) ? "" : ",");
+        }
+        manifest_file << "  ]\n";
+        manifest_file << "}\n";
+        manifest_file.close();
+        fmt::print("✓ Saved dispatch manifest to {}\n\n",
+                   manifest_filename.string());
     }
 
     return 0;

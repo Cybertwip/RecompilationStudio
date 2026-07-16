@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef PSX_NO_DEBUG_TOOLS
+#include <SDL.h>
+#endif
+
 extern uint64_t s_frame_count;
 
 /* FMV-activity detector: frame stamp of the newest colour (15/24-bit) MDEC
@@ -355,7 +359,31 @@ static void append_color_macroblock(const int16_t *crblk, const int16_t *cbblk,
 static volatile uint32_t g_mdec_decode_count = 0;
 uint32_t mdec_get_decode_count(void) { return g_mdec_decode_count; }
 
+#ifndef PSX_NO_DEBUG_TOOLS
+static uint64_t mdec_decode_calls_total;
+static uint64_t mdec_decode_ticks_total;
+static uint64_t mdec_decode_ticks_max;
+static uint64_t mdec_decode_ticks_last;
+
+static void mdec_perf_finish(uint64_t started) {
+    uint64_t elapsed = SDL_GetPerformanceCounter() - started;
+    mdec_decode_calls_total++;
+    mdec_decode_ticks_total += elapsed;
+    mdec_decode_ticks_last = elapsed;
+    if (elapsed > mdec_decode_ticks_max) mdec_decode_ticks_max = elapsed;
+}
+
+static uint64_t mdec_perf_ticks_to_us(uint64_t ticks) {
+    uint64_t freq = SDL_GetPerformanceFrequency();
+    if (!freq) return 0;
+    return (uint64_t)((double)ticks * 1000000.0 / (double)freq);
+}
+#endif
+
 static void execute_decode(void) {
+#ifndef PSX_NO_DEBUG_TOOLS
+    uint64_t perf_started = SDL_GetPerformanceCounter();
+#endif
     uint32_t pos = 0;
     uint32_t end = mdec.input_count;
     g_mdec_decode_count++;
@@ -377,6 +405,9 @@ static void execute_decode(void) {
         mdec.decode_stop_reason = (pos >= end) ? MDEC_STOP_INPUT_END : MDEC_STOP_Y0;
         mdec.decode_input_pos = pos;
         trace_event(MDEC_EVT_DECODE_DONE, mdec.output_size);
+#ifndef PSX_NO_DEBUG_TOOLS
+        mdec_perf_finish(perf_started);
+#endif
         return;
     }
 
@@ -401,6 +432,9 @@ static void execute_decode(void) {
      * The 4/8-bit luma path above is texture decompression, not video. */
     mdec_last_color_decode_frame = s_frame_count;
     trace_event(MDEC_EVT_DECODE_DONE, mdec.output_size);
+#ifndef PSX_NO_DEBUG_TOOLS
+    mdec_perf_finish(perf_started);
+#endif
 }
 
 static void execute_command(void) {
@@ -595,6 +629,17 @@ void mdec_debug_get_state(MDECDebugState *out) {
     out->dma_in_words = mdec.dma_in_words;
     out->dma_out_words = mdec.dma_out_words;
     out->dma_read_underflows = mdec.dma_read_underflows;
+#ifndef PSX_NO_DEBUG_TOOLS
+    out->decode_calls_total = mdec_decode_calls_total;
+    out->decode_us_total = mdec_perf_ticks_to_us(mdec_decode_ticks_total);
+    out->decode_us_max = mdec_perf_ticks_to_us(mdec_decode_ticks_max);
+    out->decode_us_last = mdec_perf_ticks_to_us(mdec_decode_ticks_last);
+#else
+    out->decode_calls_total = 0;
+    out->decode_us_total = 0;
+    out->decode_us_max = 0;
+    out->decode_us_last = 0;
+#endif
 }
 
 uint64_t mdec_debug_get_event_total(void) {
@@ -618,6 +663,12 @@ void mdec_debug_clear(void) {
     memset(mdec_trace, 0, sizeof(mdec_trace));
     mdec_trace_seq = 0;
     mdec_trace_head = 0;
+#ifndef PSX_NO_DEBUG_TOOLS
+    mdec_decode_calls_total = 0;
+    mdec_decode_ticks_total = 0;
+    mdec_decode_ticks_max = 0;
+    mdec_decode_ticks_last = 0;
+#endif
 }
 
 void mdec_debug_dma_in_start(uint32_t addr, uint32_t words) {

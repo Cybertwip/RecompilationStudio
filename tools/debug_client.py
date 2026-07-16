@@ -35,6 +35,7 @@ Commands (shared — identical on both servers):
     set_snapshot <slot> <addr>  Configure RAM snapshot region (slot 0-3)
     get_snapshots               Show snapshot region config
     input <buttons_hex>         Override controller input
+    press <buttons> [frames]    Press a full active-low pad word briefly
     clear_input                 Remove input override
     sio_state                   SIO register and transaction counters
     pad_status                  PSX-visible pad word/type for both ports
@@ -42,6 +43,19 @@ Commands (shared — identical on both servers):
     sio_trace [count]           Recent SIO TX/RX byte transactions
     sio_pc_trace [count]        Recent guest PCs driving SIO
     bioscall_dump [tail]        BIOS call summary or recent call entries
+    frame_perf                  CPU/GPU frame-time attribution
+    latency [window] [raw_n]    Frame-period/latency summary; optional raw frames
+    phase_profile [window]      Wall-time phase shares over recent samples
+    phase_hot [top]             Hottest recompiled guest functions
+    phase_static_hot [top]      Hottest static guest basic blocks
+    audio_stats                 Audio queue/underrun statistics
+    mdec_state                  MDEC decoder and DMA state
+    fmv_state                   Resolved FMV/runtime configuration state
+    xlate [sub]                 Translation stats/dump/todo/reload
+    gte_trace [on|off|reset]    Control expensive raw GTE diagnostic rings
+    vblank_rate                 Guest vblank cadence
+    gl_present_ring [count]     Recent OpenGL present records
+    present_ring [count]        Recent backend-independent presents
     quit                        Quit game
 
 Tier 1 write trace commands:
@@ -269,6 +283,12 @@ def build_cmd(args):
         if len(args) < 2:
             return None, lambda _: "Usage: input <buttons_hex>"
         return {"cmd": "set_input", "buttons": args[1]}, pretty_json
+    elif cmd == "press":
+        if len(args) < 2:
+            return None, lambda _: "Usage: press <buttons> [frames]"
+        buttons = int(args[1], 0)
+        frames = int(args[2]) if len(args) > 2 else 2
+        return {"cmd": "press", "buttons": buttons, "frames": frames}, pretty_json
     elif cmd == "clear_input":
         return {"cmd": "clear_input"}, pretty_json
     elif cmd == "ws_margin":
@@ -317,6 +337,55 @@ def build_cmd(args):
         d = {"cmd": "bioscall_dump"}
         if len(args) > 1:
             d["tail"] = int(args[1])
+        return d, pretty_json
+    elif cmd in ("frame_perf", "audio_stats", "mdec_state", "fmv_state",
+                 "vblank_rate", "dirty_ram_stats"):
+        return {"cmd": cmd}, pretty_json
+    elif cmd == "latency":
+        d = {"cmd": "latency"}
+        if len(args) > 1:
+            d["window"] = int(args[1])
+        if len(args) > 2:
+            d["raw"] = 1
+            d["count"] = int(args[2])
+        return d, pretty_json
+    elif cmd == "xlate":
+        d = {"cmd": "xlate"}
+        if len(args) > 1:
+            d["sub"] = args[1]
+        return d, pretty_json
+    elif cmd == "gte_trace":
+        d = {"cmd": "gte_trace"}
+        if len(args) > 1:
+            action = args[1].lower()
+            if action == "on":
+                d["enabled"] = 1
+            elif action == "off":
+                d["enabled"] = 0
+            elif action == "reset":
+                d["reset"] = 1
+            else:
+                return None, lambda _: "Usage: gte_trace [on|off|reset]"
+        return d, pretty_json
+    elif cmd == "phase_profile":
+        d = {"cmd": "phase_profile"}
+        if len(args) > 1:
+            d["window"] = int(args[1])
+        return d, pretty_json
+    elif cmd == "phase_hot":
+        d = {"cmd": "phase_hot"}
+        if len(args) > 1:
+            d["top"] = int(args[1])
+        return d, pretty_json
+    elif cmd == "phase_static_hot":
+        d = {"cmd": "phase_static_hot"}
+        if len(args) > 1:
+            d["top"] = int(args[1])
+        return d, pretty_json
+    elif cmd in ("gl_present_ring", "present_ring"):
+        d = {"cmd": cmd}
+        if len(args) > 1:
+            d["n"] = int(args[1])
         return d, pretty_json
     elif cmd == "bios_wait_state":
         return {"cmd": "bios_wait_state"}, pretty_json

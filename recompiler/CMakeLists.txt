@@ -237,5 +237,12 @@ target_include_directories(config_loader_controller_test PRIVATE
 target_link_libraries(config_loader_controller_test PRIVATE fmt)
 
 enable_testing()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME config_loader_controller COMMAND config_loader_controller_test)
 add_test(NAME function_analysis_validity COMMAND function_analysis_validity_test)
+add_test(
+    NAME dispatch_hash_codegen
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dispatch_hash_codegen.py
+            $<TARGET_FILE:psxrecomp-game>
+)

@@ -118,6 +118,102 @@
 #define VRAM_H 512
 #define GL_MAX_INTERNAL_SCALE 4
 
+/* Linux OpenGL development libraries are not part of the cross-toolchain
+ * sysroot. Load the core entry points through SDL just like the modern ones,
+ * keeping libGL out of the executable's startup dependencies and allowing a
+ * software-only configuration to run without it. */
+#if defined(__linux__)
+typedef void (APIENTRY *PFN_glBindTextureCore)(GLenum, GLuint);
+typedef void (APIENTRY *PFN_glClearCore)(GLbitfield);
+typedef void (APIENTRY *PFN_glClearColorCore)(GLfloat, GLfloat, GLfloat, GLfloat);
+typedef void (APIENTRY *PFN_glClearStencilCore)(GLint);
+typedef void (APIENTRY *PFN_glColorMaskCore)(GLboolean, GLboolean, GLboolean, GLboolean);
+typedef void (APIENTRY *PFN_glCopyTexSubImage2DCore)(GLenum, GLint, GLint, GLint,
+                                                     GLint, GLint, GLsizei, GLsizei);
+typedef void (APIENTRY *PFN_glDeleteTexturesCore)(GLsizei, const GLuint *);
+typedef void (APIENTRY *PFN_glDisableCore)(GLenum);
+typedef void (APIENTRY *PFN_glDrawArraysCore)(GLenum, GLint, GLsizei);
+typedef void (APIENTRY *PFN_glEnableCore)(GLenum);
+typedef void (APIENTRY *PFN_glFinishCore)(void);
+typedef void (APIENTRY *PFN_glFlushCore)(void);
+typedef void (APIENTRY *PFN_glGenTexturesCore)(GLsizei, GLuint *);
+typedef GLenum (APIENTRY *PFN_glGetErrorCore)(void);
+typedef const GLubyte *(APIENTRY *PFN_glGetStringCore)(GLenum);
+typedef void (APIENTRY *PFN_glLineWidthCore)(GLfloat);
+typedef void (APIENTRY *PFN_glPixelStoreiCore)(GLenum, GLint);
+typedef void (APIENTRY *PFN_glReadBufferCore)(GLenum);
+typedef void (APIENTRY *PFN_glReadPixelsCore)(GLint, GLint, GLsizei, GLsizei,
+                                              GLenum, GLenum, void *);
+typedef void (APIENTRY *PFN_glScissorCore)(GLint, GLint, GLsizei, GLsizei);
+typedef void (APIENTRY *PFN_glStencilFuncCore)(GLenum, GLint, GLuint);
+typedef void (APIENTRY *PFN_glStencilMaskCore)(GLuint);
+typedef void (APIENTRY *PFN_glStencilOpCore)(GLenum, GLenum, GLenum);
+typedef void (APIENTRY *PFN_glTexImage2DCore)(GLenum, GLint, GLint, GLsizei,
+                                              GLsizei, GLint, GLenum, GLenum,
+                                              const void *);
+typedef void (APIENTRY *PFN_glTexParameteriCore)(GLenum, GLenum, GLint);
+typedef void (APIENTRY *PFN_glTexSubImage2DCore)(GLenum, GLint, GLint, GLint,
+                                                 GLsizei, GLsizei, GLenum,
+                                                 GLenum, const void *);
+typedef void (APIENTRY *PFN_glViewportCore)(GLint, GLint, GLsizei, GLsizei);
+
+static PFN_glBindTextureCore p_glBindTexture;
+static PFN_glClearCore p_glClear;
+static PFN_glClearColorCore p_glClearColor;
+static PFN_glClearStencilCore p_glClearStencil;
+static PFN_glColorMaskCore p_glColorMask;
+static PFN_glCopyTexSubImage2DCore p_glCopyTexSubImage2D;
+static PFN_glDeleteTexturesCore p_glDeleteTextures;
+static PFN_glDisableCore p_glDisable;
+static PFN_glDrawArraysCore p_glDrawArrays;
+static PFN_glEnableCore p_glEnable;
+static PFN_glFinishCore p_glFinish;
+static PFN_glFlushCore p_glFlush;
+static PFN_glGenTexturesCore p_glGenTextures;
+static PFN_glGetErrorCore p_glGetError;
+static PFN_glGetStringCore p_glGetString;
+static PFN_glLineWidthCore p_glLineWidth;
+static PFN_glPixelStoreiCore p_glPixelStorei;
+static PFN_glReadBufferCore p_glReadBuffer;
+static PFN_glReadPixelsCore p_glReadPixels;
+static PFN_glScissorCore p_glScissor;
+static PFN_glStencilFuncCore p_glStencilFunc;
+static PFN_glStencilMaskCore p_glStencilMask;
+static PFN_glStencilOpCore p_glStencilOp;
+static PFN_glTexImage2DCore p_glTexImage2D;
+static PFN_glTexParameteriCore p_glTexParameteri;
+static PFN_glTexSubImage2DCore p_glTexSubImage2D;
+static PFN_glViewportCore p_glViewport;
+
+#define glBindTexture p_glBindTexture
+#define glClear p_glClear
+#define glClearColor p_glClearColor
+#define glClearStencil p_glClearStencil
+#define glColorMask p_glColorMask
+#define glCopyTexSubImage2D p_glCopyTexSubImage2D
+#define glDeleteTextures p_glDeleteTextures
+#define glDisable p_glDisable
+#define glDrawArrays p_glDrawArrays
+#define glEnable p_glEnable
+#define glFinish p_glFinish
+#define glFlush p_glFlush
+#define glGenTextures p_glGenTextures
+#define glGetError p_glGetError
+#define glGetString p_glGetString
+#define glLineWidth p_glLineWidth
+#define glPixelStorei p_glPixelStorei
+#define glReadBuffer p_glReadBuffer
+#define glReadPixels p_glReadPixels
+#define glScissor p_glScissor
+#define glStencilFunc p_glStencilFunc
+#define glStencilMask p_glStencilMask
+#define glStencilOp p_glStencilOp
+#define glTexImage2D p_glTexImage2D
+#define glTexParameteri p_glTexParameteri
+#define glTexSubImage2D p_glTexSubImage2D
+#define glViewport p_glViewport
+#endif
+
 /* ---- Loaded modern-GL entry points ------------------------------------- */
 typedef GLuint (APIENTRY *PFN_glCreateShader)(GLenum);
 typedef void   (APIENTRY *PFN_glShaderSource)(GLuint, GLsizei, const char *const *, const GLint *);
@@ -248,6 +344,22 @@ static PFN_glFramebufferRenderbuffer p_glFramebufferRenderbuffer;
 static int load_modern_gl(void) {
     int ok = 1;
 #define LOAD(p, n) do { p = (void *)SDL_GL_GetProcAddress(n); if (!p) ok = 0; } while (0)
+#if defined(__linux__)
+    LOAD(p_glBindTexture, "glBindTexture"); LOAD(p_glClear, "glClear");
+    LOAD(p_glClearColor, "glClearColor"); LOAD(p_glClearStencil, "glClearStencil");
+    LOAD(p_glColorMask, "glColorMask"); LOAD(p_glCopyTexSubImage2D, "glCopyTexSubImage2D");
+    LOAD(p_glDeleteTextures, "glDeleteTextures"); LOAD(p_glDisable, "glDisable");
+    LOAD(p_glDrawArrays, "glDrawArrays"); LOAD(p_glEnable, "glEnable");
+    LOAD(p_glFinish, "glFinish"); LOAD(p_glFlush, "glFlush");
+    LOAD(p_glGenTextures, "glGenTextures"); LOAD(p_glGetError, "glGetError");
+    LOAD(p_glGetString, "glGetString"); LOAD(p_glLineWidth, "glLineWidth");
+    LOAD(p_glPixelStorei, "glPixelStorei"); LOAD(p_glReadBuffer, "glReadBuffer");
+    LOAD(p_glReadPixels, "glReadPixels"); LOAD(p_glScissor, "glScissor");
+    LOAD(p_glStencilFunc, "glStencilFunc"); LOAD(p_glStencilMask, "glStencilMask");
+    LOAD(p_glStencilOp, "glStencilOp"); LOAD(p_glTexImage2D, "glTexImage2D");
+    LOAD(p_glTexParameteri, "glTexParameteri"); LOAD(p_glTexSubImage2D, "glTexSubImage2D");
+    LOAD(p_glViewport, "glViewport");
+#endif
     LOAD(p_glCreateShader, "glCreateShader");   LOAD(p_glShaderSource, "glShaderSource");
     LOAD(p_glCompileShader, "glCompileShader"); LOAD(p_glGetShaderiv, "glGetShaderiv");
     LOAD(p_glGetShaderInfoLog, "glGetShaderInfoLog"); LOAD(p_glDeleteShader, "glDeleteShader");
@@ -2248,15 +2360,16 @@ int gl_renderer_init_context(SDL_Window *win) {
         SDL_GL_SetSwapInterval(1);
         s_swap_interval = 1;
     }
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
-    const char *ver = (const char *)glGetString(GL_VERSION);
-    fprintf(stdout, "psxrecomp: OpenGL context created (%s)\n", ver ? ver : "?");
-
     /* All-or-nothing: any missing entry point / failed shader / bad FBO means
      * the whole GL renderer is unavailable and the runtime stays on the pure
      * software path — no half-GL hybrid (that mixed mode is what produced
      * the alternating-present menu jitter). */
     int ok = load_modern_gl();
+    if (ok) {
+        glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+        const char *ver = (const char *)glGetString(GL_VERSION);
+        fprintf(stdout, "psxrecomp: OpenGL context created (%s)\n", ver ? ver : "?");
+    }
     if (ok) {
         glGenTextures(1, &s_present_tex);
         glBindTexture(GL_TEXTURE_2D, s_present_tex);

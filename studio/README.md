@@ -1,9 +1,9 @@
 # PSXRecomp Studio
 
-PSXRecomp Studio is the Qt front end for producing self-contained macOS or
-Windows PlayStation recompilation apps without creating a permanent per-title
-repository. Studio itself currently runs on macOS; its Windows output is
-cross-compiled with MinGW.
+PSXRecomp Studio is the Qt front end for producing self-contained macOS,
+Windows, or Linux PlayStation recompilation apps without creating a permanent
+per-title repository. Studio itself currently runs on macOS; its Windows and
+Linux outputs are cross-compiled with dedicated x86-64 GNU toolchains.
 
 It uses Qt 6 Widgets, Oclero Qlementine, Qlementine Icons,
 QtAppInstanceManager, and QuaZip. Work happens in a temporary directory; the
@@ -20,7 +20,7 @@ selected output directory receives only the final platform package.
 - Optional BIOS branding images: one initial splash and one handoff image.
 - The desired runtime window title. This also becomes the app name.
 - For macOS exports, a password-protected PKCS#12 signing identity (`.pfx` or
-  `.p12`) and its password. Windows exports are currently unsigned.
+  `.p12`) and its password. Windows and Linux exports are currently unsigned.
 - Ghidra 11.3.2 with Java 21.
 
 The certificate password is kept only in memory. Studio validates the source
@@ -51,6 +51,17 @@ for these programs. It downloads SDL2's official, checksum-pinned MinGW
 development archive and statically links SDL2 plus the GCC/C++ runtimes so the
 delivered executable has no non-system DLL dependency.
 
+Linux exports additionally require the tools named
+`x86_64-unknown-linux-gnu-gcc`, `x86_64-unknown-linux-gnu-g++`,
+`x86_64-unknown-linux-gnu-ar`, `x86_64-unknown-linux-gnu-ranlib`,
+`x86_64-unknown-linux-gnu-strip`, and
+`x86_64-unknown-linux-gnu-readelf`. Studio writes an explicit CMake toolchain
+file for these programs. It uses checksum-pinned SDL2 2.32.10 headers and a
+checksum-pinned manylinux x86-64 SDL2 runtime, statically links the GCC and C++
+runtimes, and bundles SDL2 beside the executable with an `$ORIGIN` runtime
+path. The resulting package targets glibc 2.28 or newer and is verified to have
+no non-system shared-library dependency outside the bundled SDL2 runtime.
+
 Qt is bundled into the distributed Studio app. Qt is not linked into generated
 game apps; those use the PSXRecomp SDL runtime.
 
@@ -72,18 +83,20 @@ game apps; those use the PSXRecomp SDL runtime.
    native C from that patched BIOS. The original BIOS file remains unchanged.
 9. Run the generated-code, dispatch, range, data, and runtime-installed-target
    audits. Any unresolved disagreement stops the build.
-10. Compile either a Release macOS application bundle or an x86-64 Windows GUI
-    executable. The macOS path verifies the selected wired Xbox/PDP GIP backend
-    and bundles SDL2/SDL3 as needed. The Windows path selects the installed
-    MinGW-w64 toolchain, embeds a Windows icon, statically links SDL2, and
-    rejects non-system runtime DLL imports.
+10. Compile a Release macOS application bundle, x86-64 Windows GUI executable,
+    or x86-64 Linux ELF executable. The macOS path verifies the selected wired
+    Xbox/PDP GIP backend and bundles SDL2/SDL3 as needed. The Windows path
+    selects the installed MinGW-w64 toolchain, embeds a Windows icon, statically
+    links SDL2, and rejects non-system runtime DLL imports. The Linux path
+    selects the installed `x86_64-unknown-linux-gnu` toolchain, bundles SDL2,
+    and rejects unexpected ELF dependencies or glibc requirements above 2.28.
 11. For macOS, import the normalized PFX into an isolated temporary keychain,
     sign every nested Mach-O, and sign the app with Hardened Runtime, a secure
     timestamp, and the narrow `disable-library-validation` entitlement required
     by non-Apple/self-issued code-signing identities. Run strict `codesign`
     verification before and after delivery.
-12. Copy the verified `.app` or `-Windows` package into the selected output
-    directory and verify the delivered copy again.
+12. Copy the verified `.app`, `-Windows`, or `-Linux` package into the selected
+    output directory and verify the delivered copy again.
 
 A direct JAL into bytes classified as static data is emitted only as a
 runtime-installed target. The bytes remain absent from native C and the runtime
@@ -113,6 +126,23 @@ Game Name-Windows/
   Game Name.exe
   game.toml
   PSXRecomp-Proof.zip
+  bios/SCPH1001.BIN
+  game/<serial boot EXE>
+  disc/<CUE and referenced BIN files>
+  seeds/ghidra_funcs.txt
+```
+
+Linux exports use:
+
+```text
+Game Name-Linux/
+  Game Name
+  libSDL2-2.0.so.0
+  AppIcon.png
+  game.toml
+  PSXRecomp-Proof.zip
+  licenses/SDL2.txt
+  licenses/pysdl2-dll.txt
   bios/SCPH1001.BIN
   game/<serial boot EXE>
   disc/<CUE and referenced BIN files>

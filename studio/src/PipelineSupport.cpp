@@ -275,6 +275,21 @@ bool createIco(const QString& sourceIcon,
   return true;
 }
 
+bool createPngIcon(const QString& sourceIcon,
+                   const QString& outputPath,
+                   QString& error) {
+  QImage image;
+  if (!renderIcon(sourceIcon, 512, image, error)) {
+    return false;
+  }
+  QDir().mkpath(QFileInfo(outputPath).absolutePath());
+  if (!image.save(outputPath, "PNG")) {
+    error = QStringLiteral("Could not encode the selected icon as a Linux PNG file.");
+    return false;
+  }
+  return true;
+}
+
 bool createProofArchive(const QString& proofDirectory,
                         const QString& outputPath,
                         QString& error) {

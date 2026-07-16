@@ -10,22 +10,41 @@ namespace psxstudio {
 enum class TargetPlatform {
   MacOS,
   Windows,
+  Linux,
 };
 
 inline QString targetPlatformKey(TargetPlatform platform) {
-  return platform == TargetPlatform::Windows ? QStringLiteral("windows")
-                                             : QStringLiteral("macos");
+  switch (platform) {
+    case TargetPlatform::Windows:
+      return QStringLiteral("windows");
+    case TargetPlatform::Linux:
+      return QStringLiteral("linux");
+    case TargetPlatform::MacOS:
+      return QStringLiteral("macos");
+  }
+  return QStringLiteral("macos");
 }
 
 inline QString targetPlatformDisplayName(TargetPlatform platform) {
-  return platform == TargetPlatform::Windows ? QStringLiteral("Windows")
-                                             : QStringLiteral("macOS");
+  switch (platform) {
+    case TargetPlatform::Windows:
+      return QStringLiteral("Windows");
+    case TargetPlatform::Linux:
+      return QStringLiteral("Linux");
+    case TargetPlatform::MacOS:
+      return QStringLiteral("macOS");
+  }
+  return QStringLiteral("macOS");
 }
 
 inline TargetPlatform targetPlatformFromKey(const QString& key) {
-  return key.compare(QStringLiteral("windows"), Qt::CaseInsensitive) == 0
-    ? TargetPlatform::Windows
-    : TargetPlatform::MacOS;
+  if (key.compare(QStringLiteral("windows"), Qt::CaseInsensitive) == 0) {
+    return TargetPlatform::Windows;
+  }
+  if (key.compare(QStringLiteral("linux"), Qt::CaseInsensitive) == 0) {
+    return TargetPlatform::Linux;
+  }
+  return TargetPlatform::MacOS;
 }
 
 struct PipelineRequest {

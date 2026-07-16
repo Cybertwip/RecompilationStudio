@@ -33,6 +33,17 @@ namespace {
 
 constexpr auto kScph1001Sha256 = "71af94d1e47a68c11e8fdb9f8368040601514a42a5a399cda48c7d3bff1e99d3";
 constexpr qint64 kScph1001Size = 512 * 1024;
+constexpr auto kSdl2SourceUrl =
+  "https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz";
+constexpr auto kSdl2SourceSha256 =
+  "5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165";
+constexpr auto kLinuxSdl2WheelUrl =
+  "https://files.pythonhosted.org/packages/2b/1c/91fb667c3968b420de5dd76e840259b44b876b6fc84c5889151633fcc06e/"
+  "pysdl2_dll-2.32.10-py2.py3-none-manylinux_2_28_x86_64.whl";
+constexpr auto kLinuxSdl2WheelSha256 =
+  "1e6139e3ce832d95d8376b77f4c9288bef34d6b131f844f2a5fcc8873ce8e6da";
+constexpr auto kLinuxSdl2LibrarySha256 =
+  "0d7d4648b31ebabb8943d9cd5e72f15b74b5e0369c43dfa603202adf1aead69c";
 
 QString cleanBundleName(QString title) {
   title = title.trimmed();
@@ -275,6 +286,26 @@ QString makeMingwToolchain(const QString& gcc,
   return cmake;
 }
 
+QString makeLinuxToolchain(const QString& gcc,
+                           const QString& gxx,
+                           const QString& ar,
+                           const QString& ranlib,
+                           const QString& strip) {
+  QString cmake;
+  cmake += QStringLiteral("set(CMAKE_SYSTEM_NAME Linux)\n");
+  cmake += QStringLiteral("set(CMAKE_SYSTEM_PROCESSOR x86_64)\n");
+  cmake += QStringLiteral("set(CMAKE_C_COMPILER %1)\n").arg(cmakeQuoted(gcc));
+  cmake += QStringLiteral("set(CMAKE_CXX_COMPILER %1)\n").arg(cmakeQuoted(gxx));
+  cmake += QStringLiteral("set(CMAKE_AR %1)\n").arg(cmakeQuoted(ar));
+  cmake += QStringLiteral("set(CMAKE_RANLIB %1)\n").arg(cmakeQuoted(ranlib));
+  cmake += QStringLiteral("set(CMAKE_STRIP %1)\n").arg(cmakeQuoted(strip));
+  cmake += QStringLiteral("set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n");
+  cmake += QStringLiteral("set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\n");
+  cmake += QStringLiteral("set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n");
+  cmake += QStringLiteral("set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n");
+  return cmake;
+}
+
 QString makeProjectCMake(const PipelineRequest& request,
                          const GameDescription& game,
                          const QString& bundleName,
@@ -291,6 +322,8 @@ QString makeProjectCMake(const PipelineRequest& request,
     ? sanitizedFileStem(request.windowTitle)
     : game.serial);
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
+  const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
+  const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
   QString cmake;
   cmake += QStringLiteral("cmake_minimum_required(VERSION 3.20)\n");
   cmake += windowsTarget ? QStringLiteral("project(GeneratedPSXApp C CXX RC)\n")
@@ -314,6 +347,43 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
     cmake += QStringLiteral("set(SDL2_STATIC_LDFLAGS ${SDL2_LIBRARIES})\n");
     cmake += QStringLiteral("set(PSX_STATIC_RUNTIME ON CACHE BOOL \"\" FORCE)\n");
+  } else if (linuxTarget) {
+    cmake += QStringLiteral("include(FetchContent)\n");
+    cmake += QStringLiteral("set(FETCHCONTENT_QUIET OFF)\n");
+    cmake += QStringLiteral("set(FETCHCONTENT_BASE_DIR %1 CACHE PATH \"\" FORCE)\n")
+               .arg(cmakeQuoted(dependencyCachePath));
+    cmake += QStringLiteral("FetchContent_Declare(SDL2Source\n");
+    cmake += QStringLiteral("  URL %1\n")
+               .arg(cmakeQuoted(QString::fromLatin1(kSdl2SourceUrl)));
+    cmake += QStringLiteral("  URL_HASH SHA256=%1\n")
+               .arg(QString::fromLatin1(kSdl2SourceSha256));
+    cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
+    cmake += QStringLiteral("FetchContent_GetProperties(SDL2Source)\n");
+    cmake += QStringLiteral("if(NOT sdl2source_POPULATED)\n");
+    cmake += QStringLiteral("  FetchContent_Populate(SDL2Source)\nendif()\n");
+    cmake += QStringLiteral("FetchContent_Declare(SDL2Linux\n");
+    cmake += QStringLiteral("  URL %1\n")
+               .arg(cmakeQuoted(QString::fromLatin1(kLinuxSdl2WheelUrl)));
+    cmake += QStringLiteral("  URL_HASH SHA256=%1\n")
+               .arg(QString::fromLatin1(kLinuxSdl2WheelSha256));
+    cmake += QStringLiteral("  DOWNLOAD_NAME \"pysdl2_dll-2.32.10-manylinux_2_28_x86_64.zip\"\n");
+    cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
+    cmake += QStringLiteral("FetchContent_GetProperties(SDL2Linux)\n");
+    cmake += QStringLiteral("if(NOT sdl2linux_POPULATED)\n");
+    cmake += QStringLiteral("  FetchContent_Populate(SDL2Linux)\nendif()\n");
+    cmake += QStringLiteral("set(_PSX_SDL2_LIBRARY \"${sdl2linux_SOURCE_DIR}/sdl2dll/dll/libSDL2-2.0.so\")\n");
+    cmake += QStringLiteral("if(NOT EXISTS \"${_PSX_SDL2_LIBRARY}\")\n");
+    cmake += QStringLiteral("  message(FATAL_ERROR \"The pinned Linux SDL2 archive did not contain libSDL2-2.0.so\")\nendif()\n");
+    cmake += QStringLiteral("add_library(PSXSDL2 SHARED IMPORTED GLOBAL)\n");
+    cmake += QStringLiteral("set_target_properties(PSXSDL2 PROPERTIES\n");
+    cmake += QStringLiteral("  IMPORTED_LOCATION \"${_PSX_SDL2_LIBRARY}\"\n");
+    cmake += QStringLiteral("  INTERFACE_INCLUDE_DIRECTORIES \"${sdl2source_SOURCE_DIR}/include\")\n");
+    cmake += QStringLiteral("set(SDL2_INCLUDE_DIRS \"${sdl2source_SOURCE_DIR}/include\")\n");
+    cmake += QStringLiteral("set(SDL2_LIBRARIES PSXSDL2)\n");
+    cmake += QStringLiteral("set(THREADS_PREFER_PTHREAD_FLAG ON)\n");
+    cmake += QStringLiteral("find_package(Threads REQUIRED)\n");
+    cmake += QStringLiteral("set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)\n");
+    cmake += QStringLiteral("set(CMAKE_INSTALL_RPATH \"$ORIGIN\")\n");
   } else {
     cmake += QStringLiteral("set(CMAKE_OSX_DEPLOYMENT_TARGET \"14.0\" CACHE STRING \"\" FORCE)\n");
     cmake += QStringLiteral("set(CMAKE_MACOSX_RPATH ON)\nset(CMAKE_BUILD_WITH_INSTALL_RPATH ON)\n");
@@ -324,7 +394,7 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("set(PSXRECOMP_SKIP_BIOS_STALE_CHECK ON CACHE BOOL \"\" FORCE)\n");
   cmake += QStringLiteral("set(PSX_LAUNCHER OFF CACHE BOOL \"\" FORCE)\n");
   cmake += QStringLiteral("set(PSX_DEBUG_TOOLS OFF CACHE BOOL \"\" FORCE)\n");
-  cmake += macosGipCmakeOption(!windowsTarget && request.macosGipGamepad);
+  cmake += macosGipCmakeOption(macosTarget && request.macosGipGamepad);
   cmake += QStringLiteral("include(${PSXRECOMP_ROOT}/runtime/runtime.cmake)\n");
   cmake += QStringLiteral("psxrecomp_add_runtime_target(psx-runtime\n");
   cmake += QStringLiteral("  BIOS_GENERATED_FULL_C %1\n").arg(cmakeQuoted(biosFull));
@@ -333,10 +403,10 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  GAME_GENERATED_DISPATCH_C %1\n").arg(cmakeQuoted(gameDispatch));
   cmake += QStringLiteral("  WINDOW_TITLE %1\n").arg(cmakeQuoted(request.windowTitle));
   cmake += QStringLiteral("  EXE_NAME %1\n").arg(cmakeQuoted(bundleName));
-  cmake += windowsTarget
+  cmake += (windowsTarget || linuxTarget)
     ? QStringLiteral("  DEFAULT_BIOS_PATH \"bios/SCPH1001.BIN\"\n")
     : QStringLiteral("  DEFAULT_BIOS_PATH \"../Resources/bios/SCPH1001.BIN\"\n");
-  cmake += windowsTarget
+  cmake += (windowsTarget || linuxTarget)
     ? QStringLiteral("  DEFAULT_GAME_CONFIG_PATH \"game.toml\"\n")
     : QStringLiteral("  DEFAULT_GAME_CONFIG_PATH \"../Resources/game.toml\"\n");
   cmake += QStringLiteral("  APP_SUPPORT_DIR_NAME %1\n)\n").arg(cmakeQuoted(appSupportName));
@@ -348,6 +418,18 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES OUTPUT_NAME %1)\n")
                .arg(cmakeQuoted(bundleName));
     cmake += QStringLiteral("install(TARGETS psx-runtime RUNTIME DESTINATION .)\n");
+  } else if (linuxTarget) {
+    cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES\n");
+    cmake += QStringLiteral("  OUTPUT_NAME %1\n").arg(cmakeQuoted(bundleName));
+    cmake += QStringLiteral("  BUILD_WITH_INSTALL_RPATH TRUE\n");
+    cmake += QStringLiteral("  INSTALL_RPATH \"$ORIGIN\")\n");
+    cmake += QStringLiteral("target_link_libraries(psx-runtime PRIVATE Threads::Threads ${CMAKE_DL_LIBS})\n");
+    cmake += QStringLiteral("target_link_options(psx-runtime PRIVATE -static-libgcc -static-libstdc++ -Wl,-z,origin)\n");
+    cmake += QStringLiteral("install(TARGETS psx-runtime RUNTIME DESTINATION .)\n");
+    cmake += QStringLiteral("install(FILES \"${_PSX_SDL2_LIBRARY}\" DESTINATION . RENAME \"libSDL2-2.0.so.0\")\n");
+    cmake += QStringLiteral("install(FILES %1 DESTINATION .)\n").arg(cmakeQuoted(iconPath));
+    cmake += QStringLiteral("install(FILES \"${sdl2source_SOURCE_DIR}/LICENSE.txt\" DESTINATION licenses RENAME \"SDL2.txt\")\n");
+    cmake += QStringLiteral("install(FILES \"${sdl2linux_SOURCE_DIR}/pysdl2_dll-2.32.10.dist-info/licenses/LICENSE\" DESTINATION licenses RENAME \"pysdl2-dll.txt\")\n");
   } else {
     cmake += QStringLiteral("set_source_files_properties(%1 PROPERTIES MACOSX_PACKAGE_LOCATION \"Resources\")\n")
                .arg(cmakeQuoted(iconPath));
@@ -530,6 +612,9 @@ void PipelineWorker::run(PipelineRequest request) {
   cancelRequested_.store(false, std::memory_order_relaxed);
   cleanupKeychain();
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
+  const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
+  const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
+  const bool directoryPackageTarget = windowsTarget || linuxTarget;
 
   constexpr int totalStages = 9;
   QString sensitivePemPath;
@@ -602,7 +687,7 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("Select a writable output directory."), {});
     return;
   }
-  if (!windowsTarget &&
+  if (macosTarget &&
       (!QFileInfo(request.certificatePath).isFile() || request.certificatePassword.isEmpty())) {
     fail(QStringLiteral("A password-protected .pfx signing certificate and its password are required."), {});
     return;
@@ -620,9 +705,9 @@ void PipelineWorker::run(PipelineRequest request) {
   const QString cmake = findExecutable(QStringLiteral("cmake"));
   const QString ninja = findExecutable(QStringLiteral("ninja"));
   const QString python = findExecutable(QStringLiteral("python3"));
-  const QString pkgConfig = windowsTarget ? QString() : findExecutable(QStringLiteral("pkg-config"));
-  const QString nm = windowsTarget ? QString() : QStringLiteral("/usr/bin/nm");
-  const QString openssl = windowsTarget ? QString() : findOpenSsl3();
+  const QString pkgConfig = macosTarget ? findExecutable(QStringLiteral("pkg-config")) : QString();
+  const QString nm = macosTarget ? QStringLiteral("/usr/bin/nm") : QString();
+  const QString openssl = macosTarget ? findOpenSsl3() : QString();
   const QString mingwGcc = windowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-gcc")) : QString();
   const QString mingwGxx = windowsTarget
@@ -637,7 +722,20 @@ void PipelineWorker::run(PipelineRequest request) {
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-strip")) : QString();
   const QString mingwObjdump = windowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-objdump")) : QString();
-  if (!windowsTarget && openssl.isEmpty()) {
+  const QString linuxGcc = linuxTarget
+    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-gcc")) : QString();
+  const QString linuxGxx = linuxTarget
+    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-g++")) : QString();
+  const QString linuxAr = linuxTarget
+    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-ar")) : QString();
+  const QString linuxRanlib = linuxTarget
+    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-ranlib")) : QString();
+  const QString linuxStrip = linuxTarget
+    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-strip")) : QString();
+  const QString linuxReadelf = linuxTarget
+    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-readelf")) : QString();
+  QString linuxSysroot;
+  if (macosTarget && openssl.isEmpty()) {
     fail(QStringLiteral("OpenSSL 3 with PKCS#12 legacy-provider support is required. Install openssl@3 with Homebrew or set PSXRECOMP_OPENSSL."), {});
     return;
   }
@@ -645,6 +743,9 @@ void PipelineWorker::run(PipelineRequest request) {
   if (windowsTarget) {
     requiredTools << mingwGcc << mingwGxx << mingwWindres << mingwAr
                   << mingwRanlib << mingwStrip << mingwObjdump;
+  } else if (linuxTarget) {
+    requiredTools << linuxGcc << linuxGxx << linuxAr << linuxRanlib
+                  << linuxStrip << linuxReadelf;
   } else {
     requiredTools << pkgConfig << openssl
                   << QStringLiteral("/usr/bin/iconutil") << QStringLiteral("/usr/bin/security")
@@ -658,15 +759,30 @@ void PipelineWorker::run(PipelineRequest request) {
       return;
     }
   }
+  if (linuxTarget) {
+    const QString compilerTarget =
+      versionText(linuxGcc, { QStringLiteral("-dumpmachine") }).trimmed();
+    linuxSysroot = versionText(linuxGcc, { QStringLiteral("-print-sysroot") }).trimmed();
+    if (compilerTarget != QStringLiteral("x86_64-unknown-linux-gnu") ||
+        !QFileInfo(linuxSysroot).isDir()) {
+      fail(QStringLiteral("The selected Linux compiler does not provide the required x86_64-unknown-linux-gnu target and sysroot."),
+           {});
+      return;
+    }
+  }
   emit logLine(QStringLiteral("Target platform: %1")
                  .arg(targetPlatformDisplayName(request.targetPlatform)));
   if (windowsTarget) {
     emit logLine(QStringLiteral("MinGW C compiler: %1").arg(mingwGcc));
     emit logLine(QStringLiteral("MinGW C++ compiler: %1").arg(mingwGxx));
+  } else if (linuxTarget) {
+    emit logLine(QStringLiteral("Linux C compiler: %1").arg(linuxGcc));
+    emit logLine(QStringLiteral("Linux C++ compiler: %1").arg(linuxGxx));
+    emit logLine(QStringLiteral("Linux sysroot: %1").arg(linuxSysroot));
   }
   QString libusbVersion;
   QString libusbStaticArchive;
-  if (!windowsTarget && request.macosGipGamepad) {
+  if (macosTarget && request.macosGipGamepad) {
     QByteArray versionOutput;
     QByteArray libdirOutput;
     if (!runCommand(pkgConfig,
@@ -692,7 +808,7 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     emit logLine(QStringLiteral("macOS wired Xbox/PDP input: enabled (libusb %1, static archive %2)")
                    .arg(libusbVersion, libusbStaticArchive));
-  } else if (!windowsTarget) {
+  } else if (macosTarget) {
     emit logLine(QStringLiteral("macOS wired Xbox/PDP input: disabled by export settings"));
   }
 
@@ -735,7 +851,7 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(error, workspace);
     return;
   }
-  if (!windowsTarget) {
+  if (macosTarget) {
     sensitivePemPath = QDir(workspace).filePath(QStringLiteral("signing-source.pem"));
     normalizedCertificatePath = QDir(workspace).filePath(QStringLiteral("signing-normalized.p12"));
     QProcessEnvironment certificateEnvironment = QProcessEnvironment::systemEnvironment();
@@ -784,8 +900,10 @@ void PipelineWorker::run(PipelineRequest request) {
     QFile::remove(sensitivePemPath);
     sensitivePemPath.clear();
     emit logLine(QStringLiteral("Signing certificate password validated; PKCS#12 normalized for macOS."));
-  } else {
+  } else if (windowsTarget) {
     emit logLine(QStringLiteral("Windows package signing: not requested; the MinGW export is unsigned."));
+  } else {
+    emit logLine(QStringLiteral("Linux package signing: not requested; the cross-compiled export is unsigned."));
   }
   emit logLine(QStringLiteral("Workspace: %1").arg(workspace));
 
@@ -1210,17 +1328,21 @@ void PipelineWorker::run(PipelineRequest request) {
     return;
   }
 
-  nextStage(windowsTarget ? QStringLiteral("Create Windows app project")
-                          : QStringLiteral("Create macOS app project"));
+  nextStage(QStringLiteral("Create %1 app project")
+              .arg(targetPlatformDisplayName(request.targetPlatform)));
   const QString bundleId = sanitizedBundleIdentifier(game.serial, request.windowTitle);
   const QString iconPath = QDir(projectDir).filePath(
-    windowsTarget ? QStringLiteral("AppIcon.ico") : QStringLiteral("AppIcon.icns"));
-  const QString platformMetadataPath = QDir(projectDir).filePath(
-    windowsTarget ? QStringLiteral("AppIcon.rc") : QStringLiteral("Info.plist"));
+    windowsTarget ? QStringLiteral("AppIcon.ico")
+                  : linuxTarget ? QStringLiteral("AppIcon.png")
+                                : QStringLiteral("AppIcon.icns"));
+  const QString platformMetadataPath = windowsTarget
+    ? QDir(projectDir).filePath(QStringLiteral("AppIcon.rc"))
+    : macosTarget ? QDir(projectDir).filePath(QStringLiteral("Info.plist"))
+                  : QString();
   const QString dependencyCachePath = QDir(
     QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
       .filePath(QStringLiteral("dependencies"));
-  if (windowsTarget && !QDir().mkpath(dependencyCachePath)) {
+  if (directoryPackageTarget && !QDir().mkpath(dependencyCachePath)) {
     fail(QStringLiteral("Could not create the Studio dependency cache: %1")
            .arg(dependencyCachePath), workspace);
     return;
@@ -1228,6 +1350,11 @@ void PipelineWorker::run(PipelineRequest request) {
   if (windowsTarget) {
     if (!createIco(request.iconPath, iconPath, error) ||
         !writeText(platformMetadataPath, makeWindowsResource(iconPath), error)) {
+      fail(error, workspace);
+      return;
+    }
+  } else if (linuxTarget) {
+    if (!createPngIcon(request.iconPath, iconPath, error)) {
       fail(error, workspace);
       return;
     }
@@ -1265,9 +1392,19 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(error, workspace);
     return;
   }
+  const QString linuxToolchainPath = QDir(projectDir).filePath(QStringLiteral("linux-toolchain.cmake"));
+  if (linuxTarget &&
+      !writeText(linuxToolchainPath,
+                 makeLinuxToolchain(linuxGcc, linuxGxx, linuxAr,
+                                    linuxRanlib, linuxStrip), error)) {
+    fail(error, workspace);
+    return;
+  }
 
-  nextStage(windowsTarget ? QStringLiteral("Cross-compile Windows app")
-                          : QStringLiteral("Compile native app"));
+  nextStage(directoryPackageTarget
+    ? QStringLiteral("Cross-compile %1 app")
+        .arg(targetPlatformDisplayName(request.targetPlatform))
+    : QStringLiteral("Compile native app"));
   QStringList configureArguments{
     QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
     QStringLiteral("-G"), QStringLiteral("Ninja"),
@@ -1279,6 +1416,10 @@ void PipelineWorker::run(PipelineRequest request) {
     configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(mingwToolchainPath)
                        << QStringLiteral("-DPSX_STATIC_RUNTIME=ON")
                        << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
+  } else if (linuxTarget) {
+    configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(linuxToolchainPath)
+                       << QStringLiteral("-DPSX_STATIC_RUNTIME=OFF")
+                       << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
   } else {
     configureArguments << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=%1")
                             .arg(request.macosGipGamepad ? QStringLiteral("ON")
@@ -1287,8 +1428,8 @@ void PipelineWorker::run(PipelineRequest request) {
   if (!runCommand(cmake,
                   configureArguments,
                   workspace,
-                  windowsTarget
-                    ? QStringLiteral("cmake -S <project> -B <build> -G Ninja -DCMAKE_TOOLCHAIN_FILE=<mingw-toolchain> -DCMAKE_BUILD_TYPE=Release")
+                  directoryPackageTarget
+                    ? QStringLiteral("cmake -S <project> -B <build> -G Ninja -DCMAKE_TOOLCHAIN_FILE=<cross-toolchain> -DCMAKE_BUILD_TYPE=Release")
                     : QStringLiteral("cmake -S <project> -B <build> -G Ninja -DCMAKE_BUILD_TYPE=Release"),
                   15 * 60 * 1000) ||
       !runCommand(cmake,
@@ -1307,31 +1448,32 @@ void PipelineWorker::run(PipelineRequest request) {
       QDir(workspace).removeRecursively();
       emit cancelled();
     } else {
-      fail(windowsTarget
-             ? QStringLiteral("The Windows app could not be cross-compiled and staged with MinGW.")
+      fail(directoryPackageTarget
+             ? QStringLiteral("The %1 app could not be cross-compiled and staged.")
+                 .arg(targetPlatformDisplayName(request.targetPlatform))
              : QStringLiteral("The native macOS app could not be compiled and staged."),
            workspace);
     }
     return;
   }
-  const QString stagedApp = windowsTarget
+  const QString stagedApp = directoryPackageTarget
     ? stageDir
     : QDir(stageDir).filePath(bundleName + QStringLiteral(".app"));
-  if ((!windowsTarget && !QFileInfo(stagedApp).isDir()) ||
-      (windowsTarget && !QFileInfo(stageDir).isDir())) {
+  if ((!directoryPackageTarget && !QFileInfo(stagedApp).isDir()) ||
+      (directoryPackageTarget && !QFileInfo(stageDir).isDir())) {
     fail(QStringLiteral("CMake did not stage the expected %1 output: %2")
            .arg(targetPlatformDisplayName(request.targetPlatform), stagedApp), workspace);
     return;
   }
-  const QString mainExecutable = windowsTarget
-    ? QDir(stageDir).filePath(bundleName + QStringLiteral(".exe"))
+  const QString mainExecutable = directoryPackageTarget
+    ? QDir(stageDir).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()))
     : QDir(stagedApp).filePath(QStringLiteral("Contents/MacOS/") + bundleName);
   if (!QFileInfo(mainExecutable).isFile()) {
     fail(QStringLiteral("CMake did not stage the expected executable: %1").arg(mainExecutable), workspace);
     return;
   }
   bool gipBackendCompiled = false;
-  if (!windowsTarget) {
+  if (macosTarget) {
     QByteArray controllerSymbols;
     if (!runCommand(nm, { QStringLiteral("-gU"), mainExecutable }, workspace,
                     QStringLiteral("nm -gU <app executable>"), 30000,
@@ -1368,7 +1510,7 @@ void PipelineWorker::run(PipelineRequest request) {
     }
   }
   nextStage(QStringLiteral("Embed disc, BIOS, and proof"));
-  const QString resourcesDir = windowsTarget
+  const QString resourcesDir = directoryPackageTarget
     ? stagedApp
     : QDir(stagedApp).filePath(QStringLiteral("Contents/Resources"));
   const QString packagedBiosDir = QDir(resourcesDir).filePath(QStringLiteral("bios"));
@@ -1416,12 +1558,29 @@ void PipelineWorker::run(PipelineRequest request) {
   runCommand(QStringLiteral("/usr/bin/git"),
              { QStringLiteral("-C"), request.frameworkRoot, QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
              request.frameworkRoot, QStringLiteral("git -C <framework> rev-parse HEAD"), 15000, &gitOutput);
+  const QString targetArchitecture = windowsTarget
+    ? QStringLiteral("x86_64-w64-mingw32")
+    : linuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu")
+                  : QSysInfo::currentCpuArchitecture();
+  const QString compilerVersion = windowsTarget
+    ? versionText(mingwGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
+    : linuxTarget
+      ? versionText(linuxGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
+      : versionText(QStringLiteral("/usr/bin/clang"),
+                    { QStringLiteral("--version") }).section('\n', 0, 0);
+  const QString sdl2Source = windowsTarget
+    ? QStringLiteral("SDL2-devel-2.32.10-mingw.tar.gz")
+    : linuxTarget
+      ? QStringLiteral("pysdl2_dll-2.32.10-py2.py3-none-manylinux_2_28_x86_64.whl")
+      : QStringLiteral("host pkg-config");
+  const QString sdl2Sha256 = windowsTarget
+    ? QStringLiteral("83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2")
+    : linuxTarget ? QString::fromLatin1(kLinuxSdl2WheelSha256) : QString();
   const QJsonObject buildManifest{
     { QStringLiteral("schema"), 1 },
     { QStringLiteral("created_utc"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate) },
     { QStringLiteral("platform"), targetPlatformKey(request.targetPlatform) },
-    { QStringLiteral("target_architecture"), windowsTarget
-        ? QStringLiteral("x86_64-w64-mingw32") : QSysInfo::currentCpuArchitecture() },
+    { QStringLiteral("target_architecture"), targetArchitecture },
     { QStringLiteral("bundle_name"), bundleName },
     { QStringLiteral("bundle_identifier"), bundleId },
     { QStringLiteral("window_title"), request.windowTitle },
@@ -1431,7 +1590,7 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("effective_bios_crc32"), QStringLiteral("0x%1").arg(effectiveBiosCrc, 8, 16, QLatin1Char('0')).toUpper() },
     { QStringLiteral("bios_branding_patched"), request.patchBiosBranding },
     { QStringLiteral("skip_bios_boot"), request.skipBiosBoot },
-    { QStringLiteral("macos_gip_gamepad_requested"), !windowsTarget && request.macosGipGamepad },
+    { QStringLiteral("macos_gip_gamepad_requested"), macosTarget && request.macosGipGamepad },
     { QStringLiteral("macos_gip_gamepad_compiled"), gipBackendCompiled },
     { QStringLiteral("libusb_version"), libusbVersion },
     { QStringLiteral("framework_commit"), QString::fromUtf8(gitOutput).trimmed() },
@@ -1439,14 +1598,20 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("ninja"), versionText(ninja, { QStringLiteral("--version") }) },
     { QStringLiteral("ghidra_home"), request.ghidraHome },
     { QStringLiteral("host_architecture"), QSysInfo::currentCpuArchitecture() },
-    { QStringLiteral("compiler"), windowsTarget
-        ? versionText(mingwGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
-        : versionText(QStringLiteral("/usr/bin/clang"), { QStringLiteral("--version") }).section('\n', 0, 0) },
-    { QStringLiteral("sdl2_source"), windowsTarget
-        ? QStringLiteral("SDL2-devel-2.32.10-mingw.tar.gz") : QStringLiteral("host pkg-config") },
-    { QStringLiteral("sdl2_sha256"), windowsTarget
-        ? QStringLiteral("83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2")
-        : QString() },
+    { QStringLiteral("compiler"), compilerVersion },
+    { QStringLiteral("linux_sysroot"), linuxTarget ? linuxSysroot : QString() },
+    { QStringLiteral("sdl2_source"), sdl2Source },
+    { QStringLiteral("sdl2_sha256"), sdl2Sha256 },
+    { QStringLiteral("sdl2_url"), linuxTarget
+        ? QString::fromLatin1(kLinuxSdl2WheelUrl) : QString() },
+    { QStringLiteral("sdl2_headers_source"), linuxTarget
+        ? QStringLiteral("SDL2-2.32.10.tar.gz") : QString() },
+    { QStringLiteral("sdl2_headers_sha256"), linuxTarget
+        ? QString::fromLatin1(kSdl2SourceSha256) : QString() },
+    { QStringLiteral("sdl2_headers_url"), linuxTarget
+        ? QString::fromLatin1(kSdl2SourceUrl) : QString() },
+    { QStringLiteral("sdl2_library_sha256"), linuxTarget
+        ? QString::fromLatin1(kLinuxSdl2LibrarySha256) : QString() },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("build_manifest.json")), buildManifest, error)) {
     fail(error, workspace);
@@ -1576,6 +1741,244 @@ void PipelineWorker::run(PipelineRequest request) {
                      .arg(backupPackage));
     }
     emit logLine(QStringLiteral("Windows app package created: %1").arg(outputPackage));
+    QDir(workspace).removeRecursively();
+    emit completed(outputPackage);
+    return;
+  }
+
+  if (linuxTarget) {
+    nextStage(QStringLiteral("Verify Linux package"));
+    const QString stagedSdl = QDir(stageDir).filePath(QStringLiteral("libSDL2-2.0.so.0"));
+    if (!QFileInfo(mainExecutable).isExecutable() || !QFileInfo(stagedSdl).isFile()) {
+      fail(QStringLiteral("The staged Linux package is missing its executable or bundled SDL2 runtime."),
+           workspace);
+      return;
+    }
+
+    QByteArray executableElfOutput;
+    if (!runCommand(linuxReadelf,
+                    { QStringLiteral("-h"), QStringLiteral("-l"), QStringLiteral("-d"),
+                      QStringLiteral("--version-info"), mainExecutable },
+                    workspace,
+                    QStringLiteral("x86_64-unknown-linux-gnu-readelf -h -l -d --version-info <Linux executable>"),
+                    30000, &executableElfOutput)) {
+      fail(QStringLiteral("The staged Linux executable could not be inspected."), workspace);
+      return;
+    }
+    QByteArray sdlElfOutput;
+    if (!runCommand(linuxReadelf,
+                    { QStringLiteral("-h"), QStringLiteral("-d"),
+                      QStringLiteral("--version-info"), stagedSdl },
+                    workspace,
+                    QStringLiteral("x86_64-unknown-linux-gnu-readelf -h -d --version-info <bundled SDL2>"),
+                    30000, &sdlElfOutput)) {
+      fail(QStringLiteral("The bundled Linux SDL2 runtime could not be inspected."), workspace);
+      return;
+    }
+    const QString executableElfText = QString::fromUtf8(executableElfOutput);
+    const QString sdlElfText = QString::fromUtf8(sdlElfOutput);
+    const bool executableIdentityVerified =
+      executableElfText.contains(QRegularExpression(QStringLiteral(R"(Class:\s+ELF64)"))) &&
+      executableElfText.contains(QRegularExpression(
+        QStringLiteral(R"(Data:\s+2's complement, little endian)"))) &&
+      executableElfText.contains(QRegularExpression(
+        QStringLiteral(R"(Machine:\s+Advanced Micro Devices X86-64)"))) &&
+      executableElfText.contains(QStringLiteral("Requesting program interpreter: /lib64/ld-linux-x86-64.so.2")) &&
+      executableElfText.contains(QRegularExpression(
+        QStringLiteral(R"(Library (?:r|run)path: \[\$ORIGIN\])")));
+    const bool sdlIdentityVerified =
+      sdlElfText.contains(QRegularExpression(QStringLiteral(R"(Class:\s+ELF64)"))) &&
+      sdlElfText.contains(QRegularExpression(
+        QStringLiteral(R"(Data:\s+2's complement, little endian)"))) &&
+      sdlElfText.contains(QRegularExpression(
+        QStringLiteral(R"(Machine:\s+Advanced Micro Devices X86-64)"))) &&
+      sdlElfText.contains(QStringLiteral("Library soname: [libSDL2-2.0.so.0]"));
+    if (!executableIdentityVerified || !sdlIdentityVerified) {
+      fail(QStringLiteral("The staged package is not an x86-64 glibc Linux ELF package with an $ORIGIN SDL2 runtime path."),
+           workspace);
+      return;
+    }
+
+    auto neededLibraries = [](const QString& readelfText) {
+      QStringList libraries;
+      const QRegularExpression pattern(
+        QStringLiteral(R"(Shared library: \[([^\]]+)\])"));
+      auto matches = pattern.globalMatch(readelfText);
+      while (matches.hasNext()) {
+        libraries.append(matches.next().captured(1));
+      }
+      libraries.removeDuplicates();
+      libraries.sort();
+      return libraries;
+    };
+    const QStringList executableNeeded = neededLibraries(executableElfText);
+    const QStringList sdlNeeded = neededLibraries(sdlElfText);
+    const QSet<QString> allowedSystemLibraries{
+      QStringLiteral("libc.so.6"),
+      QStringLiteral("libm.so.6"),
+      QStringLiteral("libdl.so.2"),
+      QStringLiteral("libpthread.so.0"),
+      QStringLiteral("librt.so.1"),
+      QStringLiteral("libutil.so.1"),
+      QStringLiteral("ld-linux-x86-64.so.2"),
+    };
+    QStringList forbiddenLibraries;
+    for (const auto& library : executableNeeded) {
+      if (library != QStringLiteral("libSDL2-2.0.so.0") &&
+          !allowedSystemLibraries.contains(library)) {
+        forbiddenLibraries.append(library);
+      }
+    }
+    for (const auto& library : sdlNeeded) {
+      if (!allowedSystemLibraries.contains(library)) {
+        forbiddenLibraries.append(library);
+      }
+    }
+    forbiddenLibraries.removeDuplicates();
+    if (!executableNeeded.contains(QStringLiteral("libSDL2-2.0.so.0")) ||
+        !forbiddenLibraries.isEmpty()) {
+      fail(QStringLiteral("The Linux package has an unexpected dynamic dependency set: %1")
+             .arg(forbiddenLibraries.isEmpty()
+                    ? QStringLiteral("bundled SDL2 dependency missing")
+                    : forbiddenLibraries.join(QStringLiteral(", "))),
+           workspace);
+      return;
+    }
+
+    QSet<QString> glibcVersionSet;
+    const QRegularExpression glibcPattern(
+      QStringLiteral(R"(GLIBC_(\d+)\.(\d+)(?:\.(\d+))?)"));
+    bool newerThanGlibc228 = false;
+    for (const auto& readelfText : { executableElfText, sdlElfText }) {
+      auto matches = glibcPattern.globalMatch(readelfText);
+      while (matches.hasNext()) {
+        const auto match = matches.next();
+        glibcVersionSet.insert(match.captured(0));
+        const int major = match.captured(1).toInt();
+        const int minor = match.captured(2).toInt();
+        if (major > 2 || (major == 2 && minor > 28)) {
+          newerThanGlibc228 = true;
+        }
+      }
+    }
+    if (newerThanGlibc228) {
+      fail(QStringLiteral("The Linux package requires a glibc version newer than the declared 2.28 baseline."),
+           workspace);
+      return;
+    }
+    QStringList glibcVersions(glibcVersionSet.begin(), glibcVersionSet.end());
+    glibcVersions.sort();
+
+    const QString stagedExeHash = sha256File(mainExecutable, error);
+    const QString stagedSdlHash = sha256File(stagedSdl, error);
+    if (stagedExeHash.isEmpty() ||
+        stagedSdlHash.compare(QString::fromLatin1(kLinuxSdl2LibrarySha256),
+                              Qt::CaseInsensitive) != 0) {
+      fail(error.isEmpty()
+             ? QStringLiteral("The bundled Linux SDL2 runtime does not match the pinned artifact.")
+             : error,
+           workspace);
+      return;
+    }
+    QJsonArray executableNeededJson;
+    for (const auto& library : executableNeeded) executableNeededJson.append(library);
+    QJsonArray sdlNeededJson;
+    for (const auto& library : sdlNeeded) sdlNeededJson.append(library);
+    QJsonArray glibcVersionsJson;
+    for (const auto& version : glibcVersions) glibcVersionsJson.append(version);
+    const QJsonObject linuxProof{
+      { QStringLiteral("schema"), 1 },
+      { QStringLiteral("platform"), QStringLiteral("linux") },
+      { QStringLiteral("architecture"), QStringLiteral("x86_64") },
+      { QStringLiteral("abi"), QStringLiteral("glibc") },
+      { QStringLiteral("maximum_glibc_version"), QStringLiteral("2.28") },
+      { QStringLiteral("observed_glibc_versions"), glibcVersionsJson },
+      { QStringLiteral("interpreter"), QStringLiteral("/lib64/ld-linux-x86-64.so.2") },
+      { QStringLiteral("toolchain"), QStringLiteral("x86_64-unknown-linux-gnu") },
+      { QStringLiteral("compiler"), compilerVersion },
+      { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
+      { QStringLiteral("executable_sha256"), stagedExeHash },
+      { QStringLiteral("executable_needed_libraries"), executableNeededJson },
+      { QStringLiteral("sdl2"), QFileInfo(stagedSdl).fileName() },
+      { QStringLiteral("sdl2_sha256"), stagedSdlHash },
+      { QStringLiteral("sdl2_needed_libraries"), sdlNeededJson },
+      { QStringLiteral("origin_runtime_path"), true },
+      { QStringLiteral("gcc_and_cxx_runtimes_static"), true },
+      { QStringLiteral("signed"), false },
+      { QStringLiteral("verification"), QStringLiteral("GNU readelf ELF header, interpreter, RPATH, version, SONAME, and NEEDED inspection") },
+    };
+    if (!writeJson(QDir(proofDir).filePath(QStringLiteral("linux_binary_verification.json")),
+                   linuxProof, error) ||
+        !createProofArchive(proofDir, proofArchive, error)) {
+      fail(error, workspace);
+      return;
+    }
+
+    nextStage(QStringLiteral("Deliver Linux package"));
+    const QString outputPackage = QDir(request.outputDirectory).filePath(
+      bundleName + QStringLiteral("-Linux"));
+    const QString deliveryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString deliveryPackage = QDir(request.outputDirectory).filePath(
+      QStringLiteral(".%1.psxrecomp-new-%2-Linux").arg(bundleName, deliveryToken));
+    const QString backupPackage = QDir(request.outputDirectory).filePath(
+      QStringLiteral(".%1.psxrecomp-old-%2-Linux").arg(bundleName, deliveryToken));
+    QDir(deliveryPackage).removeRecursively();
+    QDir(backupPackage).removeRecursively();
+    if (!copyDirectoryTree(stageDir, deliveryPackage, error)) {
+      QDir(deliveryPackage).removeRecursively();
+      fail(error, workspace);
+      return;
+    }
+    const QString deliveredStagingExe = QDir(deliveryPackage).filePath(bundleName);
+    const QString deliveredStagingSdl = QDir(deliveryPackage).filePath(
+      QStringLiteral("libSDL2-2.0.so.0"));
+    if (sha256File(deliveredStagingExe, error) != stagedExeHash ||
+        sha256File(deliveredStagingSdl, error) != stagedSdlHash ||
+        !QFileInfo(deliveredStagingExe).isExecutable()) {
+      QDir(deliveryPackage).removeRecursively();
+      fail(QStringLiteral("The Linux executable or SDL2 runtime changed while staging the package for delivery."),
+           workspace);
+      return;
+    }
+
+    const bool hadExistingOutput = QFileInfo::exists(outputPackage);
+    if (hadExistingOutput && !request.overwriteOutput) {
+      QDir(deliveryPackage).removeRecursively();
+      fail(QStringLiteral("The Linux output already exists and overwrite was not approved: %1")
+             .arg(outputPackage), workspace);
+      return;
+    }
+    if (hadExistingOutput && !QDir().rename(outputPackage, backupPackage)) {
+      QDir(deliveryPackage).removeRecursively();
+      fail(QStringLiteral("Could not preserve the existing Linux package before replacement: %1")
+             .arg(outputPackage), workspace);
+      return;
+    }
+    if (!QDir().rename(deliveryPackage, outputPackage)) {
+      if (hadExistingOutput) QDir().rename(backupPackage, outputPackage);
+      QDir(deliveryPackage).removeRecursively();
+      fail(QStringLiteral("Could not move the verified Linux package into its final output path."), workspace);
+      return;
+    }
+    const QString outputExe = QDir(outputPackage).filePath(bundleName);
+    const QString outputSdl = QDir(outputPackage).filePath(QStringLiteral("libSDL2-2.0.so.0"));
+    const bool deliveryVerified = sha256File(outputExe, error) == stagedExeHash &&
+      sha256File(outputSdl, error) == stagedSdlHash &&
+      QFileInfo(outputExe).isExecutable() &&
+      QFileInfo(QDir(outputPackage).filePath(QStringLiteral("PSXRecomp-Proof.zip"))).isFile();
+    if (!deliveryVerified) {
+      const QString failedPackage = outputPackage + QStringLiteral(".failed-") + deliveryToken;
+      QDir().rename(outputPackage, failedPackage);
+      if (hadExistingOutput) QDir().rename(backupPackage, outputPackage);
+      fail(QStringLiteral("The delivered Linux package failed final verification; the failed copy remains at %1")
+             .arg(failedPackage), workspace);
+      return;
+    }
+    if (hadExistingOutput && !QDir(backupPackage).removeRecursively()) {
+      emit logLine(QStringLiteral("Warning: previous Linux package backup remains at %1")
+                     .arg(backupPackage));
+    }
+    emit logLine(QStringLiteral("Linux app package created: %1").arg(outputPackage));
     QDir(workspace).removeRecursively();
     emit completed(outputPackage);
     return;

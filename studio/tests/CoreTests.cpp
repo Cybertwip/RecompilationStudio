@@ -152,15 +152,33 @@ int main(int argc, char** argv) {
           gipRequest.toJson().value(QStringLiteral("platform")).toString() ==
             QStringLiteral("windows"),
         QStringLiteral("Windows platform selection round-trips through the request"));
+  gipRequest.targetPlatform = psxstudio::TargetPlatform::Linux;
+  check(psxstudio::targetPlatformKey(gipRequest.targetPlatform) == QStringLiteral("linux") &&
+          psxstudio::targetPlatformDisplayName(gipRequest.targetPlatform) ==
+            QStringLiteral("Linux") &&
+          psxstudio::targetPlatformFromKey(QStringLiteral("LINUX")) ==
+            psxstudio::TargetPlatform::Linux &&
+          gipRequest.toJson().value(QStringLiteral("platform")).toString() ==
+            QStringLiteral("linux"),
+        QStringLiteral("Linux platform selection round-trips through the request"));
 
   const QString sourceTree = QDir(temp.path()).filePath(QStringLiteral("source-tree"));
   const QString copiedTree = QDir(temp.path()).filePath(QStringLiteral("copied-tree"));
-  check(psxstudio::writeText(QDir(sourceTree).filePath(QStringLiteral("nested/file.txt")),
+  const QString sourceTreeFile = QDir(sourceTree).filePath(QStringLiteral("nested/file.txt"));
+  check(psxstudio::writeText(sourceTreeFile,
                              QStringLiteral("windows-package"), error), error);
+  check(QFile::setPermissions(sourceTreeFile,
+                              QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                              QFileDevice::ExeOwner | QFileDevice::ReadGroup |
+                              QFileDevice::ExeGroup | QFileDevice::ReadOther |
+                              QFileDevice::ExeOther),
+        QStringLiteral("directory-package source executable permissions"));
   check(psxstudio::copyDirectoryTree(sourceTree, copiedTree, error), error);
   QFile copiedFile(QDir(copiedTree).filePath(QStringLiteral("nested/file.txt")));
   check(copiedFile.open(QIODevice::ReadOnly) && copiedFile.readAll() == "windows-package",
-        QStringLiteral("Windows package directory copy"));
+        QStringLiteral("directory-package file copy"));
+  check(QFileInfo(copiedFile).isExecutable(),
+        QStringLiteral("Linux package executable permissions survive directory copy"));
 
   QImage sourceIcon(64, 64, QImage::Format_ARGB32);
   sourceIcon.fill(QColor(32, 96, 192));
@@ -170,6 +188,11 @@ int main(int argc, char** argv) {
   check(psxstudio::createIco(sourceIconPath, windowsIconPath, error), error);
   check(QFileInfo(windowsIconPath).isFile() && QFileInfo(windowsIconPath).size() > 0,
         QStringLiteral("Windows ICO generation"));
+  const QString linuxIconPath = QDir(temp.path()).filePath(QStringLiteral("AppIcon.png"));
+  check(psxstudio::createPngIcon(sourceIconPath, linuxIconPath, error), error);
+  QImage linuxIcon(linuxIconPath);
+  check(!linuxIcon.isNull() && linuxIcon.size() == QSize(512, 512),
+        QStringLiteral("Linux PNG icon generation"));
 
   const QString proofDir = QDir(temp.path()).filePath(QStringLiteral("proof"));
   QDir().mkpath(proofDir);

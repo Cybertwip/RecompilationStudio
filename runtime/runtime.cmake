@@ -580,6 +580,11 @@ function(psxrecomp_add_runtime_target target)
         # opengl32: GL backend (gpu_gl_renderer.c). GL 1.x is exported directly
         # by opengl32; Phase 2b will load modern GL via SDL_GL_GetProcAddress.
         target_link_libraries(${target} PRIVATE ws2_32 dbghelp comdlg32 opengl32)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Linux loads both core and modern OpenGL entry points through
+        # SDL_GL_GetProcAddress. Keep libGL out of DT_NEEDED so the executable
+        # can run a software-only configuration when a system OpenGL loader is
+        # unavailable.
     else()
         find_package(OpenGL)
         if(OpenGL_FOUND)

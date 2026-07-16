@@ -29,6 +29,9 @@ bool createIcns(const QString& sourceIcon,
 bool createIco(const QString& sourceIcon,
                const QString& outputPath,
                QString& error);
+bool createPngIcon(const QString& sourceIcon,
+                   const QString& outputPath,
+                   QString& error);
 bool copyDirectoryTree(const QString& sourceDirectory,
                        const QString& destinationDirectory,
                        QString& error);

@@ -172,6 +172,7 @@ MainWindow::MainWindow(QWidget* parent)
   platformCombo_ = new QComboBox(platformRow);
   platformCombo_->addItem(QStringLiteral("macOS"), targetPlatformKey(TargetPlatform::MacOS));
   platformCombo_->addItem(QStringLiteral("Windows"), targetPlatformKey(TargetPlatform::Windows));
+  platformCombo_->addItem(QStringLiteral("Linux"), targetPlatformKey(TargetPlatform::Linux));
   platformLayout->addWidget(platformLabel);
   platformLayout->addWidget(platformCombo_, 1);
   inputLayout->addWidget(platformRow);
@@ -727,11 +728,20 @@ void MainWindow::startBuild() {
   }
 
   const QString bundleName = titleEdit_->text().trimmed().replace('/', QStringLiteral(" - ")).replace(':', QStringLiteral(" -"));
-  const bool windowsTarget =
-    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::Windows;
-  const QString outputName = windowsTarget
-    ? bundleName + QStringLiteral("-Windows")
-    : bundleName + QStringLiteral(".app");
+  const auto targetPlatform =
+    targetPlatformFromKey(platformCombo_->currentData().toString());
+  QString outputName;
+  switch (targetPlatform) {
+    case TargetPlatform::Windows:
+      outputName = bundleName + QStringLiteral("-Windows");
+      break;
+    case TargetPlatform::Linux:
+      outputName = bundleName + QStringLiteral("-Linux");
+      break;
+    case TargetPlatform::MacOS:
+      outputName = bundleName + QStringLiteral(".app");
+      break;
+  }
   const QString outputPath = QDir(outputEdit_->text()).filePath(outputName);
   bool overwrite = false;
   if (QFileInfo::exists(outputPath)) {
@@ -773,19 +783,22 @@ void MainWindow::onCompleted(const QString& appPath) {
   outputAppPath_ = appPath;
   progressBar_->setRange(0, 100);
   progressBar_->setValue(100);
-  const bool windowsTarget =
-    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::Windows;
-  stageLabel_->setText(windowsTarget
-    ? QStringLiteral("Complete — Windows package verified")
-    : QStringLiteral("Complete — signed app verified"));
+  const auto targetPlatform =
+    targetPlatformFromKey(platformCombo_->currentData().toString());
+  const bool macosTarget = targetPlatform == TargetPlatform::MacOS;
+  const QString platformName = targetPlatformDisplayName(targetPlatform);
+  stageLabel_->setText(macosTarget
+    ? QStringLiteral("Complete — signed app verified")
+    : QStringLiteral("Complete — %1 package verified").arg(platformName));
   revealButton_->setEnabled(true);
   setBusy(false);
   QMessageBox::information(
-    this, windowsTarget ? QStringLiteral("Windows app created")
-                        : QStringLiteral("Signed app created"),
-    windowsTarget
-      ? QStringLiteral("The Windows app package was created and verified:\n\n%1").arg(appPath)
-      : QStringLiteral("The signed macOS app was created and verified:\n\n%1").arg(appPath));
+    this, macosTarget ? QStringLiteral("Signed app created")
+                      : QStringLiteral("%1 app created").arg(platformName),
+    macosTarget
+      ? QStringLiteral("The signed macOS app was created and verified:\n\n%1").arg(appPath)
+      : QStringLiteral("The %1 app package was created and verified:\n\n%2")
+          .arg(platformName, appPath));
 }
 
 void MainWindow::onFailed(const QString& message, const QString& workspacePath) {
@@ -828,8 +841,9 @@ void MainWindow::setBusy(bool busy) {
 }
 
 void MainWindow::updatePlatformControls() {
-  const bool macosTarget =
-    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::MacOS;
+  const auto targetPlatform =
+    targetPlatformFromKey(platformCombo_->currentData().toString());
+  const bool macosTarget = targetPlatform == TargetPlatform::MacOS;
   const bool busy = cancelButton_ && cancelButton_->isEnabled();
   certificateEdit_->setEnabled(macosTarget && !busy);
   certificatePasswordEdit_->setEnabled(macosTarget && !busy);
@@ -837,18 +851,29 @@ void MainWindow::updatePlatformControls() {
   certificatePasswordEdit_->parentWidget()->setVisible(macosTarget);
   macosGipGamepad_->setVisible(macosTarget);
   macosGipGamepad_->setEnabled(macosTarget && !busy);
+  const QString unsignedNote = targetPlatform == TargetPlatform::Windows
+    ? QStringLiteral("Windows exports are currently delivered unsigned")
+    : QStringLiteral("Linux exports are currently delivered unsigned");
   certificateEdit_->setToolTip(macosTarget
     ? QStringLiteral("PKCS#12 identity used to sign the macOS app")
-    : QStringLiteral("Windows exports are currently delivered unsigned"));
+    : unsignedNote);
   certificatePasswordEdit_->setToolTip(certificateEdit_->toolTip());
-  signingNote_->setText(macosTarget
-    ? QStringLiteral("The certificate is imported into an isolated temporary keychain and removed after verification.")
-    : QStringLiteral("Windows exports use the installed x86_64-w64-mingw32 MinGW toolchain and are delivered unsigned."));
-  outputEdit_->setPlaceholderText(macosTarget
-    ? QStringLiteral("Destination for the signed .app")
-    : QStringLiteral("Destination for the Windows app folder"));
-  buildButton_->setText(macosTarget ? QStringLiteral("Build Signed .app")
-                                    : QStringLiteral("Build Windows App"));
+  if (macosTarget) {
+    signingNote_->setText(QStringLiteral(
+      "The certificate is imported into an isolated temporary keychain and removed after verification."));
+    outputEdit_->setPlaceholderText(QStringLiteral("Destination for the signed .app"));
+    buildButton_->setText(QStringLiteral("Build Signed .app"));
+  } else if (targetPlatform == TargetPlatform::Windows) {
+    signingNote_->setText(QStringLiteral(
+      "Windows exports use the installed x86_64-w64-mingw32 MinGW toolchain and are delivered unsigned."));
+    outputEdit_->setPlaceholderText(QStringLiteral("Destination for the Windows app folder"));
+    buildButton_->setText(QStringLiteral("Build Windows App"));
+  } else {
+    signingNote_->setText(QStringLiteral(
+      "Linux exports use the installed x86_64-unknown-linux-gnu toolchain, bundle SDL2, and are delivered unsigned."));
+    outputEdit_->setPlaceholderText(QStringLiteral("Destination for the Linux app folder"));
+    buildButton_->setText(QStringLiteral("Build Linux App"));
+  }
   updateBuildButton();
 }
 

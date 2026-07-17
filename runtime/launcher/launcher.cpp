@@ -714,12 +714,19 @@ Result run(SDL_Window* window, void* gl_context,
         return Result::Unavailable;
     }
 
+    /* Nested scope so LauncherRenderInterface is destroyed BEFORE any
+     * RmlGL3::Shutdown. Its destructor issues glDelete* calls; calling
+     * gladLoaderUnloadGL first (inside Shutdown) leaves those pointers
+     * dangling and crashes on resume from the in-game pause menu. */
+    Result result = Result::Quit;
+    {
     LauncherSystemInterface system_interface;
     system_interface.SetWindow(window);
     LauncherRenderInterface render_interface;
     if (!render_interface) {
         std::fprintf(stderr, "launcher: GL3 render interface init failed\n");
-        RmlGL3::Shutdown();
+        /* Never unload GLAD from the pause menu — the game still needs it. */
+        if (mode != Mode::PauseMenu) RmlGL3::Shutdown();
         return Result::Unavailable;
     }
 
@@ -727,7 +734,7 @@ Result run(SDL_Window* window, void* gl_context,
     Rml::SetRenderInterface(&render_interface);
     if (!Rml::Initialise()) {
         std::fprintf(stderr, "launcher: Rml::Initialise failed\n");
-        RmlGL3::Shutdown();
+        if (mode != Mode::PauseMenu) RmlGL3::Shutdown();
         return Result::Unavailable;
     }
 
@@ -753,7 +760,7 @@ Result run(SDL_Window* window, void* gl_context,
     if (!context) {
         std::fprintf(stderr, "launcher: CreateContext failed\n");
         Rml::Shutdown();
-        RmlGL3::Shutdown();
+        if (mode != Mode::PauseMenu) RmlGL3::Shutdown();
         return Result::Unavailable;
     }
     context->SetDensityIndependentPixelRatio(dp_ratio);
@@ -856,7 +863,7 @@ Result run(SDL_Window* window, void* gl_context,
     Rml::DataModelConstructor c = context->CreateDataModel("settings");
     if (!c) {
         Rml::Shutdown();
-        RmlGL3::Shutdown();
+        if (mode != Mode::PauseMenu) RmlGL3::Shutdown();
         return Result::Unavailable;
     }
     Rml::String title = game.name ? Rml::String(game.name) : Rml::String("PSX");
@@ -1296,7 +1303,7 @@ Result run(SDL_Window* window, void* gl_context,
         std::fprintf(stderr, "launcher: failed to load %s — booting without launcher\n",
                      rml.generic_string().c_str());
         Rml::Shutdown();
-        RmlGL3::Shutdown();
+        if (mode != Mode::PauseMenu) RmlGL3::Shutdown();
         return Result::Unavailable;
     }
     doc->Show();
@@ -1321,6 +1328,16 @@ Result run(SDL_Window* window, void* gl_context,
         Rml::Element* list = doc->GetElementById("rebind-list");
         if (!list) return;
         const int n = psx_keybinds_button_count();
+        /* Detach listeners before SetInnerRML destroys the chips they sit on. */
+        for (int k = 0; k < n; k++) {
+            const std::string id = std::string("kb-") + psx_keybinds_button_name(k);
+            if (Rml::Element* e = doc->GetElementById(id)) {
+                for (auto& lis : kb_listeners)
+                    e->RemoveEventListener(Rml::EventId::Click, lis.get());
+            }
+        }
+        kb_listeners.clear();
+
         /* Inline styles with explicit pixel sizes: class-based flex/table rows
          * were resolving against a zero-width parent when the list was first
          * injected (controls view still hidden), and the collapsed geometry
@@ -1343,8 +1360,7 @@ Result run(SDL_Window* window, void* gl_context,
             }
             html += "</div>";
         }
-        list->SetInnerRML(html);              // destroys prior chips...
-        kb_listeners.clear();                 // ...so dropping their listeners is safe
+        list->SetInnerRML(html);
         for (int k = 0; k < n; k++) {
             const std::string id = std::string("kb-") + psx_keybinds_button_name(k);
             if (Rml::Element* e = doc->GetElementById(id)) {
@@ -1360,7 +1376,6 @@ Result run(SDL_Window* window, void* gl_context,
     if (m.view == "controls") rebuild_pending = true;
 
     // ---- Main loop ----
-    Result result = Result::Quit;
     bool running = true;
     while (running) {
         SDL_Event ev;
@@ -1489,10 +1504,14 @@ Result run(SDL_Window* window, void* gl_context,
         if (!m.mc1_path.empty()) { io.memcard1_path = fs::path(std::string(m.mc1_path)); io.has_memcard1_path = true; }
         if (!m.mc2_path.empty()) { io.memcard2_path = fs::path(std::string(m.mc2_path)); io.has_memcard2_path = true; }
 
-        const int i1 = (m.p1_dev_index >= 0 && m.p1_dev_index < (int)dev_opts.size()) ? m.p1_dev_index : 0;
-        const int i2 = (m.p2_dev_index >= 0 && m.p2_dev_index < (int)dev_opts.size()) ? m.p2_dev_index : 0;
-        io.p1_device = device_string(dev_opts[i1]); io.has_p1_device = true;
-        io.p2_device = device_string(dev_opts[i2]); io.has_p2_device = true;
+        if (!dev_opts.empty()) {
+            const int i1 = (m.p1_dev_index >= 0 && m.p1_dev_index < (int)dev_opts.size())
+                               ? m.p1_dev_index : 0;
+            const int i2 = (m.p2_dev_index >= 0 && m.p2_dev_index < (int)dev_opts.size())
+                               ? m.p2_dev_index : 0;
+            io.p1_device = device_string(dev_opts[(size_t)i1]); io.has_p1_device = true;
+            io.p2_device = device_string(dev_opts[(size_t)i2]); io.has_p2_device = true;
+        }
         io.p1_mode = m.p1_mode; io.has_p1_mode = true;
         io.p2_mode = m.p2_mode; io.has_p2_mode = true;
         io.deadzone = m.deadzone_pct * 32767 / 100; io.has_deadzone = true;
@@ -1506,8 +1525,25 @@ Result run(SDL_Window* window, void* gl_context,
         }
     }
 
+    /* Drop keybind listeners while the document still exists. */
+    for (int k = 0; k < psx_keybinds_button_count(); k++) {
+        const std::string id = std::string("kb-") + psx_keybinds_button_name(k);
+        if (Rml::Element* e = doc->GetElementById(id)) {
+            for (auto& lis : kb_listeners)
+                e->RemoveEventListener(Rml::EventId::Click, lis.get());
+        }
+    }
+    kb_listeners.clear();
+
     Rml::Shutdown();
-    RmlGL3::Shutdown();
+    } // destroy render_interface + system_interface while GL entry points live
+
+    /* Pause menu must NOT unload GLAD: gladLoaderUnloadGL() tears down process-
+     * global OpenGL entry points the game renderer still holds from
+     * SDL_GL_GetProcAddress, and the next frame after Resume crashes. Full
+     * launcher exit (pre-game) is the only safe place to unload. */
+    if (mode != Mode::PauseMenu)
+        RmlGL3::Shutdown();
     return result;
 }
 

@@ -2570,7 +2570,12 @@ static void open_pause_settings_menu(void) {
     }
     if (menu_context) SDL_GL_DeleteContext(menu_context);
     if (menu_window) SDL_DestroyWindow(menu_window);
-    SDL_GL_ResetAttributes();
+    /* Do not SDL_GL_ResetAttributes() here: that only affects the *next*
+     * CreateContext, but on some drivers resetting mid-session has been
+     * correlated with flaky MakeCurrent back onto the game context. */
+
+    /* Restore the game GL context before any post-menu work that may touch
+     * GL or present (texture scale, fullscreen, first frame). */
     if (previous_context && previous_window)
         SDL_GL_MakeCurrent(previous_window, previous_context);
 
@@ -2596,6 +2601,18 @@ static void open_pause_settings_menu(void) {
     SDL_SetWindowFullscreen(sdl_window,
         g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
     SDL_RaiseWindow(sdl_window);
+    /* Drop any Escape / focus events queued while the menu window was up so
+     * we do not immediately re-enter the pause menu on the next vblank. */
+    {
+        SDL_Event discard;
+        while (SDL_PollEvent(&discard)) {
+            if (discard.type == SDL_QUIT) {
+                psx_crash_trace_set_exit_origin("sdl_window_close");
+                shutdown_runtime();
+                std::exit(0);
+            }
+        }
+    }
     if (result == psx_launcher::Result::Unavailable) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Settings unavailable",
             "The settings menu could not initialize. The game has been resumed.",

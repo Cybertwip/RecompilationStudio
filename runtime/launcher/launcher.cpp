@@ -35,6 +35,8 @@ extern "C" {
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <functional>
@@ -760,6 +762,15 @@ Result run(SDL_Window* window, void* gl_context,
     LauncherModel m;
     m.pause_mode     = mode == Mode::PauseMenu;
     m.view           = "dashboard";
+    /* Test hook: PSX_LAUNCHER_VIEW=controls|settings|dashboard starts on that
+     * page so layout can be verified without a click. */
+    if (const char* start_view = std::getenv("PSX_LAUNCHER_VIEW")) {
+        if (std::strcmp(start_view, "controls") == 0 ||
+            std::strcmp(start_view, "settings") == 0 ||
+            std::strcmp(start_view, "dashboard") == 0) {
+            m.view = start_view;
+        }
+    }
     /* The user-facing menu intentionally exposes only the two supported
      * choices requested here. Any stale experimental Vulkan value is clamped
      * to software rather than creating a third/invalid XOR cycle state. */
@@ -1289,6 +1300,12 @@ Result run(SDL_Window* window, void* gl_context,
         return Result::Unavailable;
     }
     doc->Show();
+    /* Pin the document to the context pixel size so sparse pages (Keyboard
+     * controls) do not shrink-wrap to content width. */
+    doc->SetProperty(Rml::PropertyId::Width,
+                     Rml::Property((float)draw_w, Rml::Unit::PX));
+    doc->SetProperty(Rml::PropertyId::Height,
+                     Rml::Property((float)draw_h, Rml::Unit::PX));
 
     // ---- build the keybind chip list (Controls page) ----
     // data-if only hides the controls view, so #rebind-list exists from load and
@@ -1304,17 +1321,25 @@ Result run(SDL_Window* window, void* gl_context,
         Rml::Element* list = doc->GetElementById("rebind-list");
         if (!list) return;
         const int n = psx_keybinds_button_count();
+        /* Inline styles with explicit pixel sizes: class-based flex/table rows
+         * were resolving against a zero-width parent when the list was first
+         * injected (controls view still hidden), and the collapsed geometry
+         * stuck after the page was shown. */
         std::string html;
-        for (int b = 0; b < n; b += 2) {          // two (label, chip) pairs per row
-            html += "<div class=\"rb-row\">";
+        for (int b = 0; b < n; b += 2) {
+            html += "<div style=\"display:block; width:100%; height:42px; margin-bottom:6px;\">";
             for (int k = b; k < b + 2 && k < n; k++) {
-                html += "<div class=\"rb-pair\">";
-                html += "<span class=\"rb-label\">";
+                html += "<div style=\"display:inline-block; width:48%; vertical-align:middle;\">";
+                html += "<span style=\"display:inline-block; width:140px; color:#adbac7; "
+                        "font-size:13px; vertical-align:middle;\">";
                 html += rml_escape(psx_keybinds_button_label(k));
                 html += "</span><button class=\"rb-chip\" id=\"kb-";
                 html += psx_keybinds_button_name(k);
-                html += "\">" + rml_escape(kb_chip_label(k)) + "</button>";
-                html += "</div>";
+                html += "\" style=\"display:inline-block; width:160px; text-align:center; "
+                        "vertical-align:middle; background-color:#161d28; border:1px #2b3543; "
+                        "border-radius:7px; color:#e6e9ef; padding:7px 10px;\">";
+                html += rml_escape(kb_chip_label(k));
+                html += "</button></div>";
             }
             html += "</div>";
         }
@@ -1330,7 +1355,9 @@ Result run(SDL_Window* window, void* gl_context,
             }
         }
     };
-    build_rebind_list();
+    /* Inject only once the controls view is visible (see main loop). Building
+     * while hidden collapses percentage widths permanently. */
+    if (m.view == "controls") rebuild_pending = true;
 
     // ---- Main loop ----
     Result result = Result::Quit;
@@ -1371,6 +1398,12 @@ Result run(SDL_Window* window, void* gl_context,
                     context->SetDimensions(Rml::Vector2i(draw_w, draw_h));
                     context->SetDensityIndependentPixelRatio(
                         (float)draw_w / (float)std::max(window_w, 1));
+                    if (doc) {
+                        doc->SetProperty(Rml::PropertyId::Width,
+                                         Rml::Property((float)draw_w, Rml::Unit::PX));
+                        doc->SetProperty(Rml::PropertyId::Height,
+                                         Rml::Property((float)draw_h, Rml::Unit::PX));
+                    }
                     /* Skip RmlSDL's SIZE_CHANGED handler — it would overwrite
                      * dimensions with window (point) size and desync Retina. */
                     break;
@@ -1406,12 +1439,20 @@ Result run(SDL_Window* window, void* gl_context,
         if (m.launch_requested) { result = Result::Launch; running = false; }
         if (m.quit_requested)   { result = Result::Quit;   running = false; }
 
-        // Deferred chip-list rebuild (set from chip handlers / scan capture /
-        // player switch / reset — never rebuild a list from inside its own
-        // listener's dispatch).
-        if (rebuild_pending) { rebuild_pending = false; build_rebind_list(); }
-
+        /* Apply data-if / view changes first so #rebind-list is in a visible,
+         * full-width container before we inject rows. */
         context->Update();
+
+        // Deferred chip-list rebuild (set from chip handlers / scan capture /
+        // player switch / reset / show_controls — never rebuild a list from
+        // inside its own listener's dispatch).
+        if (rebuild_pending) {
+            rebuild_pending = false;
+            if (m.view == "controls") {
+                build_rebind_list();
+                context->Update();  // layout the freshly injected rows
+            }
+        }
 
         render_interface.Clear();
         render_interface.BeginFrame();

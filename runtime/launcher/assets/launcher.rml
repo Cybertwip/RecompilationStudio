@@ -28,33 +28,55 @@ button {
 }
 button:hover { background-color: #232d3c; }
 
-#root { width: 100%; height: 100%; display: block; overflow-y: auto; }
-#frame { display: block; width: 100%; box-sizing: border-box; padding: 22dp 26dp; }
-
-/* ---- top bar ---- */
-.topbar {
-	display: flex; flex-direction: row; align-items: center;
-	width: 100%; margin-bottom: 18dp;
-}
-.logo { width: 46dp; height: 46dp; margin-right: 16dp; flex: 0 0 46dp;
-	decorator: image(img/logo.png contain); }
-.title-block { display: block; flex: 1 1 auto; min-width: 0dp; }
-.topbar-actions {
-	display: flex; flex-direction: row; align-items: center;
-	flex: 0 0 auto; margin-left: 16dp;
-}
-.topbar-nav {
-	display: flex; flex-direction: row; align-items: center;
-}
-.top-btn {
+#root { display: block; width: 100%; height: 100%; }
+#frame {
 	display: block;
+	position: relative;
+	width: 100%;
+	min-height: 100%;
+	box-sizing: border-box;
+	padding: 22dp 26dp;
+}
+
+/* ---- top bar ----
+   Absolute-positioned actions (not flex): RmlUi flex has repeatedly collapsed
+   this bar so the nav pills overlapped the title. */
+.topbar {
+	display: block;
+	position: relative;
+	width: 100%;
+	min-height: 56dp;
+	margin-bottom: 18dp;
+}
+.logo {
+	display: block;
+	position: absolute; left: 0dp; top: 5dp;
+	width: 46dp; height: 46dp;
+	decorator: image(img/logo.png contain);
+}
+.title-block {
+	display: block;
+	margin-left: 62dp;
+	margin-right: 420dp; /* reserve room for the absolute nav cluster */
+	min-height: 56dp;
+}
+.topbar-actions {
+	display: block;
+	position: absolute;
+	right: 0dp;
+	top: 6dp;
+	z-index: 20;
+}
+.topbar-nav { display: block; }
+.top-btn {
+	display: inline-block;
 	background-color: #1b2330; border: 1dp #2b3543; border-radius: 7dp;
 	color: #e6e9ef; padding: 9dp 18dp; font-size: 15dp; font-weight: bold;
 	margin-left: 8dp; white-space: nowrap;
 }
 .top-btn:hover { background-color: #232d3c; border-color: #3b82f6; }
 .top-btn.primary { background-color: #1e2733; }
-.subtitle { display: block; color: #7d8590; font-size: 14dp; white-space: nowrap; }
+.subtitle { display: block; color: #7d8590; font-size: 14dp; }
 
 /* ---- generic panels / cards ---- */
 .panel {
@@ -131,10 +153,25 @@ button:hover { background-color: #232d3c; }
 .knob { display: block; width: 16dp; height: 16dp; border-radius: 8dp; background-color: #e6e9ef; margin: 3dp 0dp 0dp 3dp; }
 .switch.on .knob { margin-left: 23dp; }
 
-/* Pad-mode 3-way segmented selector (Hybrid | Analog | D-Pad). */
-.seg { display: flex; flex-direction: row; align-items: center; position: relative;
-	background-color: #161d28; border: 1dp #2b3543; border-radius: 7dp; }
-.seg-opt { display: block; padding: 5dp 11dp; color: #8b949e; font-size: 12dp; border-radius: 6dp; }
+/* Pad-mode segmented selector (Hybrid | Analog | D-Pad) and player 1|2.
+   inline-block children — flex was collapsing this control to a tall 29px strip. */
+.seg {
+	display: inline-block;
+	position: relative;
+	background-color: #161d28;
+	border: 1dp #2b3543;
+	border-radius: 7dp;
+	padding: 2dp;
+	white-space: nowrap;
+}
+.seg-opt {
+	display: inline-block;
+	padding: 5dp 11dp;
+	color: #8b949e;
+	font-size: 12dp;
+	border-radius: 6dp;
+	white-space: nowrap;
+}
 .seg-opt:hover { color: #cdd5df; }
 .seg-opt.on { background-color: #2563eb; color: #ffffff; }
 /* Hybrid carries the explanatory tooltip, revealed on hover. */
@@ -201,46 +238,56 @@ button:hover { background-color: #232d3c; }
 	white-space: nowrap; overflow: hidden; }
 .path.empty { color: #f85149; }
 
-/* ---- controls / keybind rebind view ---- */
+/* ---- controls / keybind rebind view ----
+   Float + fixed widths instead of flex. Flex rows were collapsing to ~0 width
+   so labels ran together ("Up Down") and chips stacked on top of each other. */
 .kb-head {
-	display: flex; flex-direction: row; align-items: center;
-	width: 100%; margin-bottom: 16dp;
+	display: block;
+	position: relative;
+	width: 100%;
+	height: 40dp;
+	margin-bottom: 18dp;
 }
 .kb-player-lbl {
-	display: block; color: #adbac7; margin-right: 10dp;
-	flex: 0 0 auto; white-space: nowrap;
+	display: block;
+	float: left;
+	color: #adbac7;
+	margin-right: 10dp;
+	margin-top: 8dp;
+	white-space: nowrap;
 }
-.kb-player-seg { flex: 0 0 auto; margin-right: 12dp; }
+.kb-player-seg {
+	display: block;
+	float: left;
+	margin-right: 16dp;
+}
 .kb-hint {
-	display: block; color: #7d8590; font-size: 12dp;
-	flex: 1 1 auto; min-width: 0dp;
-	white-space: nowrap; overflow: hidden;
+	display: block;
+	float: left;
+	color: #7d8590;
+	font-size: 12dp;
+	margin-top: 10dp;
+	max-width: 520dp;
+	white-space: nowrap;
+	overflow: hidden;
 }
 .kb-reset {
-	display: block; flex: 0 0 auto;
-	background-color: #1b2330; border: 1dp #2b3543; border-radius: 7dp;
-	color: #e6e9ef; padding: 7dp 14dp; margin-left: 12dp; white-space: nowrap;
+	display: block;
+	position: absolute;
+	right: 0dp;
+	top: 0dp;
+	background-color: #1b2330;
+	border: 1dp #2b3543;
+	border-radius: 7dp;
+	color: #e6e9ef;
+	padding: 7dp 14dp;
+	white-space: nowrap;
 }
 .kb-reset:hover { border-color: #3b82f6; }
-.rebind-list { display: block; width: 100%; }
-.rb-row {
-	display: flex; flex-direction: row; align-items: center;
-	width: 100%; margin-bottom: 8dp;
-}
-.rb-pair {
-	display: flex; flex-direction: row; align-items: center;
-	flex: 1 1 0dp; min-width: 0dp; margin-right: 24dp;
-}
-.rb-pair:last-child { margin-right: 0dp; }
-.rb-label {
-	display: block; width: 120dp; flex: 0 0 120dp;
-	color: #adbac7; font-size: 13dp; white-space: nowrap; overflow: hidden;
-}
-.rb-chip {
-	display: block; width: 150dp; flex: 0 0 150dp; text-align: center;
-	background-color: #161d28; border: 1dp #2b3543; border-radius: 7dp;
-	color: #e6e9ef; padding: 7dp 10dp; white-space: nowrap;
-}
+
+.rebind-list { display: block; width: 100%; min-height: 40dp; }
+/* Chip chrome (geometry is set via inline styles in the injected markup so the
+   list cannot collapse when first built). */
 .rb-chip:hover { border-color: #3b82f6; }
 .rb-chip--scan { border-color: #f0b429; color: #f0b429; }
 

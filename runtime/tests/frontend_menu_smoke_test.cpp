@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #ifndef PSX_TEST_ASSETS_DIR
@@ -14,6 +16,11 @@
 #endif
 
 int main() {
+    /* Optional: PSX_LAUNCHER_VIEW=controls exercises the keybind page layout. */
+    const char* start_view = std::getenv("PSX_LAUNCHER_VIEW");
+    const bool controls_view =
+        start_view && std::strcmp(start_view, "controls") == 0;
+
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) return 2;
 
@@ -58,11 +65,16 @@ int main() {
     settings.has_p1_mode = settings.has_p2_mode = true;
 
     psx_launcher::GameInfo game;
-    game.name = "Frontend Smoke";
+    game.name = controls_view ? "Sonic Wings Special" : "Frontend Smoke";
 
-    /* Pause-menu SDL_QUIT means Resume. It is consumed during the first event
-     * pass, after which the loop still updates and renders one complete frame
-     * before returning. */
+    /* Pump a couple of no-op events so a controls start-view can rebuild its
+     * keybind table after the first Update makes the panel visible, then quit.
+     * Pause-menu SDL_QUIT means Resume. */
+    for (int i = 0; i < 3; ++i) {
+        SDL_Event pulse{};
+        pulse.type = SDL_USEREVENT;
+        SDL_PushEvent(&pulse);
+    }
     SDL_Event quit{};
     quit.type = SDL_QUIT;
     SDL_PushEvent(&quit);
@@ -70,7 +82,11 @@ int main() {
         window, context, settings, game, PSX_TEST_ASSETS_DIR,
         psx_launcher::Mode::PauseMenu);
 
-    std::vector<uint32_t> pixels((size_t)width * height);
+    int draw_w = width, draw_h = height;
+    SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
+    if (draw_w <= 0 || draw_h <= 0) { draw_w = width; draw_h = height; }
+
+    std::vector<uint32_t> pixels((size_t)draw_w * (size_t)draw_h);
     using FinishFn = void (*)();
     using ReadBufferFn = void (*)(GLenum);
     using ReadPixelsFn = void (*)(GLint, GLint, GLsizei, GLsizei,
@@ -88,32 +104,66 @@ int main() {
     }
     finish();
     read_buffer(GL_FRONT);
-    read_pixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    read_pixels(0, 0, draw_w, draw_h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     size_t visible_pixels = 0;
     size_t bright_pixels = 0;
+    int content_max_x = 0;
     const auto* rgba = reinterpret_cast<const uint8_t*>(pixels.data());
-    for (size_t i = 0; i < pixels.size(); ++i) {
-        const uint8_t r = rgba[i * 4 + 0];
-        const uint8_t g = rgba[i * 4 + 1];
-        const uint8_t b = rgba[i * 4 + 2];
-        if (r || g || b) ++visible_pixels;
-        if (std::max(r, std::max(g, b)) >= 96) ++bright_pixels;
+    for (int y = 0; y < draw_h; ++y) {
+        for (int x = 0; x < draw_w; ++x) {
+            const size_t i = ((size_t)y * (size_t)draw_w + (size_t)x) * 4;
+            const uint8_t r = rgba[i + 0];
+            const uint8_t g = rgba[i + 1];
+            const uint8_t b = rgba[i + 2];
+            if (r || g || b) ++visible_pixels;
+            if (std::max(r, std::max(g, b)) >= 96) {
+                ++bright_pixels;
+                if (x > content_max_x) content_max_x = x;
+            }
+        }
     }
     const bool rendered = visible_pixels > pixels.size() / 20 &&
                           bright_pixels > 1000;
     const bool committed = result == psx_launcher::Result::Launch &&
                            settings.renderer == 1 && settings.antialiasing &&
                            settings.p1_mode == PSXRecompV4::PAD_MODE_ANALOG;
+    /* Controls page must spread across the window (old bug collapsed it to the
+     * left ~third, so content_max_x stayed under half width). */
+    const bool layout_ok = !controls_view ||
+                           (content_max_x > draw_w * 55 / 100);
 
     std::printf(
         "{\"schema\":1,\"artifact\":\"frontend_menu_smoke\","
-        "\"rendered\":%s,\"visible_pixels\":%zu,\"bright_pixels\":%zu,"
-        "\"total_pixels\":%zu,\"settings_committed\":%s}\n",
+        "\"view\":\"%s\",\"rendered\":%s,\"visible_pixels\":%zu,"
+        "\"bright_pixels\":%zu,\"total_pixels\":%zu,\"content_max_x\":%d,"
+        "\"drawable\":[%d,%d],\"layout_ok\":%s,\"settings_committed\":%s}\n",
+        controls_view ? "controls" : "dashboard",
         rendered ? "true" : "false", visible_pixels, bright_pixels, pixels.size(),
+        content_max_x, draw_w, draw_h,
+        layout_ok ? "true" : "false",
         committed ? "true" : "false");
+
+    if (const char* dump = std::getenv("PSX_LAUNCHER_DUMP_PPM")) {
+        if (FILE* f = std::fopen(dump, "wb")) {
+            std::fprintf(f, "P6\n%d %d\n255\n", draw_w, draw_h);
+            /* GL origin is bottom-left; flip for a top-left image. */
+            for (int y = draw_h - 1; y >= 0; --y) {
+                for (int x = 0; x < draw_w; ++x) {
+                    const uint8_t* c =
+                        reinterpret_cast<const uint8_t*>(
+                            &pixels[(size_t)y * (size_t)draw_w + (size_t)x]);
+                    std::fputc(c[0], f);
+                    std::fputc(c[1], f);
+                    std::fputc(c[2], f);
+                }
+            }
+            std::fclose(f);
+            std::printf("wrote %s\n", dump);
+        }
+    }
 
     SDL_GL_DeleteContext(context);
     SDL_DestroyWindow(window);
     SDL_Quit();
-    return rendered && committed ? 0 : 1;
+    return rendered && committed && layout_ok ? 0 : 1;
 }

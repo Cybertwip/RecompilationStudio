@@ -125,8 +125,18 @@ int main(int argc, char** argv) {
   const QString controllerDefaults = psxstudio::defaultControllerToml();
   check(controllerDefaults.contains(QStringLiteral("default_mode = \"hybrid\"")) &&
           controllerDefaults.contains(QStringLiteral("allow_hybrid = true")) &&
+          controllerDefaults.contains(QStringLiteral("lock_mode = true")) &&
           !controllerDefaults.contains(QStringLiteral("default_mode = \"digital\"")),
-        QStringLiteral("Studio exports a config-capable Hybrid pad by default"));
+        QStringLiteral("Studio locks a config-capable Hybrid pad by default"));
+  const QString digitalPad = psxstudio::defaultControllerToml(QStringLiteral("digital"));
+  check(digitalPad.contains(QStringLiteral("default_mode = \"digital\"")) &&
+          digitalPad.contains(QStringLiteral("allow_hybrid = false")) &&
+          digitalPad.contains(QStringLiteral("lock_mode = true")),
+        QStringLiteral("Studio can lock a digital D-Pad pad type"));
+  const QString analogPad = psxstudio::defaultControllerToml(QStringLiteral("analog"));
+  check(analogPad.contains(QStringLiteral("default_mode = \"analog\"")) &&
+          analogPad.contains(QStringLiteral("lock_mode = true")),
+        QStringLiteral("Studio can lock an analog DualShock pad type"));
 
   check(psxstudio::macosGipCmakeOption(true).contains(
           QStringLiteral("PSX_MACOS_GIP_GAMEPAD ON")),

@@ -62,6 +62,10 @@ runtimes, and bundles SDL2 beside the executable with an `$ORIGIN` runtime
 path. Linux input uses SDL's kernel evdev path rather than direct HIDRAW access,
 loads a checksum-pinned SDL GameController mapping database, and routes Player
 1's `auto` selection to the keyboard whenever no physical controller is live.
+
+**Controller pad type** (Hybrid / Analog / D-Pad) is chosen in Studio and baked
+into the packaged `game.toml` with `lock_mode = true`, so the in-game settings
+menu does not expose pad-type switching for that title.
 The resulting package targets glibc 2.28 or newer and is verified to have no
 non-system shared-library dependency outside the bundled SDL2 runtime.
 

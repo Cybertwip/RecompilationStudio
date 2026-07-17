@@ -190,6 +190,26 @@ MainWindow::MainWindow(QWidget* parent)
     QStringLiteral("Keeps the recompiled BIOS linked, but skips its visible shell/intro and proceeds directly to disc boot."));
   inputLayout->addWidget(skipBiosBoot_);
 
+  auto* padModeRow = new QWidget(inputCard_);
+  padModeRow->setMinimumHeight(34);
+  auto* padModeLayout = new QHBoxLayout(padModeRow);
+  padModeLayout->setContentsMargins(0, 0, 0, 0);
+  auto* padModeLabel = new QLabel(QStringLiteral("Controller pad type"), padModeRow);
+  padModeLabel->setMinimumWidth(142);
+  padModeCombo_ = new QComboBox(padModeRow);
+  padModeCombo_->addItem(QStringLiteral("Hybrid (auto digital / analog)"),
+                         QStringLiteral("hybrid"));
+  padModeCombo_->addItem(QStringLiteral("Analog (DualShock)"),
+                         QStringLiteral("analog"));
+  padModeCombo_->addItem(QStringLiteral("D-Pad (digital)"),
+                         QStringLiteral("digital"));
+  padModeCombo_->setToolTip(
+    QStringLiteral("Fixed pad type baked into the packaged game. The in-game "
+                   "settings menu will not offer Hybrid / Analog / D-Pad switching."));
+  padModeLayout->addWidget(padModeLabel);
+  padModeLayout->addWidget(padModeCombo_, 1);
+  inputLayout->addWidget(padModeRow);
+
   macosGipGamepad_ = new QCheckBox(
     QStringLiteral("Enable wired Xbox/PDP controllers on macOS"), inputCard_);
   macosGipGamepad_->setChecked(true);
@@ -542,6 +562,12 @@ void MainWindow::loadSettings() {
   biosMuteAudio_->setChecked(settings.value(QStringLiteral("bios_patch/mute_audio"), true).toBool());
   biosRemovePsGlyph_->setChecked(settings.value(QStringLiteral("bios_patch/remove_ps_glyph"), true).toBool());
   skipBiosBoot_->setChecked(settings.value(QStringLiteral("runtime/skip_bios_boot"), false).toBool());
+  {
+    const QString padMode = settings.value(QStringLiteral("runtime/pad_mode"),
+                                            QStringLiteral("hybrid")).toString();
+    const int padIndex = padModeCombo_->findData(padMode);
+    padModeCombo_->setCurrentIndex(padIndex >= 0 ? padIndex : 0);
+  }
   macosGipGamepad_->setChecked(
     settings.value(QStringLiteral("runtime/macos_gip_gamepad"), true).toBool());
 
@@ -568,6 +594,7 @@ void MainWindow::saveSettings() const {
   settings.setValue(QStringLiteral("bios_patch/mute_audio"), biosMuteAudio_->isChecked());
   settings.setValue(QStringLiteral("bios_patch/remove_ps_glyph"), biosRemovePsGlyph_->isChecked());
   settings.setValue(QStringLiteral("runtime/skip_bios_boot"), skipBiosBoot_->isChecked());
+  settings.setValue(QStringLiteral("runtime/pad_mode"), padModeCombo_->currentData().toString());
   settings.setValue(QStringLiteral("runtime/macos_gip_gamepad"), macosGipGamepad_->isChecked());
 }
 
@@ -711,6 +738,7 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   request.biosMuteBootAudio = biosMuteAudio_->isChecked();
   request.biosRemoveStockPsGlyph = biosRemovePsGlyph_->isChecked();
   request.skipBiosBoot = skipBiosBoot_->isChecked();
+  request.padMode = padModeCombo_->currentData().toString();
   request.macosGipGamepad = macosGipGamepad_->isChecked();
   request.overwriteOutput = overwrite;
   return request;
@@ -830,6 +858,7 @@ void MainWindow::setBusy(bool busy) {
   biosPatchEnabled_->setEnabled(!busy);
   platformCombo_->setEnabled(!busy);
   skipBiosBoot_->setEnabled(!busy);
+  padModeCombo_->setEnabled(!busy);
   macosGipGamepad_->setEnabled(!busy);
   biosMuteAudio_->setEnabled(!busy && biosPatchEnabled_->isChecked());
   biosRemovePsGlyph_->setEnabled(!busy && biosPatchEnabled_->isChecked());

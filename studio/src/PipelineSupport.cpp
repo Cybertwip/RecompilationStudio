@@ -96,21 +96,30 @@ QString runtimeBootToml(bool skipBiosBoot) {
   return text;
 }
 
-QString defaultControllerToml() {
-  /* A generated title has no game-specific pad compatibility declaration yet.
-   * Boot a config-capable DualShock and expose Hybrid so both pre-DualShock
-   * digital controls and games that initialize a DualShock can negotiate the
-   * controller they expect. A plain digital pad intentionally ignores command
-   * 0x43; making that the Studio-wide default leaves DualShock-aware games such
-   * as Sonic Wings Special in a permanent pad-detection loop. */
+QString defaultControllerToml(const QString& padMode) {
+  /* Studio picks a single pad type for the packaged title and locks it.
+   * lock_mode hides Hybrid | Analog | D-Pad from the in-game settings UI and
+   * clamps runtime mode so a stale settings.toml cannot override the choice.
+   *
+   * Hybrid boots a config-capable DualShock and auto-flips digital/analog from
+   * player input. Analog pins DualShock. Digital (D-Pad) is a plain digital
+   * pad — correct for pre-DualShock titles, but DualShock-aware games that
+   * require command 0x43 may fail pad detection on pure digital. */
+  QString mode = padMode.trimmed().toLower();
+  if (mode != QStringLiteral("hybrid") && mode != QStringLiteral("analog") &&
+      mode != QStringLiteral("digital")) {
+    mode = QStringLiteral("hybrid");
+  }
+  const bool hybrid = mode == QStringLiteral("hybrid");
   return QStringLiteral(
-    "[controller]\n"
-    "p1_device = \"auto\"\n"
-    "p2_device = \"none\"\n"
-    "default_mode = \"hybrid\"\n"
-    "deadzone = 12000\n"
-    "allow_hybrid = true\n"
-    "lock_mode = false\n\n");
+           "[controller]\n"
+           "p1_device = \"auto\"\n"
+           "p2_device = \"none\"\n"
+           "default_mode = \"%1\"\n"
+           "deadzone = 12000\n"
+           "allow_hybrid = %2\n"
+           "lock_mode = true\n\n")
+    .arg(mode, hybrid ? QStringLiteral("true") : QStringLiteral("false"));
 }
 
 QString macosGipCmakeOption(bool enabled) {

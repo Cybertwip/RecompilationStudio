@@ -2,32 +2,65 @@
 <head>
 <title>PSX Launcher</title>
 <style>
+/* Base element display — RmlUi ships without a UA stylesheet, so div/h1/button
+   must be declared explicitly or flex children stack and text shrink-wraps. */
 body {
+	display: block;
+	width: 100%;
+	height: 100%;
+	margin: 0dp;
 	font-family: LatoLatin;
 	color: #e6e9ef;
 	background-color: #0b0e14;
 	font-size: 15dp;
 }
+div { display: block; }
+h1 { display: block; font-size: 27dp; font-weight: bold; color: #ffffff; margin: 0dp; }
+span { display: inline; }
+button {
+	display: inline-block;
+	background-color: #1b2330;
+	border: 1dp #2b3543;
+	border-radius: 7dp;
+	color: #e6e9ef;
+	padding: 8dp 14dp;
+	white-space: nowrap;
+}
+button:hover { background-color: #232d3c; }
+
 #root { width: 100%; height: 100%; display: block; overflow-y: auto; }
-#frame { display: block; padding: 22dp 26dp; }
+#frame { display: block; width: 100%; box-sizing: border-box; padding: 22dp 26dp; }
 
 /* ---- top bar ---- */
-.topbar { display: flex; flex-direction: row; align-items: center; margin-bottom: 18dp; }
-.logo { width: 46dp; height: 46dp; margin-right: 16dp; decorator: image(img/logo.png contain); }
-.title-block { display: block; flex: 1 1 auto; }
-.topbar-actions { display: flex; flex-direction: row; align-items: center; }
+.topbar {
+	display: flex; flex-direction: row; align-items: center;
+	width: 100%; margin-bottom: 18dp;
+}
+.logo { width: 46dp; height: 46dp; margin-right: 16dp; flex: 0 0 46dp;
+	decorator: image(img/logo.png contain); }
+.title-block { display: block; flex: 1 1 auto; min-width: 0dp; }
+.topbar-actions {
+	display: flex; flex-direction: row; align-items: center;
+	flex: 0 0 auto; margin-left: 16dp;
+}
+.topbar-nav {
+	display: flex; flex-direction: row; align-items: center;
+}
 .top-btn {
+	display: block;
 	background-color: #1b2330; border: 1dp #2b3543; border-radius: 7dp;
 	color: #e6e9ef; padding: 9dp 18dp; font-size: 15dp; font-weight: bold;
+	margin-left: 8dp; white-space: nowrap;
 }
 .top-btn:hover { background-color: #232d3c; border-color: #3b82f6; }
 .top-btn.primary { background-color: #1e2733; }
-h1 { display: block; font-size: 27dp; font-weight: bold; color: #ffffff; }
-.subtitle { display: block; color: #7d8590; font-size: 14dp; }
+.subtitle { display: block; color: #7d8590; font-size: 14dp; white-space: nowrap; }
 
 /* ---- generic panels / cards ---- */
 .panel {
 	display: block;
+	width: 100%;
+	box-sizing: border-box;
 	background-color: #11161f;
 	border: 1dp #1e2733;
 	border-radius: 12dp;
@@ -87,15 +120,6 @@ h1 { display: block; font-size: 27dp; font-weight: bold; color: #ffffff; }
 .verdict-title { display: block; font-size: 18dp; font-weight: bold; color: #ffffff; }
 .verdict-detail { display: block; color: #8b949e; font-size: 13dp; }
 .change-iso { position: absolute; top: 20dp; right: 22dp; }
-
-button {
-	background-color: #1b2330;
-	border: 1dp #2b3543;
-	border-radius: 7dp;
-	color: #e6e9ef;
-	padding: 8dp 14dp;
-}
-button:hover { background-color: #232d3c; }
 
 /* ---- player / memcard card chrome ---- */
 .card-head { display: flex; flex-direction: row; align-items: center; margin-bottom: 14dp; }
@@ -178,19 +202,45 @@ button:hover { background-color: #232d3c; }
 .path.empty { color: #f85149; }
 
 /* ---- controls / keybind rebind view ---- */
-.kb-head { display: flex; flex-direction: row; align-items: center; margin-bottom: 16dp; }
-.kb-player-lbl { color: #adbac7; margin-right: 10dp; }
-.kb-hint { color: #7d8590; font-size: 12dp; margin-left: 18dp; flex: 1 1 auto;
-	white-space: nowrap; overflow: hidden; }
-.kb-reset { background-color: #1b2330; border: 1dp #2b3543; border-radius: 7dp;
-	color: #e6e9ef; padding: 7dp 14dp; margin-left: 12dp; }
+.kb-head {
+	display: flex; flex-direction: row; align-items: center;
+	width: 100%; margin-bottom: 16dp;
+}
+.kb-player-lbl {
+	display: block; color: #adbac7; margin-right: 10dp;
+	flex: 0 0 auto; white-space: nowrap;
+}
+.kb-player-seg { flex: 0 0 auto; margin-right: 12dp; }
+.kb-hint {
+	display: block; color: #7d8590; font-size: 12dp;
+	flex: 1 1 auto; min-width: 0dp;
+	white-space: nowrap; overflow: hidden;
+}
+.kb-reset {
+	display: block; flex: 0 0 auto;
+	background-color: #1b2330; border: 1dp #2b3543; border-radius: 7dp;
+	color: #e6e9ef; padding: 7dp 14dp; margin-left: 12dp; white-space: nowrap;
+}
 .kb-reset:hover { border-color: #3b82f6; }
-.rebind-list { display: block; }
-.rb-row { display: flex; flex-direction: row; align-items: center; margin-bottom: 8dp; }
-.rb-label { width: 130dp; flex: 0 0 130dp; color: #adbac7; font-size: 13dp; }
-.rb-chip { width: 150dp; flex: 0 0 150dp; text-align: center; margin-right: 34dp;
+.rebind-list { display: block; width: 100%; }
+.rb-row {
+	display: flex; flex-direction: row; align-items: center;
+	width: 100%; margin-bottom: 8dp;
+}
+.rb-pair {
+	display: flex; flex-direction: row; align-items: center;
+	flex: 1 1 0dp; min-width: 0dp; margin-right: 24dp;
+}
+.rb-pair:last-child { margin-right: 0dp; }
+.rb-label {
+	display: block; width: 120dp; flex: 0 0 120dp;
+	color: #adbac7; font-size: 13dp; white-space: nowrap; overflow: hidden;
+}
+.rb-chip {
+	display: block; width: 150dp; flex: 0 0 150dp; text-align: center;
 	background-color: #161d28; border: 1dp #2b3543; border-radius: 7dp;
-	color: #e6e9ef; padding: 7dp 10dp; }
+	color: #e6e9ef; padding: 7dp 10dp; white-space: nowrap;
+}
 .rb-chip:hover { border-color: #3b82f6; }
 .rb-chip--scan { border-color: #f0b429; color: #f0b429; }
 
@@ -234,13 +284,13 @@ button:hover { background-color: #232d3c; }
 			<div class="subtitle" data-if="pause_mode">Paused — settings apply when you resume</div>
 		</div>
 		<div class="topbar-actions">
-			<div data-if="pause_mode == false">
+			<div class="topbar-nav" data-if="pause_mode == false">
 				<button class="top-btn" data-if="view == 'dashboard'" data-event-click="show_controls">Controls</button>
 				<button class="top-btn" data-if="view == 'dashboard'" data-event-click="show_settings">Settings</button>
 				<button class="top-btn primary" data-if="view == 'settings'" data-event-click="show_dashboard">‹ Back to dashboard</button>
 				<button class="top-btn primary" data-if="view == 'controls'" data-event-click="show_dashboard">‹ Back to dashboard</button>
 			</div>
-			<div data-if="pause_mode">
+			<div class="topbar-nav" data-if="pause_mode">
 				<button class="top-btn" data-event-click="show_dashboard">Controllers</button>
 				<button class="top-btn" data-event-click="show_controls">Keyboard</button>
 				<button class="top-btn" data-event-click="show_settings">Video</button>
@@ -459,7 +509,7 @@ button:hover { background-color: #232d3c; }
 			<div class="eyebrow">KEYBOARD CONTROLS</div>
 			<div class="kb-head">
 				<span class="kb-player-lbl">Player</span>
-				<div class="seg">
+				<div class="seg kb-player-seg">
 					<span class="seg-opt" data-class-on="cfg_player == 0" data-event-click="cfg_player_1">1</span>
 					<span class="seg-opt" data-class-on="cfg_player == 1" data-event-click="cfg_player_2">2</span>
 				</div>

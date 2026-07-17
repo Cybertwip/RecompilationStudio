@@ -33,6 +33,7 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -732,18 +733,28 @@ Result run(SDL_Window* window, void* gl_context,
     if (!load_fonts(assets))
         std::fprintf(stderr, "launcher: warning — no font face loaded; text will not render\n");
 
-    int win_w = 0, win_h = 0;
-    SDL_GL_GetDrawableSize(window, &win_w, &win_h);
-    if (win_w <= 0 || win_h <= 0) { win_w = 1280; win_h = 800; }
-    render_interface.SetViewport(win_w, win_h);
+    /* Context dimensions must match the GL viewport. On Retina, that is the
+     * drawable size; dp-ratio scales CSS `dp` units so a 15dp font stays the
+     * same physical size. Mouse events from SDL are in window coordinates and
+     * are scaled to drawable space below. */
+    int window_w = 0, window_h = 0;
+    int draw_w = 0, draw_h = 0;
+    SDL_GetWindowSize(window, &window_w, &window_h);
+    SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
+    if (window_w <= 0 || window_h <= 0) { window_w = 1280; window_h = 800; }
+    if (draw_w <= 0 || draw_h <= 0) { draw_w = window_w; draw_h = window_h; }
+    const float dp_ratio =
+        (float)draw_w / (float)std::max(window_w, 1);
+    render_interface.SetViewport(draw_w, draw_h);
 
-    Rml::Context* context = Rml::CreateContext("launcher", Rml::Vector2i(win_w, win_h));
+    Rml::Context* context = Rml::CreateContext("launcher", Rml::Vector2i(draw_w, draw_h));
     if (!context) {
         std::fprintf(stderr, "launcher: CreateContext failed\n");
         Rml::Shutdown();
         RmlGL3::Shutdown();
         return Result::Unavailable;
     }
+    context->SetDensityIndependentPixelRatio(dp_ratio);
 
     // ---- Seed the model from the effective settings ----
     LauncherModel m;
@@ -1297,11 +1308,13 @@ Result run(SDL_Window* window, void* gl_context,
         for (int b = 0; b < n; b += 2) {          // two (label, chip) pairs per row
             html += "<div class=\"rb-row\">";
             for (int k = b; k < b + 2 && k < n; k++) {
+                html += "<div class=\"rb-pair\">";
                 html += "<span class=\"rb-label\">";
                 html += rml_escape(psx_keybinds_button_label(k));
                 html += "</span><button class=\"rb-chip\" id=\"kb-";
                 html += psx_keybinds_button_name(k);
                 html += "\">" + rml_escape(kb_chip_label(k)) + "</button>";
+                html += "</div>";
             }
             html += "</div>";
         }
@@ -1350,12 +1363,40 @@ Result run(SDL_Window* window, void* gl_context,
                 break;
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    SDL_GL_GetDrawableSize(window, &win_w, &win_h);
-                    render_interface.SetViewport(win_w, win_h);
-                    context->SetDimensions(Rml::Vector2i(win_w, win_h));
+                    SDL_GetWindowSize(window, &window_w, &window_h);
+                    SDL_GL_GetDrawableSize(window, &draw_w, &draw_h);
+                    if (window_w <= 0 || window_h <= 0) { window_w = 1280; window_h = 800; }
+                    if (draw_w <= 0 || draw_h <= 0) { draw_w = window_w; draw_h = window_h; }
+                    render_interface.SetViewport(draw_w, draw_h);
+                    context->SetDimensions(Rml::Vector2i(draw_w, draw_h));
+                    context->SetDensityIndependentPixelRatio(
+                        (float)draw_w / (float)std::max(window_w, 1));
+                    /* Skip RmlSDL's SIZE_CHANGED handler — it would overwrite
+                     * dimensions with window (point) size and desync Retina. */
+                    break;
                 }
                 RmlSDL::InputEventHandler(context, ev);
                 break;
+            case SDL_MOUSEMOTION: {
+                /* Scale window-space mouse into drawable/context space. */
+                const float sx = (float)draw_w / (float)std::max(window_w, 1);
+                const float sy = (float)draw_h / (float)std::max(window_h, 1);
+                SDL_Event scaled = ev;
+                scaled.motion.x = (int)std::lround((float)ev.motion.x * sx);
+                scaled.motion.y = (int)std::lround((float)ev.motion.y * sy);
+                RmlSDL::InputEventHandler(context, scaled);
+                break;
+            }
+            case SDL_MOUSEBUTTONDOWN:
+            case SDL_MOUSEBUTTONUP: {
+                const float sx = (float)draw_w / (float)std::max(window_w, 1);
+                const float sy = (float)draw_h / (float)std::max(window_h, 1);
+                SDL_Event scaled = ev;
+                scaled.button.x = (int)std::lround((float)ev.button.x * sx);
+                scaled.button.y = (int)std::lround((float)ev.button.y * sy);
+                RmlSDL::InputEventHandler(context, scaled);
+                break;
+            }
             default:
                 RmlSDL::InputEventHandler(context, ev);
                 break;

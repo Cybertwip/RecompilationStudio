@@ -118,7 +118,9 @@ p2_device = "auto"
 default_mode = "analog"  # hybrid | analog | digital
 deadzone = 12000
 allow_hybrid = true
-lock_mode = false
+lock_mode = false        # true hides Hybrid|Analog|D-Pad in the settings UI
+                         # and clamps runtime mode to default_mode (Studio packages
+                         # always set lock_mode = true with the builder's pad type)
 ```
 
 Automatic routing assigns the first two connected controllers exclusively to

@@ -16,7 +16,10 @@ QString cmakeQuoted(const QString& value);
 QString tomlQuoted(const QString& value);
 QString hex32(quint32 value);
 QString runtimeBootToml(bool skipBiosBoot);
-QString defaultControllerToml();
+/* Emit [controller] defaults for a packaged game. padMode is one of
+ * "hybrid", "analog", or "digital" (D-Pad). The pad type is locked so the
+ * in-game settings UI cannot change it after packaging. */
+QString defaultControllerToml(const QString& padMode = QStringLiteral("hybrid"));
 QString macosGipCmakeOption(bool enabled);
 bool nmOutputHasMacosGipBackend(const QByteArray& output);
 bool writeBytes(const QString& path, const QByteArray& bytes, QString& error);

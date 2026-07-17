@@ -2,37 +2,37 @@
   <img src="docs/assets/psxrecomp-logo.png" alt="PSXRecomp" width="640">
 </p>
 
-# PSXRecomp
+# PSXRecomp — Titus Interactive recompilation toolkit
 
-Generic static recompiler framework for PlayStation 1: MIPS R3000A to C to
-native x64.
+Static recompilation toolkit for **PlayStation 1** titles associated with
+**Titus Interactive**: MIPS R3000A → C → native host executables, built on a
+faithful PS1 hardware runtime.
 
 Background on the original prototype:
 [I Built a PS1 Static Recompiler With No Prior Experience (and Claude Code)](https://1379.tech/i-built-a-ps1-static-recompiler-with-no-prior-experience-and-claude-code/)
-
-[![PSXRecomp demo](https://img.youtube.com/vi/CID9oVhgCyY/maxresdefault.jpg)](https://www.youtube.com/watch?v=CID9oVhgCyY)
 
 ## What It Is
 
 PSXRecomp translates PS1 MIPS binaries into C, then compiles that C as a
 native executable linked against a PS1 hardware runtime. The v4 architecture
-recompiles the real SCPH1001 BIOS and runs it as the kernel. There is no HLE
-BIOS layer, no stubs, and no general-purpose interpreter fallback for static
-code.
+recompiles the real `SCPH1001.BIN` BIOS and runs it as the kernel. There is no
+HLE BIOS layer, no stubs, and no general-purpose interpreter fallback for
+static code.
 
-PSXRecomp is a framework. Game-specific projects live in their own
-repositories and link this one in as a **git submodule** to build a game binary.
-The active end-to-end targets are:
+The toolkit is aimed at bringing Titus Interactive–era PlayStation software
+(and related titles you package yourself) to modern platforms as **native**
+apps — not as a general-purpose multi-system emulator.
 
-- [TombaRecomp](https://github.com/mstan/TombaRecomp) — *Tomba!*
-- [MegaManX6Recomp](https://github.com/mstan/MegaManX6Recomp) — *Mega Man X6*
+PSXRecomp is a **framework**. Game-specific packages are produced with
+**PSXRecomp Studio** (or by linking this repository as a git submodule and
+driving the recompiler + runtime yourself).
 
-**New here?** The fastest way in:
-[`docs/EXECUTION_MODEL.md`](docs/EXECUTION_MODEL.md) (how a game actually
-runs — static / native-overlay / interpreter), then
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
-[`docs/BUILDING.md`](docs/BUILDING.md), and
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
+**New here?** Start with:
+
+- [`docs/EXECUTION_MODEL.md`](docs/EXECUTION_MODEL.md) — how a game actually runs
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/BUILDING.md`](docs/BUILDING.md)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ## Philosophy — toward 100% static recompilation
 
@@ -47,14 +47,14 @@ code off the disc into RAM at runtime and execute it, then overwrite it with the
 next overlay. That code does not exist in the executable at build time, so a
 pure ahead-of-time recompiler cannot see it. This is the frontier the project is
 working through, and it is why this is an **alpha/beta**: today a *majority* of a
-supported game runs as statically recompiled native code, but **not yet 100%.**
+supported title can run as statically recompiled native code, but **not yet 100%.**
 
 How we close the gap, without ever compromising correctness:
 
 1. **Static first.** The main executable and the BIOS are fully recompiled
    ahead of time. This is the bulk of execution and it is always native.
 2. **Capture → compile → cache for overlays.** As the game runs, overlays are
-   captured the moment they load. Offline, each is recompiled to a native DLL
+   captured the moment they load. Offline, each is recompiled to a native module
    keyed by its content, cached, and on later runs loaded and dispatched as
    native code *before* any fallback. Coverage grows as the game is played:
    every overlay someone reaches becomes native for everyone after.
@@ -79,88 +79,64 @@ static by definition and cannot be recompiled ahead of time into a single
 correct translation. **This code remains interpreted** — permanently, as far as
 the current design is concerned, and that is an accepted, correct outcome (the
 interpreter runs it faithfully; only speed is lost). It is a narrow corner, not
-a wall. We **may someday aim to cover it** — e.g. by detecting the
-relocation/patch pattern and baking it in at compile time (keyed by relocation
-parameters), or by compiling at load time — but we make no promise, and the
-project is fully correct without it.
+a wall.
 
 The aspiration is **100% static coverage** — every reachable instruction native,
-the interpreter idle. The capture-and-recompile loop converges toward it the more
-a game is played; this branch is where that machinery is being built.
+the interpreter idle.
 
 ## Status
 
-Current milestone as of 2026-05-18:
-
 | Subsystem | State |
 |---|---|
-| BIOS recompilation (`SCPH1001.BIN`) | Boots and hands off to Tomba |
-| Game EXE recompilation | Tomba title, OPTIONS, NEW GAME, save/load, and gameplay reached |
-| CD-ROM / MDEC / XA | Tomba FMVs stream and play at the game's 15 fps cadence |
-| Memory cards | Tomba save and load verified |
-| SIO0 controllers | Digital pad polling plus DualShock config replies used by Tomba |
-| GPU | Functional for BIOS boot, FMVs, menus, and first gameplay area |
-| Interrupts, COP0, timers | Working for current Tomba path |
+| BIOS recompilation (`SCPH1001.BIN`) | Boots and hands off to packaged game EXEs |
+| Game EXE recompilation | Studio pipeline + TOML-driven game projects |
+| CD-ROM / MDEC / XA | Disc streaming and FMV path implemented |
+| Memory cards | Save/load path implemented |
+| SIO0 controllers | Digital pad, DualShock, Hybrid modes; keyboard + SDL + macOS GIP |
+| GPU | Software + OpenGL present paths |
+| Interrupts, COP0, timers | Working for current bring-up titles |
 | Dirty-RAM support | BIOS/game RAM-installed dispatch paths handled |
-| Controller input | Keyboard, SDL/XInput mapping, plus direct wired Xbox GIP support on macOS |
+| In-game settings / pause menu | Controllers, keyboard rebinds, video options |
 
 Known follow-up work:
 
-- The recent Tomba visual burn-down fixed the BIOS PS logo, title/menu glyph
-  seams, dialog/pause panel seams, terrain shading, and shaded textured branch
-  rendering observed in the first area.
 - SPU coverage is partial; reverb, noise, sweep, and accurate SPU IRQ behavior
   are not complete.
-- The historical Windows "Not Responding" hang is mitigated but should stay on
-  the watch list until longer in-game soak tests are clean.
-- Neither game is fully validated end to end yet. Tomba has considerably more
-  coverage; Mega Man X6 is playable (stages, controller, and memory-card
-  save/load all work). Full playthroughs of both are still unverified.
+- Overlay capture → native cache coverage still depends on playthrough reach.
+- Full end-to-end validation of every Titus-era title is ongoing; package each
+  game with Studio and verify against real hardware / Beetle where needed.
 
-For the current game milestone, build and run the sibling TombaRecomp project:
+## PSXRecomp Studio
 
-```sh
-cd ../TombaRecomp
-cmake --build build -j16
-./build/psx-runtime.exe --game game.toml
-```
+`studio/` is the primary way to turn a legally obtained Titus Interactive
+(or other PS1) BIN/CUE set into a signed native app:
 
-Running this repository's runtime without `--game` is still useful for
-BIOS-only memory card management.
+- Disc analysis and evidence-backed MIPS→C generation
+- Optional BIOS branding patch and direct-to-game boot
+- Fixed controller pad type (Hybrid / Analog / D-Pad) baked into the package
+- macOS / Windows / Linux packaging
+
+See [`studio/README.md`](studio/README.md).
 
 ## Release Package
 
 The framework release package is BIOS-only:
 
-1. Download `PSXRecomp-v*-windows-x64.zip` from Releases.
-2. Extract it and run `PSXRecomp.exe`.
+1. Download the platform zip from Releases.
+2. Extract it and run the executable.
 3. Select your legally obtained `SCPH1001.BIN` BIOS when prompted.
 
 The package does not include a PS1 BIOS, game disc image, generated game code,
-or save data. The selected BIOS path is saved next to the executable as
-`bios.cfg`; delete that file to pick a different BIOS later.
-
-Game-specific recomp projects, including TombaRecomp, use the same runtime
-picker contract but also prompt for a legally obtained game disc image.
-
-## PSXRecomp Studio (macOS)
-
-`studio/` contains a Qt/Qlementine GUI that accepts a BIN/CUE set, the exact
-SCPH1001 BIOS, an icon, a window title, an output directory, and a PKCS#12
-signing identity. It automates Ghidra analysis, evidence-backed source
-generation, native compilation, macOS app bundling, and strict code-signature
-verification. See [`studio/README.md`](studio/README.md).
+or save data. Game packages built with Studio prompt for a legally obtained
+disc image in addition to the BIOS.
 
 ## Setup
 
 Builds natively on **Windows (MSVC/MinGW)**, **macOS (Apple Silicon & Intel)**,
 and **Linux**. The BIOS thread scheduler uses host fibers — Win32 Fibers on
-Windows, `ucontext` on POSIX (`runtime/src/psx_fiber.c`) — so the recompiled
-BIOS's cooperative thread switching (the CD-boot handoff in particular) behaves
-the same on every platform.
+Windows, `ucontext` on POSIX (`runtime/src/psx_fiber.c`).
 
-Requirements at a glance (full details, dependency table, and per-platform
-prerequisites in [`docs/BUILDING.md`](docs/BUILDING.md)):
+Requirements at a glance (full details in [`docs/BUILDING.md`](docs/BUILDING.md)):
 
 - A C/C++ toolchain: MSVC or MinGW/MSYS2 (Windows), Apple Clang (macOS),
   Clang/GCC (Linux). CMake 3.20+; on macOS/Linux also `ninja` and `pkg-config`.
@@ -168,7 +144,7 @@ prerequisites in [`docs/BUILDING.md`](docs/BUILDING.md)):
   SDL cannot enumerate. RmlUi and FreeType come in as **git submodules** —
   clone with `--recurse-submodules`.
 - A legally obtained `SCPH1001.BIN` BIOS dump. Not included.
-- For game projects, a legally obtained game disc/EXE dump. Not included.
+- For game packages, a legally obtained game disc/EXE dump. Not included.
 
 Build the framework (recompiler tool + BIOS-only runtime):
 
@@ -179,11 +155,10 @@ cmake -S recompiler -B recompiler/build -G Ninja -DCMAKE_BUILD_TYPE=Release && c
 cmake -S runtime    -B runtime/build    -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build runtime/build --target psx-runtime
 ```
 
-On Windows swap `-G Ninja` for your generator if you prefer (e.g.
-`-G "Unix Makefiles"`); always keep an explicit `-DCMAKE_BUILD_TYPE` so the
-generated C is optimized. Game projects generate their own
-`generated/<serial>_*.c` files and link this runtime through CMake — see
-[`docs/BUILDING.md`](docs/BUILDING.md#build-and-run-a-game).
+On Windows swap `-G Ninja` for your generator if you prefer; always keep an
+explicit `-DCMAKE_BUILD_TYPE` so the generated C is optimized. Game projects
+generate their own `generated/<serial>_*.c` files and link this runtime through
+CMake — see [`docs/BUILDING.md`](docs/BUILDING.md#build-and-run-a-game).
 
 ## Keyboard Map
 
@@ -224,9 +199,9 @@ change controller device index, deadzone, or button mapping.
 
 On macOS, the launcher also lists supported wired PDP, Microsoft Xbox One/Series,
 and PowerA GIP controllers as **direct USB** devices when SDL cannot expose them.
-The native C++ backend performs the controller's USB announce/power/authentication
-sequence through statically linked libusb, then feeds the same configurable Xbox
-button map and analog deadzone path used by SDL controllers.
+
+Studio packages can lock the emulated pad type (Hybrid / Analog / D-Pad) so the
+in-game menu does not offer a per-session pad switch.
 
 ## Architecture
 
@@ -239,14 +214,14 @@ correctness oracle; an optional HLE tier lays instant boot-skip and a few BIOS
 services on top, always falling through to the recompiled BIOS.
 
 Code that can't be seen ahead of time (disc-streamed **overlays**) is captured
-and compiled to native code the first time it appears (`static → gcc → tcc`
-backend), with a small interpreter as the correctness fallback until it is. Full
-story in [`docs/EXECUTION_MODEL.md`](docs/EXECUTION_MODEL.md); component-level
-detail in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+and compiled to native code the first time it appears, with a small interpreter
+as the correctness fallback until it is. Full story in
+[`docs/EXECUTION_MODEL.md`](docs/EXECUTION_MODEL.md); component-level detail in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLAUDE.md`](CLAUDE.md) for the
-development rules, and [`docs/internal/`](docs/internal/) for the phased plans
-and deep design notes (`PLAN.md`, `FAITHFUL_TIMING_PLAN.md`, …).
+development rules, and [`docs/internal/`](docs/internal/) for phased plans and
+deep design notes.
 
 ## Disc Speed
 
@@ -259,8 +234,7 @@ Per-game `disc_speed` in `game.toml [runtime]` compresses CD-ROM timing:
 | `"instant"` | Minimum-floor delays. **Known to hang some games** during early initialization; root cause not yet identified. Use `"4x"` instead until resolved. |
 
 FMV playback is always protected: the CD-ROM layer reverts to 1× whenever XA
-audio streaming is active, regardless of `disc_speed`. The speed switch fires
-only after the BIOS has handed off to the game EXE — boot and the license
+audio streaming is active, regardless of `disc_speed`. Boot and the license
 screen always run at authentic 1×.
 
 ## Help make your game faster — just by playing it
@@ -296,26 +270,23 @@ Contributions are welcome — AI-assisted or not — as long as they're reviewed
 tested, and keep the core game-agnostic. A few things hold this project together:
 the faithful recompiled BIOS is the baseline and oracle, generated code is never
 hand-edited (fix the recompiler and regenerate), and a change proves itself
-against the Beetle oracle / on screen rather than by assertion. Game-specific work
-lives in the game repos, which pin an exact framework commit as a submodule.
+against the Beetle oracle / on screen rather than by assertion.
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR — it covers the core
-rules, how to verify a change, the regression checklist across the known games,
-and how a framework fix reaches a game through its pin. Bugs and build problems go
-to GitHub issues (include `gcc -v` / OS / generator for build failures); design
-discussion happens in the **R.A.I.D.** Discord (invite below).
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR. Bugs and build
+problems go to GitHub issues (include `gcc -v` / OS / generator for build
+failures); design discussion happens in the **R.A.I.D.** Discord (invite below).
 
 ## License
 
 PolyForm Noncommercial 1.0.0. See `LICENSE`.
 
-The PSX BIOS and game disc images remain copyrighted by their respective
-owners. This project distributes no BIOS images, no disc images, and no
-game assets — those are always supplied by the user from their own
-collection. Release executables (and per-game overlay caches) contain
-statically recompiled (machine-translated) builds of the original code,
-the same distribution model used by other static recompilation projects
-such as N64: Recompiled.
+The PSX BIOS, Titus Interactive (and other) game disc images, and related
+assets remain copyrighted by their respective owners. This project distributes
+no BIOS images, no disc images, and no game assets — those are always supplied
+by the user from their own collection. Release executables (and per-game
+overlay caches) contain statically recompiled (machine-translated) builds of
+the original code, the same distribution model used by other static
+recompilation projects such as N64: Recompiled.
 
 ---
 
@@ -324,5 +295,5 @@ such as N64: Recompiled.
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
+  <a href="https://discord.gg/Ad9BwSzctP">Join the R.A.I.D. Discord</a>
 </p>

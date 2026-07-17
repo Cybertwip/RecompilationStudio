@@ -54,15 +54,6 @@ constexpr auto kLinuxControllerDbArchiveSha256 =
 constexpr auto kLinuxControllerDbSha256 =
   "dd4dd9dcb458aa4fbfd9b37ccdd4884b1e2e258edf8a16c3c4df3e77ac5174a0";
 
-QString cleanBundleName(QString title) {
-  title = title.trimmed();
-  title.replace('/', QStringLiteral(" - "));
-  title.replace(':', QStringLiteral(" -"));
-  title.remove(QRegularExpression(QStringLiteral("[\\x00-\\x1f]")));
-  title = title.simplified();
-  return title.left(80);
-}
-
 QString escapedComment(QString text) {
   text.replace('\n', ' ');
   text.replace('\r', ' ');

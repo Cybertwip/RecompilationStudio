@@ -65,6 +65,32 @@ QString sanitizedBundleIdentifier(const QString& serial, const QString& title) {
   return QStringLiteral("org.psxrecomp.generated.%1").arg(suffix);
 }
 
+QString cleanBundleName(const QString& title) {
+  QString name = title.trimmed();
+  // Path separators → readable separators (matches prior Studio behavior).
+  name.replace('/', QStringLiteral(" - "));
+  name.replace('\\', QStringLiteral(" - "));
+  name.replace(':', QStringLiteral(" -"));
+  // Drop control chars and characters that break shell quoting when CMake/Ninja
+  // embeds OUTPUT_NAME into a /bin/sh -c rule. Apostrophe is the known case:
+  // "The King of Fighters '98" → unescaped ' in POST_BUILD paths →
+  // "unexpected EOF while looking for matching `''".
+  // Also strip Windows-illegal filename chars and other shell metacharacters.
+  name.remove(QRegularExpression(QStringLiteral(
+    "[\\x00-\\x1f'\"`$;&|<>*?#]")));
+  // Unicode apostrophe / quotes that users paste from web listings.
+  name.remove(QChar(0x2018)); // ‘
+  name.remove(QChar(0x2019)); // ’
+  name.remove(QChar(0x201C)); // “
+  name.remove(QChar(0x201D)); // ”
+  name = name.simplified();
+  while (name.endsWith(QLatin1Char('.')) || name.endsWith(QLatin1Char(' '))) {
+    name.chop(1);
+  }
+  name = name.trimmed();
+  return name.left(80);
+}
+
 QString cmakeQuoted(const QString& value) {
   QString escaped = value;
   escaped.replace('\\', QStringLiteral("\\\\"));

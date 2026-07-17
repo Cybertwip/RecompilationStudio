@@ -600,11 +600,15 @@ function(psxrecomp_add_runtime_target target)
         else()
             set(_psxrt_frontend_assets_dir "$<TARGET_FILE_DIR:${target}>")
         endif()
+        # VERBATIM: properly escape args for the build tool's shell. Without it,
+        # paths with apostrophes (e.g. "Fighters '98.app") break /bin/sh -c on
+        # macOS Ninja builds ("unexpected EOF while looking for matching `''").
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${PSXRECOMP_ROOT}/runtime/launcher/assets"
                 "${_psxrt_frontend_assets_dir}"
-            COMMENT "Copying frontend assets for ${target}")
+            COMMENT "Copying frontend assets for ${target}"
+            VERBATIM)
     endif()
 
     if(WIN32 OR MINGW)

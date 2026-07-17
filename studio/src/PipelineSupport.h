@@ -12,6 +12,11 @@ namespace psxstudio {
 QString sha256File(const QString& path, QString& error);
 QString sanitizedFileStem(const QString& value);
 QString sanitizedBundleIdentifier(const QString& serial, const QString& title);
+/* Human-readable package / .app / exe stem from a window title.
+ * Keeps spaces and letters so Finder names stay readable, but strips
+ * shell- and filesystem-hostile characters (notably apostrophes) that
+ * break CMake/Ninja /bin/sh -c rules on macOS paths. */
+QString cleanBundleName(const QString& title);
 QString cmakeQuoted(const QString& value);
 QString tomlQuoted(const QString& value);
 QString hex32(quint32 value);

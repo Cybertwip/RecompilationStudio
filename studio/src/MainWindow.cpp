@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "PipelineSupport.h"
 #include "PipelineWorker.h"
 
 #include <QApplication>
@@ -755,7 +756,7 @@ void MainWindow::startBuild() {
     return;
   }
 
-  const QString bundleName = titleEdit_->text().trimmed().replace('/', QStringLiteral(" - ")).replace(':', QStringLiteral(" -"));
+  const QString bundleName = cleanBundleName(titleEdit_->text());
   const auto targetPlatform =
     targetPlatformFromKey(platformCombo_->currentData().toString());
   QString outputName;

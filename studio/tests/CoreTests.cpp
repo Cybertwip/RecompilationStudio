@@ -112,6 +112,21 @@ int main(int argc, char** argv) {
   check(psxstudio::sanitizedBundleIdentifier(QStringLiteral("SLUS-00032"), {}) ==
           QStringLiteral("org.psxrecomp.generated.slus-00032"),
         QStringLiteral("bundle-identifier sanitization"));
+  // Apostrophes must not appear in package / .app names — they break Ninja
+  // shell rules on macOS (see cleanBundleName).
+  check(psxstudio::cleanBundleName(QStringLiteral("The King of Fighters '98")) ==
+          QStringLiteral("The King of Fighters 98"),
+        QStringLiteral("bundle-name strips ASCII apostrophe"));
+  check(psxstudio::cleanBundleName(QStringLiteral("The King of Fighters \u201998")) ==
+          QStringLiteral("The King of Fighters 98"),
+        QStringLiteral("bundle-name strips curly apostrophe"));
+  check(psxstudio::cleanBundleName(QStringLiteral("Top Gun: Fire at Will!")) ==
+          QStringLiteral("Top Gun - Fire at Will!"),
+        QStringLiteral("bundle-name colon → dash keeps readable title"));
+  check(psxstudio::cleanBundleName(QStringLiteral("Foo/Bar:Baz")).isEmpty() == false &&
+          psxstudio::cleanBundleName(QStringLiteral("Foo/Bar:Baz")) ==
+            QStringLiteral("Foo - Bar -Baz"),
+        QStringLiteral("bundle-name path separators"));
   const QString normalBoot = psxstudio::runtimeBootToml(false);
   check(normalBoot.contains(QStringLiteral("bios_hle_keep_intro = true")) &&
           normalBoot.contains(QStringLiteral("fast_boot = false")),

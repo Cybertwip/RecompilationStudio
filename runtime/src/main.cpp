@@ -46,6 +46,7 @@
 #include "debug_server.h"
 #include "crash_trace.h"
 #include "freeze_heartbeat.h"
+#include "starvation_ring.h"
 #include "config_loader.h"
 #include "game_options.h"
 #include "crc32.h"
@@ -2492,6 +2493,12 @@ static void sample_headless_pad_into_sio(int override) {
 static void open_pause_settings_menu(void) {
     if (!sdl_window || g_pause_assets_dir.empty()) return;
 
+    /* Guest + debug_server_poll are blocked for the whole menu. Without
+     * pausing the starvation watchdog, wall-clock spent here is treated as a
+     * hang and the process aborts on the first post-resume cycle advance
+     * ("N us without heartbeat"). */
+    starvation_watchdog_pause();
+
     const bool was_fullscreen =
         (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
     int old_x = SDL_WINDOWPOS_CENTERED, old_y = SDL_WINDOWPOS_CENTERED;
@@ -2620,6 +2627,8 @@ static void open_pause_settings_menu(void) {
     }
     host_keyboard_reset();
     if (sdl_audio_device) SDL_PauseAudioDevice(sdl_audio_device, 0);
+
+    starvation_watchdog_resume();
 }
 #endif
 

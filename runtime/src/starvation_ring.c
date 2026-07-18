@@ -46,6 +46,7 @@ static StarvationEntry s_ring[STARVATION_RING_CAP];
 static uint64_t        s_seq = 0;
 static uint64_t        s_last_heartbeat_us = 0;
 static int             s_dump_done = 0;
+static int             s_watchdog_paused = 0;
 
 /* Watchdog threshold: 4 seconds of wall-clock without a heartbeat is
  * "TCP died, BIOS still running" territory. Real BIOS pad polling
@@ -68,6 +69,16 @@ static uint64_t starvation_timeout_us(void) {
 }
 
 void starvation_watchdog_heartbeat(void) {
+    s_last_heartbeat_us = host_us_now();
+}
+
+void starvation_watchdog_pause(void) {
+    s_watchdog_paused = 1;
+}
+
+void starvation_watchdog_resume(void) {
+    s_watchdog_paused = 0;
+    /* Reset the clock so time spent host-paused is not counted as starvation. */
     s_last_heartbeat_us = host_us_now();
 }
 
@@ -217,6 +228,7 @@ void starvation_ring_dump(const char *path) {
 
 void starvation_watchdog_check(void) {
     if (s_dump_done) return;
+    if (s_watchdog_paused) return;
     if (s_last_heartbeat_us == 0) return;  /* not initialized yet */
     uint64_t timeout = starvation_timeout_us();
     if (timeout == 0) return;              /* watchdog disabled (renderer bring-up) */
@@ -252,6 +264,8 @@ void starvation_ring_record(uint8_t kind, uint8_t tx, uint8_t rx,
     (void)selected_slot; (void)g_sio_timing_active;
 }
 void starvation_watchdog_heartbeat(void) {}
+void starvation_watchdog_pause(void) {}
+void starvation_watchdog_resume(void) {}
 void starvation_watchdog_check(void) {}
 void starvation_ring_dump(const char *path) { (void)path; }
 void starvation_ring_pc_sample(void) {}

@@ -92,6 +92,12 @@ void starvation_ring_record(uint8_t kind, uint8_t tx, uint8_t rx,
  * aborts. */
 void starvation_watchdog_heartbeat(void);
 
+/* Host-side intentional stalls (in-game pause/settings menu) must pause
+ * the watchdog: wall-clock advances while the guest and debug_server_poll
+ * do not, so the 4 s threshold would fire on the first post-resume check. */
+void starvation_watchdog_pause(void);
+void starvation_watchdog_resume(void);
+
 /* Run watchdog check from a hot path (e.g. psx_advance_cycles). */
 void starvation_watchdog_check(void);
 

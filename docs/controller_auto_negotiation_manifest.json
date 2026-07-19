@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "feature": "controller_auto_negotiation",
+  "policy_id": "dpad_then_hybrid",
+  "configuration": {
+    "game_toml_mode": "auto",
+    "studio_selector": false,
+    "lock_mode": true,
+    "legacy_modes_remain_parseable": true
+  },
+  "lifecycle": {
+    "bios": "present_dpad_and_ignore_bios_commands_for_selection",
+    "arm_event": "registered_game_entry_handoff",
+    "initial_game_controller": "dpad",
+    "fallback_controller": "hybrid",
+    "fallback_is_one_way_per_game": true
+  },
+  "signals": {
+    "dpad_poll_command": "0x42",
+    "dualshock_configuration_probe": "0x43",
+    "clock_or_title_database_used": false
+  },
+  "transitions": [
+    {
+      "from": "waiting_for_game",
+      "event": "game_entry_handoff",
+      "to": "dpad"
+    },
+    {
+      "from": "dpad",
+      "event": "0x42",
+      "to": "dpad",
+      "effect": "clear_configuration_probe_streak"
+    },
+    {
+      "from": "dpad",
+      "event": "first_0x43_without_intervening_0x42",
+      "to": "dpad_probe",
+      "effect": "leave_probe_unanswered"
+    },
+    {
+      "from": "dpad_probe",
+      "event": "0x42",
+      "to": "dpad",
+      "effect": "dpad_accepted"
+    },
+    {
+      "from": "dpad_probe",
+      "event": "second_0x43_without_intervening_0x42",
+      "to": "hybrid",
+      "effect": "answer_current_probe_as_config_capable_controller"
+    },
+    {
+      "from": "hybrid",
+      "event": "any_pad_command",
+      "to": "hybrid"
+    }
+  ],
+  "invariants": [
+    "BIOS controller traffic cannot select a game's controller type",
+    "The first game-side 0x43 probe is always observed as a real D-Pad rejection",
+    "A 0x42 between 0x43 probes prevents Hybrid promotion",
+    "Host stick input cannot change the reported D-Pad type before promotion",
+    "Hotplug refresh cannot restart an in-progress or completed decision",
+    "Automatic policy state is included in the SIO snapshot",
+    "No title name, serial, region, frame count, or wall-clock timeout participates"
+  ],
+  "observability": {
+    "debug_command": "pad_status",
+    "per_slot_fields": [
+      "analog",
+      "config_capable",
+      "negotiation"
+    ],
+    "negotiation_values": [
+      "off",
+      "waiting_for_game",
+      "dpad",
+      "dpad_probe",
+      "hybrid"
+    ]
+  },
+  "implementation": [
+    "runtime/include/pad_negotiation.h",
+    "runtime/src/pad_negotiation.c",
+    "runtime/src/sio.c",
+    "runtime/src/fntrace.c",
+    "runtime/src/main.cpp",
+    "runtime/src/debug_server.c",
+    "recompiler/src/config_loader.h",
+    "recompiler/src/config_loader.cpp",
+    "studio/src/PipelineSupport.cpp",
+    "studio/src/MainWindow.cpp"
+  ],
+  "tests": [
+    "runtime/tests/pad_negotiation_test.c",
+    "recompiler/tests/config_loader_controller_test.cpp",
+    "studio/tests/CoreTests.cpp"
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "feature": "controller_auto_negotiation",
+  "policy_id": "dpad_then_hybrid",
+  "verified_utc_date": "2026-07-19",
+  "implementation_commit": "afd9767",
+  "results": [
+    {
+      "check": "studio_build",
+      "command": "cmake --build studio/build --target PSXRecompStudio PSXRecompStudioTests -j8",
+      "result": "pass"
+    },
+    {
+      "check": "studio_tests",
+      "command": "ctest --test-dir studio/build --output-on-failure",
+      "result": "pass",
+      "detail": "2/2 tests passed"
+    },
+    {
+      "check": "studio_ui_smoke",
+      "command": "QT_QPA_PLATFORM=offscreen studio/build/PSXRecomp Studio.app/Contents/MacOS/PSXRecomp Studio",
+      "result": "pass",
+      "detail": "event loop remained active without a startup failure; process was then stopped by the test harness"
+    },
+    {
+      "check": "fixed_controller_selector_removed",
+      "command": "rg -n 'padModeCombo_|padMode\\b' studio/src studio/tests",
+      "result": "pass",
+      "detail": "no matches"
+    },
+    {
+      "check": "auto_config_parse_and_round_trip",
+      "command": "recompiler/build/config_loader_controller_test",
+      "result": "pass"
+    },
+    {
+      "check": "negotiation_state_machine",
+      "command": "runtime/build/pad_negotiation_test",
+      "result": "pass",
+      "cases": [
+        "BIOS 0x42 and 0x43 commands leave waiting_for_game unchanged",
+        "game starts in D-Pad state",
+        "120 repetitions of 0x43 then 0x42 remain D-Pad",
+        "first consecutive 0x43 stays D-Pad and remains unanswered",
+        "second consecutive 0x43 selects Hybrid",
+        "Hybrid remains selected after later 0x42 polls",
+        "new game handoff resets the policy to D-Pad"
+      ]
+    },
+    {
+      "check": "runtime_changed_sources_compile",
+      "command": "cmake --build runtime/build --target psx-runtime -j8",
+      "result": "compile_pass_link_not_reached",
+      "detail": "main.cpp, sio.c, fntrace.c, pad_negotiation.c, and debug_server.c compiled successfully; the pre-existing runtime target then stopped because generated/SCPH1001_full.c is absent"
+    },
+    {
+      "check": "controller_scope_obsolete_source_citation_cleanup",
+      "command": "rg -ni 'dualshock\\.cpp' runtime/src/sio.c runtime/include/sio.h runtime/src/pad_negotiation.c runtime/include/pad_negotiation.h runtime/tests/pad_negotiation_test.c recompiler/src/config_loader.h recompiler/src/config_loader.cpp studio/src studio/tests studio/README.md",
+      "result": "pass",
+      "detail": "no matches"
+    },
+    {
+      "check": "patch_whitespace",
+      "command": "git diff --check",
+      "result": "pass"
+    }
+  ],
+  "runtime_link_blocker": {
+    "path": "generated/SCPH1001_full.c",
+    "introduced_by_feature": false,
+    "generated_code_modified_or_synthesized": false,
+    "impact": "A full runtime executable and live pad_status transaction capture cannot be produced from this checkout until the existing BIOS generation artifact is restored through the project generation workflow"
+  }
+}

@@ -73,6 +73,8 @@ set(STUDIO_CORE_SOURCES
   src/BiosBrandingPatcher.h
   src/CueSheet.cpp
   src/CueSheet.h
+  src/DiscCatalog.cpp
+  src/DiscCatalog.h
   src/DiscInspector.cpp
   src/DiscInspector.h
   src/PipelineSupport.cpp
@@ -167,6 +169,8 @@ if(BUILD_TESTING)
     src/BiosBrandingPatcher.h
     src/CueSheet.cpp
     src/CueSheet.h
+    src/DiscCatalog.cpp
+    src/DiscCatalog.h
     src/DiscInspector.cpp
     src/DiscInspector.h
     src/PipelineSupport.cpp
@@ -174,6 +178,11 @@ if(BUILD_TESTING)
     src/PipelineTypes.h
     ../runtime/src/iso_reader.cpp
     ../recompiler/src/ps1_exe_parser.cpp
+  )
+  qt_add_resources(PSXRecompStudioTests studio_test_resources
+    PREFIX "/psxrecomp/studio"
+    FILES
+      resources/psxrecomp-studio.svg
   )
   target_include_directories(PSXRecompStudioTests PRIVATE
     src

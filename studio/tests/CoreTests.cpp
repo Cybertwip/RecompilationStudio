@@ -1,4 +1,5 @@
 #include "CueSheet.h"
+#include "DiscCatalog.h"
 #include "DiscInspector.h"
 #include "PipelineSupport.h"
 
@@ -13,6 +14,7 @@
 #include <QTemporaryDir>
 #include <QtEndian>
 
+#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -121,12 +123,59 @@ int main(int argc, char** argv) {
   check(disc.rewrittenCue.contains(QStringLiteral("\"test.bin\"")),
         QStringLiteral("CUE rewrite"));
 
+  psxstudio::DiscDescription standaloneDisc;
+  check(psxstudio::CueSheet::parse(binPath, {}, standaloneDisc, error), error);
+  check(standaloneDisc.files.size() == 1 && standaloneDisc.rewrittenCue.isEmpty() &&
+          standaloneDisc.files.constFirst().sourcePath == QFileInfo(binPath).canonicalFilePath(),
+        QStringLiteral("standalone BIN parsing"));
+
   psxstudio::GameDescription game;
   check(psxstudio::DiscInspector::inspect(disc, game, error), error);
   check(game.bootFileName == QStringLiteral("TEST_000.00"), QStringLiteral("boot file detection"));
   check(game.serial == QStringLiteral("TEST-00000"), QStringLiteral("serial normalization"));
   check(game.entryPc == 0x80010000u, QStringLiteral("entry PC parsing"));
   check(game.textSize == 4u, QStringLiteral("text-size parsing"));
+  psxstudio::GameDescription standaloneGame;
+  check(psxstudio::DiscInspector::inspect(standaloneDisc, standaloneGame, error), error);
+  check(standaloneGame.serial == game.serial && standaloneGame.entryPc == game.entryPc,
+        QStringLiteral("standalone BIN inspection"));
+
+  const QString standaloneBinPath =
+    QDir(temp.path()).filePath(QStringLiteral("standalone.BiN"));
+  check(QFile::copy(binPath, standaloneBinPath),
+        QStringLiteral("standalone catalog fixture copy"));
+  const QString incompleteBinPath =
+    QDir(temp.path()).filePath(QStringLiteral("incomplete.bin"));
+  const QString brokenCuePath =
+    QDir(temp.path()).filePath(QStringLiteral("broken.cue"));
+  check(QFile::copy(binPath, incompleteBinPath),
+        QStringLiteral("incomplete CUE fixture copy"));
+  check(psxstudio::writeText(
+          brokenCuePath,
+          QStringLiteral("FILE \"incomplete.bin\" BINARY\n"
+                         "  TRACK 01 MODE1/2048\n"
+                         "    INDEX 01 00:00:00\n"
+                         "FILE \"missing-track.bin\" BINARY\n"
+                         "  TRACK 02 AUDIO\n"
+                         "    INDEX 01 00:00:00\n"), error), error);
+  QList<psxstudio::DiscCatalogEntry> catalog;
+  QStringList catalogWarnings;
+  check(psxstudio::DiscCatalog::scanDirectory(
+          temp.path(), catalog, catalogWarnings, error), error);
+  check(catalog.size() == 2,
+        QStringLiteral("batch catalog groups a CUE set and an unowned standalone BIN"));
+  check(catalogWarnings.size() == 1 &&
+          catalogWarnings.constFirst().contains(QStringLiteral("missing-track.bin")),
+        QStringLiteral("batch catalog reports an incomplete CUE"));
+  const auto catalogHasSource = [&](const QString& path) {
+    const QString canonical = QFileInfo(path).canonicalFilePath();
+    return std::any_of(catalog.cbegin(), catalog.cend(), [&](const auto& entry) {
+      return entry.sourcePath == canonical;
+    });
+  };
+  check(catalogHasSource(cuePath) && catalogHasSource(standaloneBinPath) &&
+          !catalogHasSource(binPath) && !catalogHasSource(incompleteBinPath),
+        QStringLiteral("batch catalog never reclassifies CUE-owned tracks as standalone discs"));
 
   check(psxstudio::sanitizedFileStem(QStringLiteral("Top Gun: Fire at Will!")) ==
           QStringLiteral("TopGunFireAtWill"),
@@ -212,6 +261,23 @@ int main(int argc, char** argv) {
                ? psxstudio::TargetPlatform::Linux
                : psxstudio::TargetPlatform::Windows)),
         QStringLiteral("Only macOS Studio builds support cross-platform targets"));
+  const auto allTargets =
+    psxstudio::concreteTargetPlatforms(psxstudio::TargetPlatform::All);
+  check(psxstudio::targetPlatformKey(psxstudio::TargetPlatform::All) ==
+          QStringLiteral("all") &&
+          psxstudio::targetPlatformDisplayName(psxstudio::TargetPlatform::All) ==
+            QStringLiteral("All") &&
+          psxstudio::targetPlatformFromKey(QStringLiteral("ALL")) ==
+            psxstudio::TargetPlatform::All,
+        QStringLiteral("All platform selection round-trips"));
+  check(allTargets == QList<psxstudio::TargetPlatform>{
+          psxstudio::TargetPlatform::MacOS,
+          psxstudio::TargetPlatform::Windows,
+          psxstudio::TargetPlatform::Linux },
+        QStringLiteral("All expands to each concrete platform exactly once"));
+  check(psxstudio::targetPlatformSupportedOnHost(psxstudio::TargetPlatform::All) ==
+          psxstudio::hostCanSelectTargetPlatform(),
+        QStringLiteral("All is available only on macOS Studio builds"));
   gipRequest.targetPlatform = psxstudio::TargetPlatform::Windows;
   check(psxstudio::targetPlatformKey(gipRequest.targetPlatform) == QStringLiteral("windows") &&
           psxstudio::targetPlatformFromKey(QStringLiteral("WINDOWS")) ==
@@ -262,6 +328,14 @@ int main(int argc, char** argv) {
   QImage linuxIcon(linuxIconPath);
   check(!linuxIcon.isNull() && linuxIcon.size() == QSize(512, 512),
         QStringLiteral("Linux PNG icon generation"));
+  const QString defaultIconPath =
+    QDir(temp.path()).filePath(QStringLiteral("DefaultAppIcon.png"));
+  check(psxstudio::createPngIcon(
+          QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg"),
+          defaultIconPath, error), error);
+  const QImage defaultIcon(defaultIconPath);
+  check(!defaultIcon.isNull() && defaultIcon.size() == QSize(512, 512),
+        QStringLiteral("optional icon falls back to the built-in Studio artwork"));
 
   const QString proofDir = QDir(temp.path()).filePath(QStringLiteral("proof"));
   QDir().mkpath(proofDir);

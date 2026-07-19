@@ -2,8 +2,9 @@
 
 PSXRecomp Studio is the Qt front end for producing self-contained macOS,
 Windows, or Linux PlayStation recompilation apps without creating a permanent
-per-title repository. Studio itself currently runs on macOS; its Windows and
-Linux outputs are cross-compiled with dedicated x86-64 GNU toolchains.
+per-title repository. A Windows Studio build exports Windows packages and a
+Linux Studio build exports Linux packages. macOS can select macOS, Windows,
+Linux, or **All**; All queues every available target into one output directory.
 
 It uses Qt 6 Widgets, Oclero Qlementine, Qlementine Icons,
 QtAppInstanceManager, and QuaZip. Work happens in a temporary directory; the
@@ -11,38 +12,62 @@ selected output directory receives only the final platform package.
 
 ## Required inputs
 
-- One CUE sheet and every BIN file it references. Multi-track CUE sheets are
-  supported.
+- One CUE sheet and every BIN file it references, or one standalone raw BIN.
+  Multi-track CUE sheets are supported. **Batch** mode instead accepts a
+  directory, scans it recursively, groups CUE-owned tracks, and creates an
+  editable game list.
 - An exact North American `SCPH1001.BIN` image:
   - size: `524288` bytes
   - SHA-256: `71af94d1e47a68c11e8fdb9f8368040601514a42a5a399cda48c7d3bff1e99d3`
-- A PNG, SVG, or ICNS app icon.
+- An optional PNG, SVG, or ICNS app icon. The built-in PSXRecomp icon is used
+  when no icon is selected. Batch mode has an independent optional icon picker
+  for every game.
 - Optional BIOS branding images: one initial splash and one handoff image.
 - The desired runtime window title. This also becomes the app name.
-- For macOS exports, a password-protected PKCS#12 signing identity (`.pfx` or
-  `.p12`) and its password. Windows and Linux exports are currently unsigned.
+- For optional macOS signing, a password-protected PKCS#12 identity (`.pfx` or
+  `.p12`) and its password. macOS, Windows, and Linux exports can all be
+  delivered unsigned; Windows and Linux exports are currently always unsigned.
 - Ghidra 11.3.2 with Java 21.
 
-The certificate password is kept only in memory. Studio validates the source
-PFX with OpenSSL 3, re-exports a temporary legacy-compatible PKCS#12 using a
-random ASCII password (to avoid macOS Security's PBES2 and Unicode-password
-import bugs), imports that identity into a temporary keychain, signs and
-verifies the bundle, then deletes all temporary key material and the keychain.
+The certificate password is never persisted in settings. During a signed build,
+Studio writes it to an owner-only temporary file, passes the original PFX
+directly to `rcodesign`, then deletes the password file. The identity is never
+imported into the login or system Keychain, so signing does not trigger repeated
+Keychain authorization dialogs. `rcodesign` recursively signs the bundle in one
+pass; Apple's `codesign` independently verifies the result.
+
+## Batch and platform behavior
+
+Enable **Batch**, choose the game directory, then edit the detected names and
+pick optional icons from the generated list. One selected BIOS and the common
+runtime/branding settings apply to the whole queue. A directory containing both
+a CUE and its referenced BIN tracks produces one game entry, not one entry per
+track; unowned standalone BIN images become their own entries.
+
+On Windows and Linux, Batch exports every listed game for the native host
+platform. On macOS, an individual platform does the same for that target, while
+**All** exports each listed game for macOS, Windows, and Linux.
 
 ## Host tools
 
-Every export requires CMake, Ninja, Python 3, Ghidra 11.3.2, and OpenJDK 21.
+Every export requires CMake, Python 3, Ghidra 11.3.2, and OpenJDK 21. Non-Windows
+hosts also require Ninja.
 macOS exports additionally require:
 
-- Xcode command-line tools (`codesign`, `security`, `iconutil`, `otool`)
+- Xcode command-line tools (`iconutil`, `otool`, and `install_name_tool`)
 - SDL2 development files discoverable through `pkg-config`
 - libusb 1.0 development files, including `libusb-1.0.a`, for the default wired
   Xbox/PDP controller export (`brew install libusb`)
 - When Homebrew provides SDL2 through `sdl2-compat`, the matching SDL3 runtime
   must be installed; Studio bundles and signs both libraries.
-- OpenSSL 3 with `pkcs12 -legacy` support (`brew install openssl@3`)
+- For optional PFX signing, `rcodesign` 0.26.0 or newer from the
+  `apple-codesign` project and
+  Apple's `codesign`. Studio checks `PSXRECOMP_RCODESIGN`, its bundled tools
+  directory, `~/.cargo/bin`, and `PATH`, in that order. One installation method
+  is `cargo install apple-codesign`.
 
-Windows exports additionally require the Homebrew MinGW-w64 tools named
+Native Windows exports require Visual Studio 2022 with the MSVC x64 tools.
+Windows exports from macOS instead require the Homebrew MinGW-w64 tools named
 `x86_64-w64-mingw32-gcc`, `x86_64-w64-mingw32-g++`,
 `x86_64-w64-mingw32-windres`, `x86_64-w64-mingw32-ar`,
 `x86_64-w64-mingw32-ranlib`, `x86_64-w64-mingw32-strip`, and
@@ -51,7 +76,8 @@ for these programs. It downloads SDL2's official, checksum-pinned MinGW
 development archive and statically links SDL2 plus the GCC/C++ runtimes so the
 delivered executable has no non-system DLL dependency.
 
-Linux exports additionally require the tools named
+Native Linux exports use the host `gcc`, `g++`, `ar`, `ranlib`, `strip`, and
+`readelf`. Linux exports from macOS instead require the tools named
 `x86_64-unknown-linux-gnu-gcc`, `x86_64-unknown-linux-gnu-g++`,
 `x86_64-unknown-linux-gnu-ar`, `x86_64-unknown-linux-gnu-ranlib`,
 `x86_64-unknown-linux-gnu-strip`, and
@@ -76,7 +102,9 @@ game apps; those use the PSXRecomp SDL runtime.
 
 ## Pipeline
 
-1. Parse the CUE and validate every referenced BIN.
+1. Parse the CUE and validate every referenced BIN, or validate the selected
+   standalone BIN. Batch mode performs this discovery once and queues the
+   resulting game entries.
 2. Read `SYSTEM.CNF`, extract the boot PS-X EXE, and validate its header.
 3. Validate the exact SCPH1001 BIOS revision.
 4. Import the stripped game image into a temporary Ghidra project as
@@ -101,11 +129,13 @@ game apps; those use the PSXRecomp SDL runtime.
     verifies the controller database, rejects unexpected ELF dependencies, and
     records the delivered binaries' observed glibc requirement without imposing
     a fixed compatibility baseline.
-11. For macOS, import the normalized PFX into an isolated temporary keychain,
-    sign every nested Mach-O, and sign the app with Hardened Runtime, a secure
-    timestamp, and the narrow `disable-library-validation` entitlement required
-    by non-Apple/self-issued code-signing identities. Run strict `codesign`
-    verification before and after delivery.
+11. For macOS, either leave the app unsigned and hash-verify its staged payload,
+    or pass the selected PFX directly to `rcodesign`. The signed path recursively
+    seals the bundle once with Hardened Runtime, a secure timestamp, and the
+    narrow `disable-library-validation` entitlement required by
+    non-Apple/self-issued code-signing identities. It never imports the identity
+    into a Keychain. Run strict Apple `codesign` verification before and after
+    delivery.
 12. Copy the verified `.app`, `-Windows`, or `-Linux` package into the selected
     output directory and verify the delivered copy again.
 
@@ -127,7 +157,7 @@ Game Name.app/
       PSXRecomp-Proof.zip
       bios/SCPH1001.BIN
       game/<serial boot EXE>
-      disc/<CUE and referenced BIN files>
+      disc/<CUE and referenced BIN files, or standalone BIN>
 ```
 
 Windows exports use:
@@ -139,7 +169,7 @@ Game Name-Windows/
   PSXRecomp-Proof.zip
   bios/SCPH1001.BIN
   game/<serial boot EXE>
-  disc/<CUE and referenced BIN files>
+  disc/<CUE and referenced BIN files, or standalone BIN>
   seeds/ghidra_funcs.txt
 ```
 
@@ -158,7 +188,7 @@ Game Name-Linux/
   licenses/SDL_GameControllerDB.txt
   bios/SCPH1001.BIN
   game/<serial boot EXE>
-  disc/<CUE and referenced BIN files>
+  disc/<CUE and referenced BIN files, or standalone BIN>
   seeds/ghidra_funcs.txt
 ```
 

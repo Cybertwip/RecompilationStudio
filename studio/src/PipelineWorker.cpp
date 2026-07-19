@@ -482,31 +482,25 @@ QString makeProjectCMake(const PipelineRequest& request,
   return cmake;
 }
 
-QString findOpenSsl3() {
+QString findRcodesign() {
   QStringList candidates;
-  const QString configured = qEnvironmentVariable("PSXRECOMP_OPENSSL");
-  if (!configured.isEmpty()) candidates << configured;
-  candidates << QStringLiteral("/usr/local/opt/openssl@3/bin/openssl")
-             << QStringLiteral("/opt/homebrew/opt/openssl@3/bin/openssl")
-             << QStringLiteral("/usr/local/bin/openssl")
-             << QStringLiteral("/opt/homebrew/bin/openssl")
-             << QStringLiteral("/usr/local/Caskroom/miniconda/base/bin/openssl");
-  const QString pathCandidate = QStandardPaths::findExecutable(QStringLiteral("openssl"));
-  if (!pathCandidate.isEmpty()) candidates << pathCandidate;
+  const QString configured = qEnvironmentVariable("PSXRECOMP_RCODESIGN");
+  if (!configured.isEmpty()) {
+    candidates.append(configured);
+  }
+  candidates.append(
+    QDir(QCoreApplication::applicationDirPath())
+      .filePath(QStringLiteral("../Resources/tools/rcodesign")));
+  candidates.append(QDir::home().filePath(QStringLiteral(".cargo/bin/rcodesign")));
+  candidates.append(findExecutable(QStringLiteral("rcodesign")));
+  candidates.removeAll(QString());
   candidates.removeDuplicates();
-  for (const QString& candidate : candidates) {
-    if (!QFileInfo(candidate).isExecutable()) continue;
-    QProcess version;
-    version.start(candidate, { QStringLiteral("version") });
-    if (!version.waitForStarted(3000) || !version.waitForFinished(5000) || version.exitCode() != 0)
-      continue;
-    const QString output = QString::fromUtf8(version.readAllStandardOutput() + version.readAllStandardError());
-    if (!output.startsWith(QStringLiteral("OpenSSL 3."))) continue;
-    QProcess help;
-    help.start(candidate, { QStringLiteral("pkcs12"), QStringLiteral("-help") });
-    if (!help.waitForStarted(3000) || !help.waitForFinished(5000)) continue;
-    const QString helpText = QString::fromUtf8(help.readAllStandardOutput() + help.readAllStandardError());
-    if (helpText.contains(QStringLiteral("-legacy"))) return candidate;
+  for (const auto& candidate : candidates) {
+    if (QFileInfo(candidate).isExecutable()) {
+      return QFileInfo(candidate).canonicalFilePath().isEmpty()
+        ? QFileInfo(candidate).absoluteFilePath()
+        : QFileInfo(candidate).canonicalFilePath();
+    }
   }
   return {};
 }
@@ -794,21 +788,8 @@ bool PipelineWorker::runCommand(const QString& program,
   return true;
 }
 
-void PipelineWorker::cleanupKeychain() {
-  if (temporaryKeychainPath_.isEmpty()) {
-    return;
-  }
-  QProcess process;
-  process.start(QStringLiteral("/usr/bin/security"),
-                { QStringLiteral("delete-keychain"), temporaryKeychainPath_ });
-  process.waitForFinished(15000);
-  temporaryKeychainPath_.clear();
-  temporaryKeychainPassword_.clear();
-}
-
 void PipelineWorker::run(PipelineRequest request) {
   cancelRequested_.store(false, std::memory_order_relaxed);
-  cleanupKeychain();
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
@@ -819,11 +800,19 @@ void PipelineWorker::run(PipelineRequest request) {
   const bool crossWindowsTarget = windowsTarget && !nativeWindowsTarget;
   const bool crossLinuxTarget = linuxTarget && !nativeLinuxTarget;
   const bool directoryPackageTarget = windowsTarget || linuxTarget;
+  const bool hasCertificate = !request.certificatePath.trimmed().isEmpty();
+  const bool hasCertificatePassword = !request.certificatePassword.isEmpty();
+  const bool signingRequested = macosTarget && hasCertificate && hasCertificatePassword;
+  const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
+    ? QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg")
+    : request.iconPath;
 
   constexpr int totalStages = 9;
-  QString sensitivePemPath;
-  QString normalizedCertificatePath;
-  QString normalizedCertificatePassword;
+  QString signingPasswordPath;
+  QString signingIdentityName;
+  QString signingIdentitySha1;
+  QString signingIdentitySha256;
+  QString signingTeamId;
   int stage = 0;
   auto nextStage = [&](const QString& name) {
     ++stage;
@@ -831,15 +820,16 @@ void PipelineWorker::run(PipelineRequest request) {
     emit logLine(QStringLiteral("\n=== %1 ===").arg(name));
   };
   auto fail = [&](const QString& message, const QString& workspace) {
-    if (!sensitivePemPath.isEmpty()) QFile::remove(sensitivePemPath);
-    if (!normalizedCertificatePath.isEmpty()) QFile::remove(normalizedCertificatePath);
-    normalizedCertificatePassword.clear();
-    cleanupKeychain();
+    if (!signingPasswordPath.isEmpty()) QFile::remove(signingPasswordPath);
     emit logLine(QStringLiteral("ERROR: %1").arg(message));
     emit failed(message, workspace);
   };
 
   nextStage(QStringLiteral("Validate inputs"));
+  if (request.targetPlatform == TargetPlatform::All) {
+    fail(QStringLiteral("The All platform selection must be expanded into concrete exports before the pipeline starts."), {});
+    return;
+  }
   if (!targetPlatformSupportedOnHost(request.targetPlatform)) {
     fail(QStringLiteral("This %1 build of PSXRecomp Studio can only create %1 apps.")
            .arg(targetPlatformDisplayName(hostTargetPlatform())), {});
@@ -873,8 +863,8 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("The BIOS is not the supported SCPH1001.BIN revision (SHA-256 mismatch)."), {});
     return;
   }
-  if (!QFileInfo(request.iconPath).isFile()) {
-    fail(QStringLiteral("Select a readable app icon."), {});
+  if (!QFile::exists(iconSourcePath)) {
+    fail(QStringLiteral("The selected app icon is not readable."), {});
     return;
   }
   if (request.patchBiosBranding &&
@@ -896,9 +886,12 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("Select a writable output directory."), {});
     return;
   }
-  if (macosTarget &&
-      (!QFileInfo(request.certificatePath).isFile() || request.certificatePassword.isEmpty())) {
-    fail(QStringLiteral("A password-protected .pfx signing certificate and its password are required."), {});
+  if (macosTarget && hasCertificate != hasCertificatePassword) {
+    fail(QStringLiteral("To sign the macOS app, select both a PFX certificate and its password; leave both empty for an unsigned export."), {});
+    return;
+  }
+  if (signingRequested && !QFileInfo(request.certificatePath).isFile()) {
+    fail(QStringLiteral("The selected PFX signing certificate is not readable."), {});
     return;
   }
   if (!QFileInfo(request.frameworkRoot).isDir() ||
@@ -926,7 +919,7 @@ void PipelineWorker::run(PipelineRequest request) {
   const QString git = findExecutable(QStringLiteral("git"));
   const QString pkgConfig = macosTarget ? findExecutable(QStringLiteral("pkg-config")) : QString();
   const QString nm = macosTarget ? QStringLiteral("/usr/bin/nm") : QString();
-  const QString openssl = macosTarget ? findOpenSsl3() : QString();
+  const QString rcodesign = signingRequested ? findRcodesign() : QString();
   const QString hostClang = hostTargetPlatform() == TargetPlatform::MacOS
     ? QStringLiteral("/usr/bin/clang") : QString();
   const QString hostClangxx = hostTargetPlatform() == TargetPlatform::MacOS
@@ -969,8 +962,10 @@ void PipelineWorker::run(PipelineRequest request) {
     ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-readelf")
                                       : QStringLiteral("readelf")) : QString();
   QString linuxSysroot;
-  if (macosTarget && openssl.isEmpty()) {
-    fail(QStringLiteral("OpenSSL 3 with PKCS#12 legacy-provider support is required. Install openssl@3 with Homebrew or set PSXRECOMP_OPENSSL."), {});
+  if (signingRequested && rcodesign.isEmpty()) {
+    fail(QStringLiteral("Direct PFX signing requires rcodesign. Install apple-codesign, set "
+                        "PSXRECOMP_RCODESIGN, or place rcodesign in the Studio app's "
+                        "Contents/Resources/tools directory."), {});
     return;
   }
   QList<QPair<QString, QString>> requiredTools{
@@ -1010,14 +1005,15 @@ void PipelineWorker::run(PipelineRequest request) {
   }
   if (macosTarget) {
     requiredTools.append({ QStringLiteral("pkg-config"), pkgConfig });
-    requiredTools.append({ QStringLiteral("OpenSSL 3"), openssl });
     requiredTools.append({ QStringLiteral("iconutil"), QStringLiteral("/usr/bin/iconutil") });
-    requiredTools.append({ QStringLiteral("security"), QStringLiteral("/usr/bin/security") });
-    requiredTools.append({ QStringLiteral("codesign"), QStringLiteral("/usr/bin/codesign") });
     requiredTools.append({ QStringLiteral("ditto"), QStringLiteral("/usr/bin/ditto") });
     requiredTools.append({ QStringLiteral("otool"), QStringLiteral("/usr/bin/otool") });
     requiredTools.append({ QStringLiteral("nm"), nm });
     requiredTools.append({ QStringLiteral("install_name_tool"), QStringLiteral("/usr/bin/install_name_tool") });
+  }
+  if (signingRequested) {
+    requiredTools.append({ QStringLiteral("rcodesign (direct PFX signer)"), rcodesign });
+    requiredTools.append({ QStringLiteral("codesign verification tool"), QStringLiteral("/usr/bin/codesign") });
   }
   for (const auto& tool : requiredTools) {
     if (tool.second.isEmpty()) {
@@ -1029,6 +1025,23 @@ void PipelineWorker::run(PipelineRequest request) {
              .arg(tool.first, tool.second), {});
       return;
     }
+  }
+  if (signingRequested) {
+    const QString signerVersionText =
+      versionText(rcodesign, { QStringLiteral("--version") });
+    const auto signerVersion = QRegularExpression(
+      QStringLiteral("(?i)\\brcodesign\\s+(\\d+)\\.(\\d+)\\.(\\d+)"))
+      .match(signerVersionText);
+    const bool supportedSigner = signerVersion.hasMatch() &&
+      (signerVersion.captured(1).toInt() > 0 ||
+       signerVersion.captured(2).toInt() >= 26);
+    if (!supportedSigner) {
+      fail(QStringLiteral("Direct PFX signing requires rcodesign 0.26.0 or newer; found: %1")
+             .arg(signerVersionText.isEmpty() ? QStringLiteral("unknown version")
+                                              : signerVersionText), {});
+      return;
+    }
+    emit logLine(QStringLiteral("Direct PFX signer: %1").arg(signerVersionText));
   }
   if (linuxTarget) {
     const QString compilerTarget =
@@ -1140,55 +1153,55 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(error, workspace);
     return;
   }
-  if (macosTarget) {
-    sensitivePemPath = QDir(workspace).filePath(QStringLiteral("signing-source.pem"));
-    normalizedCertificatePath = QDir(workspace).filePath(QStringLiteral("signing-normalized.p12"));
-    QProcessEnvironment certificateEnvironment = QProcessEnvironment::systemEnvironment();
-    normalizedCertificatePassword =
-      QUuid::createUuid().toString(QUuid::WithoutBraces) +
-      QUuid::createUuid().toString(QUuid::WithoutBraces);
-    certificateEnvironment.insert(QStringLiteral("PSXRECOMP_PFX_PASSWORD"),
-                                  request.certificatePassword);
-    certificateEnvironment.insert(QStringLiteral("PSXRECOMP_NORMALIZED_PFX_PASSWORD"),
-                                  normalizedCertificatePassword);
-    const QStringList extractArgs{
-      QStringLiteral("pkcs12"), QStringLiteral("-in"), request.certificatePath,
-      QStringLiteral("-nodes"), QStringLiteral("-out"), sensitivePemPath,
-      QStringLiteral("-passin"), QStringLiteral("env:PSXRECOMP_PFX_PASSWORD")
-    };
-    bool certificateExtracted = runCommand(
-      openssl, extractArgs, workspace,
-      QStringLiteral("openssl pkcs12 -in <certificate.pfx> -nodes -out <temporary PEM> -passin <redacted>"),
-      60000, nullptr, &certificateEnvironment);
-    if (!certificateExtracted) {
-      QStringList legacyArgs = extractArgs;
-      legacyArgs.insert(1, QStringLiteral("-legacy"));
-      certificateExtracted = runCommand(
-        openssl, legacyArgs, workspace,
-        QStringLiteral("openssl pkcs12 -legacy -in <certificate.pfx> -nodes -out <temporary PEM> -passin <redacted>"),
-        60000, nullptr, &certificateEnvironment);
-    }
-    if (!certificateExtracted) {
-      fail(QStringLiteral("The PFX password was rejected while validating the certificate."), workspace);
+  if (signingRequested) {
+    signingPasswordPath = QDir(workspace).filePath(QStringLiteral("pfx-password.txt"));
+    QFile passwordFile(signingPasswordPath);
+    QByteArray passwordBytes = request.certificatePassword.toUtf8();
+    if (!passwordFile.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        !passwordFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
+        passwordFile.write(passwordBytes) != passwordBytes.size() ||
+        !passwordFile.flush()) {
+      passwordBytes.fill('\0');
+      fail(QStringLiteral("Could not create the owner-only temporary PFX password file: %1")
+             .arg(passwordFile.errorString()), workspace);
       return;
     }
-    QFile::setPermissions(sensitivePemPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    passwordFile.close();
+    passwordBytes.fill('\0');
+    request.certificatePassword.clear();
+    QByteArray certificateOutput;
     if (!runCommand(
-          openssl,
-          { QStringLiteral("pkcs12"), QStringLiteral("-legacy"),
-            QStringLiteral("-export"), QStringLiteral("-in"), sensitivePemPath,
-            QStringLiteral("-out"), normalizedCertificatePath,
-            QStringLiteral("-passout"), QStringLiteral("env:PSXRECOMP_NORMALIZED_PFX_PASSWORD"),
-            QStringLiteral("-name"), QStringLiteral("PSXRecomp Studio Signing") },
+          rcodesign,
+          { QStringLiteral("analyze-certificate"),
+            QStringLiteral("--p12-file"), request.certificatePath,
+            QStringLiteral("--p12-password-file"), signingPasswordPath },
           workspace,
-          QStringLiteral("openssl pkcs12 -legacy -export -in <temporary PEM> -out <normalized P12> -passout <generated>"),
-          60000, nullptr, &certificateEnvironment)) {
-      fail(QStringLiteral("The signing certificate could not be normalized for macOS Security."), workspace);
+          QStringLiteral("rcodesign analyze-certificate --p12-file <certificate.pfx> --p12-password-file <redacted>"),
+          60000, &certificateOutput)) {
+      fail(QStringLiteral("The PFX could not be opened with the supplied password or contains no usable certificate."),
+           workspace);
       return;
     }
-    QFile::remove(sensitivePemPath);
-    sensitivePemPath.clear();
-    emit logLine(QStringLiteral("Signing certificate password validated; PKCS#12 normalized for macOS."));
+    const QString certificateText = QString::fromUtf8(certificateOutput);
+    auto certificateField = [&](const QString& label) {
+      const QRegularExpression pattern(
+        QStringLiteral("(?m)^%1\\s+(.+)$")
+          .arg(QRegularExpression::escape(label)));
+      return pattern.match(certificateText).captured(1).trimmed();
+    };
+    signingIdentityName = certificateField(QStringLiteral("Subject CN:"));
+    signingIdentitySha1 = certificateField(QStringLiteral("SHA-1 fingerprint:"));
+    signingIdentitySha256 = certificateField(QStringLiteral("SHA-256 fingerprint:"));
+    signingTeamId = certificateField(QStringLiteral("Team ID:"));
+    if (signingIdentityName.isEmpty() || signingIdentitySha1.isEmpty() ||
+        signingIdentitySha256.isEmpty()) {
+      fail(QStringLiteral("rcodesign opened the PFX but did not report a complete signing identity."), workspace);
+      return;
+    }
+    emit logLine(QStringLiteral("Direct PFX signing identity: %1").arg(signingIdentityName));
+    emit logLine(QStringLiteral("The certificate remains file-backed; no Keychain import will occur."));
+  } else if (macosTarget) {
+    emit logLine(QStringLiteral("macOS package signing: not requested; the app will be delivered unsigned."));
   } else if (windowsTarget) {
     emit logLine(nativeWindowsTarget
       ? QStringLiteral("Windows package signing: not requested; the Visual Studio 2022 MSVC export is unsigned.")
@@ -1233,8 +1246,8 @@ void PipelineWorker::run(PipelineRequest request) {
   }
 
   QJsonArray discFiles;
-  const QString cueHash = sha256File(disc.cuePath, error);
-  if (cueHash.isEmpty()) {
+  const QString descriptorHash = sha256File(disc.cuePath, error);
+  if (descriptorHash.isEmpty()) {
     fail(error, workspace);
     return;
   }
@@ -1259,8 +1272,10 @@ void PipelineWorker::run(PipelineRequest request) {
   }
   const QJsonObject discManifest{
     { QStringLiteral("schema"), 1 },
-    { QStringLiteral("cue_name"), QFileInfo(disc.cuePath).fileName() },
-    { QStringLiteral("cue_sha256"), cueHash },
+    { QStringLiteral("source_format"), disc.rewrittenCue.isEmpty()
+        ? QStringLiteral("standalone_bin") : QStringLiteral("cue") },
+    { QStringLiteral("descriptor_name"), QFileInfo(disc.cuePath).fileName() },
+    { QStringLiteral("descriptor_sha256"), descriptorHash },
     { QStringLiteral("volume_id"), game.volumeId },
     { QStringLiteral("serial"), game.serial },
     { QStringLiteral("boot_path"), game.bootPath },
@@ -1672,17 +1687,17 @@ void PipelineWorker::run(PipelineRequest request) {
     return;
   }
   if (windowsTarget) {
-    if (!createIco(request.iconPath, iconPath, error) ||
+    if (!createIco(iconSourcePath, iconPath, error) ||
         !writeText(platformMetadataPath, makeWindowsResource(iconPath), error)) {
       fail(error, workspace);
       return;
     }
   } else if (linuxTarget) {
-    if (!createPngIcon(request.iconPath, iconPath, error)) {
+    if (!createPngIcon(iconSourcePath, iconPath, error)) {
       fail(error, workspace);
       return;
     }
-  } else if (!createIcns(request.iconPath, workspace, iconPath, error) ||
+  } else if (!createIcns(iconSourcePath, workspace, iconPath, error) ||
              !writeText(platformMetadataPath,
                         makeInfoPlist(bundleId, bundleName, bundleName), error)) {
     fail(error, workspace);
@@ -1906,15 +1921,16 @@ void PipelineWorker::run(PipelineRequest request) {
       return;
     }
   }
-  const QString packagedCueName = QFileInfo(disc.cuePath).fileName();
-  if (!writeText(QDir(packagedDiscDir).filePath(packagedCueName), disc.rewrittenCue, error)) {
+  const QString packagedDiscName = QFileInfo(disc.cuePath).fileName();
+  if (!disc.rewrittenCue.isEmpty() &&
+      !writeText(QDir(packagedDiscDir).filePath(packagedDiscName), disc.rewrittenCue, error)) {
     fail(error, workspace);
     return;
   }
   const QString finalToml = makeGameToml(
     request, game,
     QStringLiteral("game/%1").arg(game.bootFileName),
-    QStringLiteral("disc/%1").arg(packagedCueName),
+    QStringLiteral("disc/%1").arg(packagedDiscName),
     QStringLiteral("seeds/ghidra_funcs.txt"),
     QStringLiteral("generated"));
   if (!writeText(QDir(resourcesDir).filePath(QStringLiteral("game.toml")), finalToml, error)) {
@@ -1961,6 +1977,10 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("bundle_identifier"), bundleId },
     { QStringLiteral("window_title"), request.windowTitle },
     { QStringLiteral("serial"), game.serial },
+    { QStringLiteral("custom_icon"), !request.iconPath.trimmed().isEmpty() },
+    { QStringLiteral("macos_signed"), signingRequested },
+    { QStringLiteral("macos_signing_method"), signingRequested
+        ? QStringLiteral("rcodesign-direct-pfx") : QStringLiteral("none") },
     { QStringLiteral("source_bios_sha256"), biosHash },
     { QStringLiteral("effective_bios_sha256"), effectiveBiosHash },
     { QStringLiteral("effective_bios_crc32"), QStringLiteral("0x%1").arg(effectiveBiosCrc, 8, 16, QLatin1Char('0')).toUpper() },
@@ -2533,150 +2553,115 @@ void PipelineWorker::run(PipelineRequest request) {
   }
 
 
-  const QString appEntitlementsPath =
-    QDir(workspace).filePath(QStringLiteral("App.entitlements"));
-  if (!writeText(appEntitlementsPath,
-                 QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                                "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-                                "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-                                "<plist version=\"1.0\"><dict>\n"
-                                "<key>com.apple.security.cs.disable-library-validation</key><true/>\n"
-                                "</dict></plist>\n"), error)) {
-    fail(error, workspace);
-    return;
-  }
+  QString stagedExecutableHash;
+  if (signingRequested) {
+    const QString appEntitlementsPath =
+      QDir(workspace).filePath(QStringLiteral("App.entitlements"));
+    if (!writeText(appEntitlementsPath,
+                   QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                                  "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+                                  "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+                                  "<plist version=\"1.0\"><dict>\n"
+                                  "<key>com.apple.security.cs.disable-library-validation</key><true/>\n"
+                                  "</dict></plist>\n"), error)) {
+      fail(error, workspace);
+      return;
+    }
 
-  nextStage(QStringLiteral("Sign and verify app"));
-  temporaryKeychainPath_ = QDir(workspace).filePath(QStringLiteral("signing.keychain-db"));
-  temporaryKeychainPassword_ = QUuid::createUuid().toString(QUuid::WithoutBraces)
-                                   + QUuid::createUuid().toString(QUuid::WithoutBraces);
-  if (!runCommand(QStringLiteral("/usr/bin/security"),
-                  { QStringLiteral("create-keychain"), QStringLiteral("-p"), temporaryKeychainPassword_,
-                    temporaryKeychainPath_ },
-                  workspace, QStringLiteral("security create-keychain <temporary>"), 30000) ||
-      !runCommand(QStringLiteral("/usr/bin/security"),
-                  { QStringLiteral("set-keychain-settings"), QStringLiteral("-lut"), QStringLiteral("21600"),
-                    temporaryKeychainPath_ },
-                  workspace, QStringLiteral("security set-keychain-settings <temporary>"), 30000) ||
-      !runCommand(QStringLiteral("/usr/bin/security"),
-                  { QStringLiteral("unlock-keychain"), QStringLiteral("-p"), temporaryKeychainPassword_,
-                    temporaryKeychainPath_ },
-                  workspace, QStringLiteral("security unlock-keychain <temporary>"), 30000)) {
-    fail(QStringLiteral("The temporary signing keychain could not be created."), workspace);
-    return;
-  }
-  bool certificateImported = runCommand(
-    QStringLiteral("/usr/bin/security"),
-    { QStringLiteral("import"), normalizedCertificatePath,
-      QStringLiteral("-k"), temporaryKeychainPath_,
-      QStringLiteral("-P"), normalizedCertificatePassword,
-      QStringLiteral("-T"), QStringLiteral("/usr/bin/codesign"),
-      QStringLiteral("-T"), QStringLiteral("/usr/bin/security") },
-    workspace,
-    QStringLiteral("security import <normalized certificate> -k <temporary> -P <redacted>"),
-    60000);
-  if (!certificateImported ||
-      !runCommand(QStringLiteral("/usr/bin/security"),
-                  { QStringLiteral("set-key-partition-list"), QStringLiteral("-S"),
-                    QStringLiteral("apple-tool:,apple:"), QStringLiteral("-s"),
-                    QStringLiteral("-k"), temporaryKeychainPassword_, temporaryKeychainPath_ },
-                  workspace, QStringLiteral("security set-key-partition-list <temporary>"), 60000)) {
-    fail(QStringLiteral("The normalized certificate could not be imported into the temporary signing keychain."), workspace);
-    return;
-  }
-  QFile::remove(normalizedCertificatePath);
-  normalizedCertificatePath.clear();
-  normalizedCertificatePassword.clear();
-  QByteArray identityOutput;
-  if (!runCommand(QStringLiteral("/usr/bin/security"),
-                  { QStringLiteral("find-identity"), QStringLiteral("-v"), QStringLiteral("-p"),
-                    QStringLiteral("codesigning"), temporaryKeychainPath_ },
-                  workspace, QStringLiteral("security find-identity -v -p codesigning <temporary>"),
-                  30000, &identityOutput)) {
-    fail(QStringLiteral("The imported PFX contains no usable code-signing identity."), workspace);
-    return;
-  }
-  const QString identityText = QString::fromUtf8(identityOutput);
-  const QRegularExpression identityPattern(
-    QStringLiteral(R"identity(([0-9A-Fa-f]{40})\s+"([^"]+)")identity"));
-  const auto identityMatch = identityPattern.match(identityText);
-  if (!identityMatch.hasMatch()) {
-    fail(QStringLiteral("The imported PFX contains no usable code-signing identity."), workspace);
-    return;
-  }
-  const QString identityHash = identityMatch.captured(1);
-  const QString identityName = identityMatch.captured(2);
-  emit logLine(QStringLiteral("Signing identity: %1").arg(identityName));
-
-  auto signPath = [&](const QString& path, const QString& label, bool appCode) -> bool {
-    runCommand(QStringLiteral("/usr/bin/codesign"),
-               { QStringLiteral("--remove-signature"), path }, workspace,
-               QStringLiteral("codesign --remove-signature %1").arg(label), 30000);
-    QStringList arguments{
-      QStringLiteral("--force"), QStringLiteral("--timestamp"),
-      QStringLiteral("--keychain"), temporaryKeychainPath_,
-      QStringLiteral("--sign"), identityHash
+    nextStage(QStringLiteral("Sign and verify app"));
+    const QJsonObject signingProof{
+      { QStringLiteral("schema"), 2 },
+      { QStringLiteral("signed"), true },
+      { QStringLiteral("signer"), QStringLiteral("rcodesign direct PKCS#12") },
+      { QStringLiteral("identity_name"), signingIdentityName },
+      { QStringLiteral("identity_sha1"), signingIdentitySha1 },
+      { QStringLiteral("identity_sha256"), signingIdentitySha256 },
+      { QStringLiteral("team_id"), signingTeamId },
+      { QStringLiteral("hardened_runtime"), true },
+      { QStringLiteral("disable_library_validation"), true },
+      { QStringLiteral("secure_timestamp"), true },
+      { QStringLiteral("keychain_imported"), false },
+      { QStringLiteral("signing_passes"), 1 },
+      { QStringLiteral("verification_policy"),
+        QStringLiteral("Apple codesign --verify --deep --strict and secure-timestamp inspection must pass before delivery") },
     };
-    if (appCode) {
-      arguments << QStringLiteral("--options") << QStringLiteral("runtime")
-                << QStringLiteral("--entitlements") << appEntitlementsPath;
+    if (!writeJson(QDir(proofDir).filePath(QStringLiteral("signature_verification.json")),
+                   signingProof, error) ||
+        !createProofArchive(proofDir, proofArchive, error)) {
+      fail(error, workspace);
+      return;
     }
-    arguments << path;
-    return runCommand(QStringLiteral("/usr/bin/codesign"), arguments, workspace,
-                      QStringLiteral("codesign %1").arg(label), 5 * 60 * 1000);
-  };
-  QDirIterator binaries(stagedApp, QDir::Files, QDirIterator::Subdirectories);
-  QStringList nestedCode;
-  while (binaries.hasNext()) {
-    const QString path = binaries.next();
-    const QFileInfo info(path);
-    if (info.suffix().compare(QStringLiteral("dylib"), Qt::CaseInsensitive) == 0 ||
-        path.contains(QStringLiteral(".framework/Versions/"))) {
-      nestedCode.append(path);
+
+    const QString bundleExecutable =
+      QStringLiteral("Contents/MacOS/%1").arg(bundleName);
+    if (!QFileInfo(mainExecutable).isExecutable() ||
+        !runCommand(
+          rcodesign,
+          { QStringLiteral("sign"),
+            QStringLiteral("--p12-file"), request.certificatePath,
+            QStringLiteral("--p12-password-file"), signingPasswordPath,
+            QStringLiteral("--code-signature-flags"), QStringLiteral("main:runtime"),
+            QStringLiteral("--entitlements-xml-file"),
+              QStringLiteral("%1:%2").arg(bundleExecutable, appEntitlementsPath),
+            stagedApp },
+          workspace,
+          QStringLiteral("rcodesign sign --p12-file <certificate.pfx> --p12-password-file <redacted> "
+                         "--code-signature-flags main:runtime --entitlements-xml-file <main>:<entitlements> <app>"),
+          10 * 60 * 1000)) {
+      fail(QStringLiteral("The app could not be signed directly with the selected PFX."), workspace);
+      return;
     }
-  }
-  std::sort(nestedCode.begin(), nestedCode.end(), [](const QString& lhs, const QString& rhs) {
-    return lhs.count('/') > rhs.count('/');
-  });
-  for (const auto& path : nestedCode) {
-    if (!signPath(path, QFileInfo(path).fileName(), false)) {
-      fail(QStringLiteral("A nested library could not be code-signed."), workspace);
+    QFile::remove(signingPasswordPath);
+    signingPasswordPath.clear();
+
+    QByteArray signatureDetails;
+    if (!runCommand(QStringLiteral("/usr/bin/codesign"),
+                    { QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"),
+                      QStringLiteral("--verbose=4"), stagedApp },
+                    workspace, QStringLiteral("codesign --verify --deep --strict <signed app>"), 60000) ||
+        !runCommand(QStringLiteral("/usr/bin/codesign"),
+                    { QStringLiteral("-d"), QStringLiteral("--verbose=4"), stagedApp },
+                    workspace, QStringLiteral("codesign -d --verbose=4 <signed app>"), 60000,
+                    &signatureDetails) ||
+        !QRegularExpression(QStringLiteral("(?m)^Timestamp=.+$"))
+           .match(QString::fromUtf8(signatureDetails)).hasMatch()) {
+      fail(QStringLiteral("The staged app did not pass signature or secure-timestamp verification."), workspace);
+      return;
+    }
+    stagedExecutableHash = sha256File(mainExecutable, error);
+    if (stagedExecutableHash.isEmpty()) {
+      fail(error, workspace);
+      return;
+    }
+  } else {
+    nextStage(QStringLiteral("Verify unsigned app"));
+    stagedExecutableHash = sha256File(mainExecutable, error);
+    const QJsonObject signingProof{
+      { QStringLiteral("schema"), 2 },
+      { QStringLiteral("signed"), false },
+      { QStringLiteral("signer"), QStringLiteral("none") },
+      { QStringLiteral("executable_sha256"), stagedExecutableHash },
+      { QStringLiteral("verification_policy"),
+        QStringLiteral("The delivered executable and proof archive must match the verified staging payload") },
+    };
+    if (stagedExecutableHash.isEmpty() ||
+        !writeJson(QDir(proofDir).filePath(QStringLiteral("signature_verification.json")),
+                   signingProof, error) ||
+        !createProofArchive(proofDir, proofArchive, error)) {
+      fail(error.isEmpty() ? QStringLiteral("The unsigned app could not be verified.") : error,
+           workspace);
       return;
     }
   }
-  if (!QFileInfo(mainExecutable).isExecutable() || !signPath(mainExecutable, QStringLiteral("main executable"), true) ||
-      !signPath(stagedApp, QStringLiteral("app bundle (pass 1)"), true) ||
-      !runCommand(QStringLiteral("/usr/bin/codesign"),
-                  { QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"),
-                    QStringLiteral("--verbose=4"), stagedApp },
-                  workspace, QStringLiteral("codesign --verify --deep --strict <app>"), 60000)) {
-    fail(QStringLiteral("The staged app did not pass code-signature verification."), workspace);
+
+  nextStage(signingRequested
+              ? QStringLiteral("Deliver signed app")
+              : QStringLiteral("Deliver unsigned app"));
+  const QString stagedProofHash = sha256File(proofArchive, error);
+  if (stagedProofHash.isEmpty()) {
+    fail(error, workspace);
     return;
   }
-
-  const QJsonObject signingProof{
-    { QStringLiteral("schema"), 1 },
-    { QStringLiteral("identity_sha1"), identityHash },
-    { QStringLiteral("identity_name"), identityName },
-    { QStringLiteral("hardened_runtime"), true },
-    { QStringLiteral("disable_library_validation"), true },
-    { QStringLiteral("secure_timestamp"), true },
-    { QStringLiteral("keychain_independent_verification"), true },
-    { QStringLiteral("verification"), QStringLiteral("codesign --verify --deep --strict passed before final seal and after temporary-keychain removal") },
-  };
-  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("signature_verification.json")),
-                 signingProof, error) ||
-      !createProofArchive(proofDir, proofArchive, error) ||
-      !signPath(stagedApp, QStringLiteral("app bundle (final seal)"), true) ||
-      !runCommand(QStringLiteral("/usr/bin/codesign"),
-                  { QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"),
-                    QStringLiteral("--verbose=4"), stagedApp },
-                  workspace, QStringLiteral("codesign --verify --deep --strict <final app>"), 60000)) {
-    fail(error.isEmpty() ? QStringLiteral("The final app seal could not be verified.") : error, workspace);
-    return;
-  }
-
-  nextStage(QStringLiteral("Deliver signed app"));
   const QString outputApp = QDir(request.outputDirectory).filePath(bundleName + QStringLiteral(".app"));
   const QString deliveryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
   const QString deliveryApp = QDir(request.outputDirectory).filePath(
@@ -2702,21 +2687,46 @@ void PipelineWorker::run(PipelineRequest request) {
     return runCommand(QStringLiteral("/bin/mv"), { source, destination }, workspace,
                       label, 10 * 60 * 1000);
   };
+  auto verifyPackagedApp = [&](const QString& appPath, const QString& label) -> bool {
+    if (signingRequested) {
+      return runCommand(QStringLiteral("/usr/bin/codesign"),
+                        { QStringLiteral("--verify"), QStringLiteral("--deep"),
+                          QStringLiteral("--strict"), QStringLiteral("--verbose=4"),
+                          appPath },
+                        workspace,
+                        QStringLiteral("codesign --verify --deep --strict %1").arg(label),
+                        60000);
+    }
+    const QString executable =
+      QDir(appPath).filePath(QStringLiteral("Contents/MacOS/%1").arg(bundleName));
+    const QString packagedProof =
+      QDir(appPath).filePath(QStringLiteral("Contents/Resources/PSXRecomp-Proof.zip"));
+    QString verificationError;
+    const bool verified = sha256File(executable, verificationError) == stagedExecutableHash &&
+      sha256File(packagedProof, verificationError) == stagedProofHash;
+    if (!verified) {
+      emit logLine(verificationError.isEmpty()
+                     ? QStringLiteral("Unsigned payload verification failed for %1.").arg(label)
+                     : verificationError);
+    }
+    return verified;
+  };
 
   removeTree(deliveryApp, false);
   removeTree(backupContents, false);
   removeTree(failedContents, false);
   if (!runCommand(QStringLiteral("/usr/bin/ditto"),
                   { stagedApp, deliveryApp }, workspace,
-                  QStringLiteral("ditto <signed app> <delivery staging app>"),
+                  signingRequested
+                    ? QStringLiteral("ditto <signed app> <delivery staging app>")
+                    : QStringLiteral("ditto <unsigned app> <delivery staging app>"),
                   60 * 60 * 1000) ||
-      !runCommand(QStringLiteral("/usr/bin/codesign"),
-                  { QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"),
-                    QStringLiteral("--verbose=4"), deliveryApp },
-                  workspace, QStringLiteral("codesign --verify --deep --strict <delivery staging app>"),
-                  60000)) {
+      !verifyPackagedApp(deliveryApp, QStringLiteral("<delivery staging app>"))) {
     removeTree(deliveryApp, false);
-    fail(QStringLiteral("The signed app could not be staged and verified in the output directory."), workspace);
+    fail(signingRequested
+           ? QStringLiteral("The signed app could not be staged and verified in the output directory.")
+           : QStringLiteral("The unsigned app could not be staged and hash-verified in the output directory."),
+         workspace);
     return;
   }
 
@@ -2754,11 +2764,7 @@ void PipelineWorker::run(PipelineRequest request) {
       fail(QStringLiteral("Could not atomically replace the existing app contents: %1").arg(outputApp), workspace);
       return;
     }
-    if (!runCommand(QStringLiteral("/usr/bin/codesign"),
-                    { QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"),
-                      QStringLiteral("--verbose=4"), outputApp },
-                    workspace, QStringLiteral("codesign --verify --deep --strict <contents-swapped app>"),
-                    60000)) {
+    if (!verifyPackagedApp(outputApp, QStringLiteral("<contents-swapped app>"))) {
       const bool quarantined = moveTree(
         activeContents, failedContents,
         QStringLiteral("mv <failed Contents> <sibling diagnostic Contents>"));
@@ -2783,16 +2789,16 @@ void PipelineWorker::run(PipelineRequest request) {
       emit logLine(QStringLiteral("Warning: delivery staging app remains at %1").arg(deliveryApp));
     removeTree(failedContents, false);
   }
-  cleanupKeychain();
-  emit logLine(QStringLiteral("Temporary signing keychain removed; verifying delivered app independently."));
-  if (!runCommand(QStringLiteral("/usr/bin/codesign"),
-                  { QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"),
-                    QStringLiteral("--verbose=4"), outputApp },
-                  workspace, QStringLiteral("codesign --verify --deep --strict <delivered app after keychain removal>"), 60000)) {
-    fail(QStringLiteral("The delivered app signature depends on the temporary keychain or is otherwise invalid."), workspace);
+  if (!verifyPackagedApp(outputApp, QStringLiteral("<delivered app>"))) {
+    fail(signingRequested
+           ? QStringLiteral("The delivered app signature is invalid.")
+           : QStringLiteral("The delivered unsigned app does not match the verified staging payload."),
+         workspace);
     return;
   }
-  emit logLine(QStringLiteral("Signed app created: %1").arg(outputApp));
+  emit logLine(QStringLiteral("%1 app created: %2")
+                 .arg(signingRequested ? QStringLiteral("Signed") : QStringLiteral("Unsigned"),
+                      outputApp));
   QDir(workspace).removeRecursively();
   emit completed(outputApp);
 }

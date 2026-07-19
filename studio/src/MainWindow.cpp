@@ -1,9 +1,11 @@
 #include "MainWindow.h"
 
+#include "DiscCatalog.h"
 #include "PipelineSupport.h"
 #include "PipelineWorker.h"
 
 #include <QApplication>
+#include <QAbstractItemView>
 #include <QColor>
 #include <QCheckBox>
 #include <QComboBox>
@@ -21,8 +23,11 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QListWidgetItem>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -31,11 +36,13 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSet>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QThread>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QUuid>
 
 #include <algorithm>
 
@@ -182,6 +189,7 @@ MainWindow::MainWindow(QWidget* parent)
   platformLabel->setMinimumWidth(142);
   platformCombo_ = new QComboBox(platformRow);
 #if defined(Q_OS_MACOS)
+  platformCombo_->addItem(QStringLiteral("All"), targetPlatformKey(TargetPlatform::All));
   platformCombo_->addItem(QStringLiteral("macOS"), targetPlatformKey(TargetPlatform::MacOS));
   platformCombo_->addItem(QStringLiteral("Windows"), targetPlatformKey(TargetPlatform::Windows));
   platformCombo_->addItem(QStringLiteral("Linux"), targetPlatformKey(TargetPlatform::Linux));
@@ -197,12 +205,40 @@ MainWindow::MainWindow(QWidget* parent)
   inputLayout->addWidget(platformRow);
   platformRow->setVisible(hostCanSelectTargetPlatform());
 
+  batchCheck_ = new QCheckBox(QStringLiteral("Batch"), inputCard_);
+  batchCheck_->setToolTip(
+    QStringLiteral("Scan a directory recursively and queue one export for every PlayStation CUE or standalone BIN image."));
+  inputLayout->addWidget(batchCheck_);
+
   discEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("Disc BIN/CUE"),
                          QStringLiteral("One .cue and all referenced .bin files"), SLOT(chooseDisc()));
+  batchDirectoryEdit_ = addPathRow(
+    inputCard_, inputLayout, QStringLiteral("Game directory"),
+    QStringLiteral("Folder containing PlayStation BIN/CUE files"), SLOT(chooseBatchDirectory()));
+  batchSummaryLabel_ = new QLabel(
+    QStringLiteral("Choose a directory to create the game list. Icons are optional."), inputCard_);
+  batchSummaryLabel_->setWordWrap(true);
+  batchSummaryLabel_->setObjectName(QStringLiteral("secondaryText"));
+  inputLayout->addWidget(batchSummaryLabel_);
+  batchList_ = new QListWidget(inputCard_);
+  batchList_->setObjectName(QStringLiteral("batchGameList"));
+  batchList_->setFrameShape(QFrame::NoFrame);
+  batchList_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  batchList_->setSelectionMode(QAbstractItemView::NoSelection);
+  batchList_->setSpacing(6);
+  batchList_->setMinimumHeight(190);
+  batchList_->setMaximumHeight(270);
+  inputLayout->addWidget(batchList_);
   biosEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("PlayStation BIOS"),
                          QStringLiteral("Canonical SCPH1001.BIN only"), SLOT(chooseBios()));
   iconEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("App icon"),
-                         QStringLiteral("PNG, SVG, or ICNS"), SLOT(chooseIcon()));
+                         QStringLiteral("Optional PNG, SVG, or ICNS"), SLOT(chooseIcon()));
+  if (auto* iconRow = qobject_cast<QHBoxLayout*>(iconEdit_->parentWidget()->layout())) {
+    auto* clearIcon = new QPushButton(QStringLiteral("Clear"), iconEdit_->parentWidget());
+    clearIcon->setToolTip(QStringLiteral("Use the built-in PSXRecomp icon"));
+    iconRow->insertWidget(std::max(0, iconRow->count() - 1), clearIcon);
+    connect(clearIcon, &QPushButton::clicked, iconEdit_, &QLineEdit::clear);
+  }
 
   skipBiosBoot_ = new QCheckBox(
     QStringLiteral("Skip BIOS intro and boot directly to the game"), inputCard_);
@@ -262,6 +298,10 @@ MainWindow::MainWindow(QWidget* parent)
   toolsLayout->addWidget(makeSectionTitle(QStringLiteral("Analysis and export tools"), toolsCard_));
   ghidraEdit_ = addPathRow(toolsCard_, toolsLayout, QStringLiteral("Ghidra home"),
                            QStringLiteral("Ghidra 11.3.2 installation"), SLOT(chooseGhidraHome()));
+  signingEnabled_ = new QCheckBox(QStringLiteral("Sign macOS app with PFX"), toolsCard_);
+  signingEnabled_->setToolTip(
+    QStringLiteral("Optional. The PFX is read directly and is never imported into a Keychain."));
+  toolsLayout->addWidget(signingEnabled_);
   certificateEdit_ = addPathRow(toolsCard_, toolsLayout, QStringLiteral("Certificate"),
                                 QStringLiteral("Password-protected .pfx or .p12"), SLOT(chooseCertificate()));
 
@@ -278,7 +318,7 @@ MainWindow::MainWindow(QWidget* parent)
   passwordLayout->addWidget(certificatePasswordEdit_, 1);
   toolsLayout->addWidget(passwordRow);
   signingNote_ = new QLabel(
-    QStringLiteral("The certificate is imported into an isolated temporary keychain and removed after verification."),
+    QStringLiteral("Signing is optional. Direct PFX signing never imports the identity into a Keychain."),
     toolsCard_);
   signingNote_->setWordWrap(true);
   signingNote_->setObjectName(QStringLiteral("secondaryText"));
@@ -378,7 +418,13 @@ MainWindow::MainWindow(QWidget* parent)
   connect(this, &MainWindow::runRequested, worker_, &PipelineWorker::run, Qt::QueuedConnection);
   connect(worker_, &PipelineWorker::stageChanged, this,
           [this](const QString& name, int index, int total) {
-            stageLabel_->setText(QStringLiteral("%1  ·  Step %2 of %3").arg(name).arg(index).arg(total));
+            const QString exportPrefix = totalRequestCount_ > 1
+              ? QStringLiteral("Export %1 of %2  ·  ")
+                  .arg(activeRequestIndex_).arg(totalRequestCount_)
+              : QString();
+            stageLabel_->setText(
+              QStringLiteral("%1%2  ·  Step %3 of %4")
+                .arg(exportPrefix, name).arg(index).arg(total));
           });
   connect(worker_, &PipelineWorker::logLine, this, [this](const QString& line) {
     logView_->appendPlainText(line);
@@ -386,6 +432,7 @@ MainWindow::MainWindow(QWidget* parent)
   connect(worker_, &PipelineWorker::completed, this, &MainWindow::onCompleted);
   connect(worker_, &PipelineWorker::failed, this, &MainWindow::onFailed);
   connect(worker_, &PipelineWorker::cancelled, this, [this]() {
+    pendingRequests_.clear();
     stageLabel_->setText(QStringLiteral("Cancelled"));
     logView_->appendPlainText(QStringLiteral("Build cancelled."));
     setBusy(false);
@@ -398,6 +445,8 @@ MainWindow::MainWindow(QWidget* parent)
   connect(themeButton_, &QPushButton::clicked, this, &MainWindow::toggleTheme);
   connect(platformCombo_, &QComboBox::currentIndexChanged,
           this, &MainWindow::updatePlatformControls);
+  connect(batchCheck_, &QCheckBox::toggled, this, &MainWindow::updateBatchMode);
+  connect(signingEnabled_, &QCheckBox::toggled, this, &MainWindow::updatePlatformControls);
   connect(biosPatchEnabled_, &QCheckBox::toggled, this, &MainWindow::updateBiosPatchControls);
   connect(skipBiosBoot_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
   connect(macosGipGamepad_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
@@ -406,13 +455,14 @@ MainWindow::MainWindow(QWidget* parent)
             QSettings().setValue(QStringLiteral("app/theme"), themeManager_->currentTheme());
             applyTheme();
           });
-  for (auto* edit : { discEdit_, biosEdit_, iconEdit_, titleEdit_, outputEdit_,
+  for (auto* edit : { discEdit_, batchDirectoryEdit_, biosEdit_, iconEdit_, titleEdit_, outputEdit_,
                       certificateEdit_, certificatePasswordEdit_, ghidraEdit_,
                       biosInitialSplashEdit_, biosHandoffImageEdit_ }) {
     connect(edit, &QLineEdit::textChanged, this, &MainWindow::updateBuildButton);
   }
 
   loadSettings();
+  updateBatchMode();
   updatePlatformControls();
   updateBiosPatchControls();
   applyTheme();
@@ -460,12 +510,12 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
   reflowForms();
 }
 
-void MainWindow::reflowForms() {
+void MainWindow::reflowForms(bool force) {
   if (!formsLayout_ || !inputCard_ || !toolsCard_ || !brandingCard_ || !formsContainer_) {
     return;
   }
   const bool columns = width() >= 1040;
-  if (formsLayout_->count() > 0 && columns == formsAreColumns_) {
+  if (!force && formsLayout_->count() > 0 && columns == formsAreColumns_) {
     return;
   }
 
@@ -481,7 +531,7 @@ void MainWindow::reflowForms() {
     formsContainer_->setMinimumHeight(std::max(inputCard_->sizeHint().height(),
                                                toolsCard_->sizeHint().height()) +
                                       brandingCard_->sizeHint().height() + 14);
-    formsScroll_->setMaximumHeight(455);
+    formsScroll_->setMaximumHeight(batchCheck_ && batchCheck_->isChecked() ? 540 : 455);
   } else {
     formsLayout_->addWidget(inputCard_, 0, 0);
     formsLayout_->addWidget(toolsCard_, 1, 0);
@@ -491,7 +541,7 @@ void MainWindow::reflowForms() {
     formsContainer_->setMinimumHeight(inputCard_->sizeHint().height() +
                                       toolsCard_->sizeHint().height() +
                                       brandingCard_->sizeHint().height() + 28);
-    formsScroll_->setMaximumHeight(390);
+    formsScroll_->setMaximumHeight(batchCheck_ && batchCheck_->isChecked() ? 500 : 390);
   }
   formsAreColumns_ = columns;
   formsContainer_->updateGeometry();
@@ -529,6 +579,11 @@ void MainWindow::applyTheme() {
                                             theme.borderColor.name(QColor::HexArgb)));
   logView_->setStyleSheet(QStringLiteral(
     "QPlainTextEdit { background-color: %1; border: 1px solid %2; border-radius: 7px; padding: 7px; }")
+    .arg(theme.backgroundColorWorkspace.name(QColor::HexArgb),
+         theme.borderColor.name(QColor::HexArgb)));
+  batchList_->setStyleSheet(QStringLiteral(
+    "QListWidget#batchGameList { background: transparent; border: 0; } "
+    "QFrame#batchGameRow { background-color: %1; border: 1px solid %2; border-radius: 8px; }")
     .arg(theme.backgroundColorWorkspace.name(QColor::HexArgb),
          theme.borderColor.name(QColor::HexArgb)));
   const QString secondary = theme.secondaryAlternativeColor.name(QColor::HexArgb);
@@ -573,11 +628,14 @@ void MainWindow::loadSettings() {
     : targetPlatformKey(hostTargetPlatform());
   const int platformIndex = platformCombo_->findData(platformKey);
   platformCombo_->setCurrentIndex(platformIndex >= 0 ? platformIndex : 0);
+  batchCheck_->setChecked(settings.value(QStringLiteral("batch/enabled"), false).toBool());
+  batchDirectoryEdit_->setText(settings.value(QStringLiteral("batch/directory")).toString());
   biosEdit_->setText(settings.value(QStringLiteral("paths/bios")).toString());
   iconEdit_->setText(settings.value(QStringLiteral("paths/icon")).toString());
   outputEdit_->setText(settings.value(QStringLiteral("paths/output"),
                                       QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)).toString());
   certificateEdit_->setText(settings.value(QStringLiteral("paths/certificate")).toString());
+  signingEnabled_->setChecked(settings.value(QStringLiteral("signing/enabled"), false).toBool());
   ghidraEdit_->setText(settings.value(QStringLiteral("paths/ghidra"), detectGhidraHome()).toString());
   titleEdit_->setText(settings.value(QStringLiteral("app/window_title")).toString());
   biosPatchEnabled_->setChecked(settings.value(QStringLiteral("bios_patch/enabled"), false).toBool());
@@ -595,21 +653,21 @@ void MainWindow::loadSettings() {
   macosGipGamepad_->setChecked(
     settings.value(QStringLiteral("runtime/macos_gip_gamepad"), true).toBool());
 
-  if (certificateEdit_->text().isEmpty()) {
-    const QString candidate = QDir::home().filePath(QStringLiteral("Projects/neogeo-hub/certificate.pfx"));
-    if (QFileInfo(candidate).isFile()) {
-      certificateEdit_->setText(candidate);
-    }
+  if (batchCheck_->isChecked() && QFileInfo(batchDirectoryEdit_->text()).isDir()) {
+    populateBatchDirectory(batchDirectoryEdit_->text(), false);
   }
 }
 
 void MainWindow::saveSettings() const {
   QSettings settings;
   settings.setValue(QStringLiteral("app/platform"), platformCombo_->currentData().toString());
+  settings.setValue(QStringLiteral("batch/enabled"), batchCheck_->isChecked());
+  settings.setValue(QStringLiteral("batch/directory"), batchDirectoryEdit_->text());
   settings.setValue(QStringLiteral("paths/bios"), biosEdit_->text());
   settings.setValue(QStringLiteral("paths/icon"), iconEdit_->text());
   settings.setValue(QStringLiteral("paths/output"), outputEdit_->text());
   settings.setValue(QStringLiteral("paths/certificate"), certificateEdit_->text());
+  settings.setValue(QStringLiteral("signing/enabled"), signingEnabled_->isChecked());
   settings.setValue(QStringLiteral("paths/ghidra"), ghidraEdit_->text());
   settings.setValue(QStringLiteral("app/window_title"), titleEdit_->text());
   settings.setValue(QStringLiteral("bios_patch/enabled"), biosPatchEnabled_->isChecked());
@@ -645,16 +703,206 @@ void MainWindow::chooseDisc() {
       bins.append(path);
     }
   }
-  if (cue.isEmpty()) {
+  QString sourcePath = cue;
+  if (sourcePath.isEmpty() && bins.size() == 1) {
+    sourcePath = bins.constFirst();
+  } else if (sourcePath.isEmpty()) {
     QMessageBox::warning(this, QStringLiteral("Disc selection"),
-                         QStringLiteral("The selection must include one .cue file."));
+                         QStringLiteral("Select one CUE set or one standalone BIN image."));
     return;
   }
-  discEdit_->setText(cue);
+  discEdit_->setText(sourcePath);
   selectedBins_ = bins;
   if (titleEdit_->text().isEmpty()) {
-    titleEdit_->setText(QFileInfo(cue).completeBaseName() + QStringLiteral(" Recompiled"));
+    titleEdit_->setText(QFileInfo(sourcePath).completeBaseName() + QStringLiteral(" Recompiled"));
   }
+}
+
+void MainWindow::chooseBatchDirectory() {
+  const QString path = QFileDialog::getExistingDirectory(
+    this, QStringLiteral("Select PlayStation game directory"),
+    batchDirectoryEdit_->text().isEmpty() ? QDir::homePath()
+                                          : batchDirectoryEdit_->text());
+  if (!path.isEmpty()) {
+    populateBatchDirectory(path, true);
+  }
+}
+
+void MainWindow::populateBatchDirectory(const QString& path, bool showDialogs) {
+  QList<DiscCatalogEntry> catalog;
+  QStringList warnings;
+  QString error;
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  const bool scanned = DiscCatalog::scanDirectory(path, catalog, warnings, error);
+  QApplication::restoreOverrideCursor();
+  if (!scanned) {
+    batchEntries_.clear();
+    batchDirectoryEdit_->setText(path);
+    batchSummaryLabel_->setText(error);
+    rebuildBatchList();
+    if (showDialogs) {
+      QMessageBox::warning(this, QStringLiteral("No PlayStation games found"), error);
+    }
+    updateBuildButton();
+    return;
+  }
+
+  batchDirectoryEdit_->setText(path);
+  batchEntries_.clear();
+  for (const auto& disc : catalog) {
+    batchEntries_.append({
+      QUuid::createUuid().toString(QUuid::WithoutBraces),
+      disc.sourcePath,
+      disc.selectedBinPaths,
+      disc.suggestedTitle,
+      {},
+      disc.serial,
+      disc.volumeId,
+    });
+  }
+  batchSummaryLabel_->setText(
+    warnings.isEmpty()
+      ? QStringLiteral("%1 game%2 found. Edit names and choose optional icons below.")
+          .arg(batchEntries_.size())
+          .arg(batchEntries_.size() == 1 ? QString() : QStringLiteral("s"))
+      : QStringLiteral("%1 game%2 found; %3 unsupported item%4 skipped.")
+          .arg(batchEntries_.size())
+          .arg(batchEntries_.size() == 1 ? QString() : QStringLiteral("s"))
+          .arg(warnings.size())
+          .arg(warnings.size() == 1 ? QString() : QStringLiteral("s")));
+  rebuildBatchList();
+  if (showDialogs && !warnings.isEmpty()) {
+    QMessageBox warning(QMessageBox::Warning, QStringLiteral("Some files were skipped"),
+                        QStringLiteral("Studio found %1 buildable game%2 and skipped %3 unsupported item%4.")
+                          .arg(batchEntries_.size())
+                          .arg(batchEntries_.size() == 1 ? QString() : QStringLiteral("s"))
+                          .arg(warnings.size())
+                          .arg(warnings.size() == 1 ? QString() : QStringLiteral("s")),
+                        QMessageBox::Ok, this);
+    warning.setDetailedText(warnings.join(QStringLiteral("\n")));
+    warning.exec();
+  }
+  updateBuildButton();
+  reflowForms(true);
+}
+
+void MainWindow::rebuildBatchList() {
+  batchList_->clear();
+  const QIcon fallbackIcon(QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg"));
+  for (const auto& entry : batchEntries_) {
+    auto* item = new QListWidgetItem(batchList_);
+    item->setSizeHint(QSize(0, 78));
+
+    auto* row = new QFrame(batchList_);
+    row->setObjectName(QStringLiteral("batchGameRow"));
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(10, 8, 10, 8);
+    layout->setSpacing(10);
+
+    auto* thumbnail = new QLabel(row);
+    thumbnail->setFixedSize(52, 52);
+    thumbnail->setAlignment(Qt::AlignCenter);
+    const QIcon selectedIcon = entry.iconPath.isEmpty() ? fallbackIcon : QIcon(entry.iconPath);
+    thumbnail->setPixmap(selectedIcon.pixmap(48, 48));
+    thumbnail->setToolTip(entry.iconPath.isEmpty()
+      ? QStringLiteral("Built-in icon") : entry.iconPath);
+    layout->addWidget(thumbnail);
+
+    auto* text = new QWidget(row);
+    auto* textLayout = new QVBoxLayout(text);
+    textLayout->setContentsMargins(0, 0, 0, 0);
+    textLayout->setSpacing(3);
+    auto* nameEdit = new QLineEdit(entry.title, text);
+    nameEdit->setPlaceholderText(QStringLiteral("Game name"));
+    QStringList details;
+    if (!entry.serial.isEmpty()) details.append(entry.serial);
+    if (!entry.volumeId.isEmpty() &&
+        entry.volumeId.compare(entry.serial, Qt::CaseInsensitive) != 0) {
+      details.append(entry.volumeId);
+    }
+    details.append(QFileInfo(entry.sourcePath).fileName());
+    auto* detailLabel = new QLabel(details.join(QStringLiteral("  ·  ")), text);
+    detailLabel->setObjectName(QStringLiteral("secondaryText"));
+    detailLabel->setToolTip(entry.sourcePath);
+    textLayout->addWidget(nameEdit);
+    textLayout->addWidget(detailLabel);
+    layout->addWidget(text, 1);
+
+    auto* iconButton = new QPushButton(
+      entry.iconPath.isEmpty() ? QStringLiteral("Choose Icon…") : QStringLiteral("Change Icon…"), row);
+    iconButton->setToolTip(QStringLiteral("Optional PNG, SVG, or ICNS icon"));
+    layout->addWidget(iconButton);
+    QPushButton* clearButton = nullptr;
+    if (!entry.iconPath.isEmpty()) {
+      clearButton = new QPushButton(QStringLiteral("Use Default"), row);
+      layout->addWidget(clearButton);
+    }
+    auto* removeButton = new QPushButton(QStringLiteral("Remove"), row);
+    layout->addWidget(removeButton);
+
+    const QString id = entry.id;
+    connect(nameEdit, &QLineEdit::textChanged, this, [this, id](const QString& value) {
+      for (auto& candidate : batchEntries_) {
+        if (candidate.id == id) {
+          candidate.title = value;
+          break;
+        }
+      }
+      updateBuildButton();
+    });
+    connect(iconButton, &QPushButton::clicked, this, [this, id]() { chooseBatchIcon(id); });
+    if (clearButton) {
+      connect(clearButton, &QPushButton::clicked, this, [this, id]() { clearBatchIcon(id); });
+    }
+    connect(removeButton, &QPushButton::clicked, this, [this, id]() { removeBatchEntry(id); });
+    batchList_->setItemWidget(item, row);
+  }
+  applyTheme();
+}
+
+void MainWindow::chooseBatchIcon(const QString& id) {
+  for (auto& entry : batchEntries_) {
+    if (entry.id != id) {
+      continue;
+    }
+    const QString start = entry.iconPath.isEmpty()
+      ? QFileInfo(entry.sourcePath).absolutePath()
+      : QFileInfo(entry.iconPath).absolutePath();
+    const QString path = QFileDialog::getOpenFileName(
+      this, QStringLiteral("Select icon for %1").arg(entry.title), start,
+      QStringLiteral("App icons (*.png *.svg *.icns);;All files (*)"));
+    if (!path.isEmpty()) {
+      entry.iconPath = path;
+      rebuildBatchList();
+      updateBuildButton();
+    }
+    return;
+  }
+}
+
+void MainWindow::clearBatchIcon(const QString& id) {
+  for (auto& entry : batchEntries_) {
+    if (entry.id == id) {
+      entry.iconPath.clear();
+      rebuildBatchList();
+      updateBuildButton();
+      return;
+    }
+  }
+}
+
+void MainWindow::removeBatchEntry(const QString& id) {
+  for (qsizetype index = 0; index < batchEntries_.size(); ++index) {
+    if (batchEntries_.at(index).id == id) {
+      batchEntries_.removeAt(index);
+      break;
+    }
+  }
+  batchSummaryLabel_->setText(QStringLiteral("%1 game%2 queued. Icons are optional.")
+    .arg(batchEntries_.size())
+    .arg(batchEntries_.size() == 1 ? QString() : QStringLiteral("s")));
+  rebuildBatchList();
+  updateBuildButton();
 }
 
 void MainWindow::chooseBiosInitialSplash() {
@@ -675,11 +923,23 @@ void MainWindow::chooseBiosHandoffImage() {
 
 void MainWindow::updateBiosPatchControls() {
   const bool enabled = biosPatchEnabled_ && biosPatchEnabled_->isChecked();
-  if (biosInitialSplashEdit_) biosInitialSplashEdit_->setEnabled(enabled);
-  if (biosHandoffImageEdit_) biosHandoffImageEdit_->setEnabled(enabled);
+  if (biosInitialSplashEdit_) biosInitialSplashEdit_->parentWidget()->setEnabled(enabled);
+  if (biosHandoffImageEdit_) biosHandoffImageEdit_->parentWidget()->setEnabled(enabled);
   if (biosMuteAudio_) biosMuteAudio_->setEnabled(enabled);
   if (biosRemovePsGlyph_) biosRemovePsGlyph_->setEnabled(enabled);
   updateBuildButton();
+}
+
+void MainWindow::updateBatchMode() {
+  const bool batch = batchCheck_->isChecked();
+  discEdit_->parentWidget()->setVisible(!batch);
+  iconEdit_->parentWidget()->setVisible(!batch);
+  titleEdit_->parentWidget()->setVisible(!batch);
+  batchDirectoryEdit_->parentWidget()->setVisible(batch);
+  batchSummaryLabel_->setVisible(batch);
+  batchList_->setVisible(batch);
+  updatePlatformControls();
+  reflowForms(true);
 }
 
 void MainWindow::chooseBios() {
@@ -752,8 +1012,10 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   request.iconPath = iconEdit_->text();
   request.windowTitle = titleEdit_->text();
   request.outputDirectory = outputEdit_->text();
-  request.certificatePath = certificateEdit_->text();
-  request.certificatePassword = certificatePasswordEdit_->text();
+  if (signingEnabled_->isChecked()) {
+    request.certificatePath = certificateEdit_->text();
+    request.certificatePassword = certificatePasswordEdit_->text();
+  }
   request.ghidraHome = ghidraEdit_->text();
   request.frameworkRoot = QString::fromUtf8(PSXRECOMP_SOURCE_ROOT);
   request.patchBiosBranding = biosPatchEnabled_->isChecked();
@@ -768,6 +1030,59 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   return request;
 }
 
+QList<PipelineRequest> MainWindow::requestsFromUi(bool overwrite) const {
+  QList<PipelineRequest> requests;
+  const PipelineRequest base = requestFromUi(overwrite);
+  const auto targets = concreteTargetPlatforms(base.targetPlatform);
+  if (batchCheck_->isChecked()) {
+    for (const auto& entry : batchEntries_) {
+      for (const auto target : targets) {
+        PipelineRequest request = base;
+        request.targetPlatform = target;
+        if (target != TargetPlatform::MacOS) {
+          request.certificatePath.clear();
+          request.certificatePassword.clear();
+        }
+        request.cuePath = entry.sourcePath;
+        request.selectedBinPaths = entry.selectedBinPaths;
+        request.iconPath = entry.iconPath;
+        request.windowTitle = entry.title.trimmed();
+        requests.append(request);
+      }
+    }
+  } else {
+    for (const auto target : targets) {
+      PipelineRequest request = base;
+      request.targetPlatform = target;
+      if (target != TargetPlatform::MacOS) {
+        request.certificatePath.clear();
+        request.certificatePassword.clear();
+      }
+      requests.append(request);
+    }
+  }
+  return requests;
+}
+
+QString MainWindow::outputPathForRequest(const PipelineRequest& request) const {
+  const QString bundleName = cleanBundleName(request.windowTitle);
+  QString outputName;
+  switch (request.targetPlatform) {
+    case TargetPlatform::Windows:
+      outputName = bundleName + QStringLiteral("-Windows");
+      break;
+    case TargetPlatform::Linux:
+      outputName = bundleName + QStringLiteral("-Linux");
+      break;
+    case TargetPlatform::MacOS:
+      outputName = bundleName + QStringLiteral(".app");
+      break;
+    case TargetPlatform::All:
+      return {};
+  }
+  return QDir(request.outputDirectory).filePath(outputName);
+}
+
 void MainWindow::startBuild() {
   QString accessError;
   if (!verifyOutputDirectoryAccess(outputEdit_->text(), accessError)) {
@@ -779,27 +1094,47 @@ void MainWindow::startBuild() {
     return;
   }
 
-  const QString bundleName = cleanBundleName(titleEdit_->text());
-  const auto targetPlatform =
-    targetPlatformFromKey(platformCombo_->currentData().toString());
-  QString outputName;
-  switch (targetPlatform) {
-    case TargetPlatform::Windows:
-      outputName = bundleName + QStringLiteral("-Windows");
-      break;
-    case TargetPlatform::Linux:
-      outputName = bundleName + QStringLiteral("-Linux");
-      break;
-    case TargetPlatform::MacOS:
-      outputName = bundleName + QStringLiteral(".app");
-      break;
+  auto requests = requestsFromUi(false);
+  if (requests.isEmpty()) {
+    QMessageBox::warning(this, QStringLiteral("Nothing to export"),
+                         QStringLiteral("Add at least one game to the batch list."));
+    return;
   }
-  const QString outputPath = QDir(outputEdit_->text()).filePath(outputName);
+
+  QSet<QString> uniqueOutputs;
+  QStringList duplicateOutputs;
+  QStringList existingOutputs;
+  for (const auto& request : requests) {
+    const QString outputPath = outputPathForRequest(request);
+    const QString folded = QDir::cleanPath(outputPath).toCaseFolded();
+    if (uniqueOutputs.contains(folded)) {
+      duplicateOutputs.append(outputPath);
+    } else {
+      uniqueOutputs.insert(folded);
+    }
+    if (QFileInfo::exists(outputPath)) {
+      existingOutputs.append(outputPath);
+    }
+  }
+  duplicateOutputs.removeDuplicates();
+  if (!duplicateOutputs.isEmpty()) {
+    QMessageBox::warning(
+      this, QStringLiteral("Duplicate game names"),
+      QStringLiteral("Two or more queued exports resolve to the same output path. Rename the duplicate games before exporting.\n\n%1")
+        .arg(duplicateOutputs.join(QStringLiteral("\n"))));
+    return;
+  }
+
   bool overwrite = false;
-  if (QFileInfo::exists(outputPath)) {
+  if (!existingOutputs.isEmpty()) {
     const auto answer = QMessageBox::question(
-      this, QStringLiteral("Replace existing output?"),
-      QStringLiteral("%1 already exists. Replace it with the new build?").arg(outputPath),
+      this, QStringLiteral("Replace existing outputs?"),
+      QStringLiteral("%1 queued output%2 already exist%3. Replace %4 with the new build%5?")
+        .arg(existingOutputs.size())
+        .arg(existingOutputs.size() == 1 ? QString() : QStringLiteral("s"))
+        .arg(existingOutputs.size() == 1 ? QStringLiteral("s") : QString())
+        .arg(existingOutputs.size() == 1 ? QStringLiteral("it") : QStringLiteral("them"))
+        .arg(existingOutputs.size() == 1 ? QString() : QStringLiteral("s")),
       QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (answer != QMessageBox::Yes) {
       return;
@@ -807,16 +1142,41 @@ void MainWindow::startBuild() {
     overwrite = true;
   }
 
+  for (auto& request : requests) {
+    request.overwriteOutput = overwrite;
+  }
+
   saveSettings();
+  pendingRequests_ = requests;
+  completedOutputs_.clear();
+  totalRequestCount_ = pendingRequests_.size();
+  activeRequestIndex_ = 0;
   outputAppPath_.clear();
   revealButton_->setEnabled(false);
   logView_->clear();
   setBusy(true);
-  emit runRequested(requestFromUi(overwrite));
+  startNextRequest();
+}
+
+void MainWindow::startNextRequest() {
+  if (pendingRequests_.isEmpty()) {
+    return;
+  }
+  activeRequest_ = pendingRequests_.takeFirst();
+  ++activeRequestIndex_;
+  if (totalRequestCount_ > 1) {
+    logView_->appendPlainText(
+      QStringLiteral("\n##### Export %1 of %2 — %3 (%4) #####")
+        .arg(activeRequestIndex_).arg(totalRequestCount_)
+        .arg(activeRequest_.windowTitle,
+             targetPlatformDisplayName(activeRequest_.targetPlatform)));
+  }
+  emit runRequested(activeRequest_);
 }
 
 void MainWindow::cancelBuild() {
   if (worker_) {
+    pendingRequests_.clear();
     worker_->requestCancel();
     cancelButton_->setEnabled(false);
     stageLabel_->setText(QStringLiteral("Cancelling…"));
@@ -827,33 +1187,59 @@ void MainWindow::revealOutput() {
   if (outputAppPath_.isEmpty()) {
     return;
   }
+#if defined(Q_OS_MACOS)
   QProcess::startDetached(QStringLiteral("/usr/bin/open"),
                           { QStringLiteral("-R"), outputAppPath_ });
+#elif defined(Q_OS_WIN)
+  if (QFileInfo(outputAppPath_).isDir()) {
+    QProcess::startDetached(QStringLiteral("explorer.exe"),
+                            { QDir::toNativeSeparators(outputAppPath_) });
+  } else {
+    QProcess::startDetached(QStringLiteral("explorer.exe"),
+                            { QStringLiteral("/select,%1")
+                                .arg(QDir::toNativeSeparators(outputAppPath_)) });
+  }
+#else
+  const QString directory = QFileInfo(outputAppPath_).isDir()
+    ? outputAppPath_ : QFileInfo(outputAppPath_).absolutePath();
+  QDesktopServices::openUrl(QUrl::fromLocalFile(directory));
+#endif
 }
 
 void MainWindow::onCompleted(const QString& appPath) {
-  outputAppPath_ = appPath;
+  completedOutputs_.append(appPath);
+  if (!pendingRequests_.isEmpty()) {
+    startNextRequest();
+    return;
+  }
+
+  outputAppPath_ = completedOutputs_.size() == 1
+    ? completedOutputs_.constFirst() : outputEdit_->text();
   progressBar_->setRange(0, 100);
   progressBar_->setValue(100);
-  const auto targetPlatform =
-    targetPlatformFromKey(platformCombo_->currentData().toString());
-  const bool macosTarget = targetPlatform == TargetPlatform::MacOS;
-  const QString platformName = targetPlatformDisplayName(targetPlatform);
-  stageLabel_->setText(macosTarget
-    ? QStringLiteral("Complete — signed app verified")
-    : QStringLiteral("Complete — %1 package verified").arg(platformName));
+  stageLabel_->setText(completedOutputs_.size() == 1
+    ? QStringLiteral("Complete — package verified")
+    : QStringLiteral("Complete — %1 packages verified").arg(completedOutputs_.size()));
   revealButton_->setEnabled(true);
   setBusy(false);
+  QStringList displayedOutputs = completedOutputs_;
+  if (displayedOutputs.size() > 12) {
+    const int omitted = displayedOutputs.size() - 12;
+    displayedOutputs = displayedOutputs.mid(0, 12);
+    displayedOutputs.append(QStringLiteral("…and %1 more in %2")
+                              .arg(omitted).arg(outputEdit_->text()));
+  }
   QMessageBox::information(
-    this, macosTarget ? QStringLiteral("Signed app created")
-                      : QStringLiteral("%1 app created").arg(platformName),
-    macosTarget
-      ? QStringLiteral("The signed macOS app was created and verified:\n\n%1").arg(appPath)
-      : QStringLiteral("The %1 app package was created and verified:\n\n%2")
-          .arg(platformName, appPath));
+    this, completedOutputs_.size() == 1 ? QStringLiteral("App created")
+                                        : QStringLiteral("Batch export complete"),
+    QStringLiteral("%1 package%2 created and verified:\n\n%3")
+      .arg(completedOutputs_.size())
+      .arg(completedOutputs_.size() == 1 ? QStringLiteral(" was") : QStringLiteral("s were"))
+      .arg(displayedOutputs.join(QStringLiteral("\n"))));
 }
 
 void MainWindow::onFailed(const QString& message, const QString& workspacePath) {
+  pendingRequests_.clear();
   progressBar_->setRange(0, 100);
   progressBar_->setValue(0);
   stageLabel_->setText(QStringLiteral("Build failed"));
@@ -861,6 +1247,12 @@ void MainWindow::onFailed(const QString& message, const QString& workspacePath) 
   QString detail = message;
   if (!workspacePath.isEmpty()) {
     detail += QStringLiteral("\n\nProof and intermediate artifacts were retained at:\n%1").arg(workspacePath);
+  }
+  if (!completedOutputs_.isEmpty()) {
+    detail += QStringLiteral("\n\n%1 earlier package%2 completed before this failure:\n%3")
+      .arg(completedOutputs_.size())
+      .arg(completedOutputs_.size() == 1 ? QString() : QStringLiteral("s"))
+      .arg(completedOutputs_.join(QStringLiteral("\n")));
   }
   QMessageBox::critical(this, QStringLiteral("Build failed"), detail);
 }
@@ -874,12 +1266,15 @@ void MainWindow::setBusy(bool busy) {
     progressBar_->setRange(0, 100);
     progressBar_->setValue(0);
   }
-  for (auto* edit : { discEdit_, biosEdit_, iconEdit_, titleEdit_, outputEdit_,
+  for (auto* edit : { discEdit_, batchDirectoryEdit_, biosEdit_, iconEdit_, titleEdit_, outputEdit_,
                       certificateEdit_, certificatePasswordEdit_, ghidraEdit_,
                       biosInitialSplashEdit_, biosHandoffImageEdit_ }) {
-    edit->setEnabled(!busy);
+    edit->parentWidget()->setEnabled(!busy);
   }
   biosPatchEnabled_->setEnabled(!busy);
+  batchCheck_->setEnabled(!busy);
+  batchList_->setEnabled(!busy);
+  signingEnabled_->setEnabled(!busy);
   platformCombo_->setEnabled(!busy);
   skipBiosBoot_->setEnabled(!busy);
   padModeCombo_->setEnabled(!busy);
@@ -894,29 +1289,45 @@ void MainWindow::setBusy(bool busy) {
 }
 
 void MainWindow::updatePlatformControls() {
-  const auto targetPlatform =
+  const auto selectedPlatform =
     targetPlatformFromKey(platformCombo_->currentData().toString());
-  const bool macosTarget = targetPlatform == TargetPlatform::MacOS;
+  const bool includesMacos = selectedPlatform == TargetPlatform::MacOS ||
+                             selectedPlatform == TargetPlatform::All;
   const bool busy = cancelButton_ && cancelButton_->isEnabled();
-  certificateEdit_->setEnabled(macosTarget && !busy);
-  certificatePasswordEdit_->setEnabled(macosTarget && !busy);
-  certificateEdit_->parentWidget()->setVisible(macosTarget);
-  certificatePasswordEdit_->parentWidget()->setVisible(macosTarget);
-  macosGipGamepad_->setVisible(macosTarget);
-  macosGipGamepad_->setEnabled(macosTarget && !busy);
-  const QString unsignedNote = targetPlatform == TargetPlatform::Windows
+  const bool signingRequested = includesMacos && signingEnabled_->isChecked();
+  signingEnabled_->setVisible(includesMacos);
+  signingEnabled_->setEnabled(includesMacos && !busy);
+  certificateEdit_->parentWidget()->setEnabled(signingRequested && !busy);
+  certificatePasswordEdit_->parentWidget()->setEnabled(signingRequested && !busy);
+  certificateEdit_->parentWidget()->setVisible(signingRequested);
+  certificatePasswordEdit_->parentWidget()->setVisible(signingRequested);
+  macosGipGamepad_->setVisible(includesMacos);
+  macosGipGamepad_->setEnabled(includesMacos && !busy);
+  const QString unsignedNote = selectedPlatform == TargetPlatform::Windows
     ? QStringLiteral("Windows exports are currently delivered unsigned")
     : QStringLiteral("Linux exports are currently delivered unsigned");
-  certificateEdit_->setToolTip(macosTarget
-    ? QStringLiteral("PKCS#12 identity used to sign the macOS app")
+  certificateEdit_->setToolTip(includesMacos
+    ? QStringLiteral("Optional PKCS#12 identity read directly by rcodesign")
     : unsignedNote);
   certificatePasswordEdit_->setToolTip(certificateEdit_->toolTip());
-  if (macosTarget) {
-    signingNote_->setText(QStringLiteral(
-      "The certificate is imported into an isolated temporary keychain and removed after verification."));
-    outputEdit_->setPlaceholderText(QStringLiteral("Destination for the signed .app"));
-    buildButton_->setText(QStringLiteral("Build Signed .app"));
-  } else if (targetPlatform == TargetPlatform::Windows) {
+  if (selectedPlatform == TargetPlatform::All) {
+    signingNote_->setText(signingRequested
+      ? QStringLiteral("macOS uses one-pass direct PFX signing with no Keychain import. Windows and Linux are unsigned.")
+      : QStringLiteral("macOS signing is optional; all three platform packages will be verified before delivery."));
+    outputEdit_->setPlaceholderText(QStringLiteral("Destination for macOS, Windows, and Linux packages"));
+    buildButton_->setText(batchCheck_->isChecked()
+      ? QStringLiteral("Batch Export All Platforms") : QStringLiteral("Export All Platforms"));
+  } else if (selectedPlatform == TargetPlatform::MacOS) {
+    signingNote_->setText(signingRequested
+      ? QStringLiteral("The PFX is read directly by rcodesign. No identity is imported into any Keychain.")
+      : QStringLiteral("Signing is optional. The unsigned app is hash-verified before and after delivery."));
+    outputEdit_->setPlaceholderText(QStringLiteral("Destination for the macOS .app"));
+    buildButton_->setText(batchCheck_->isChecked()
+      ? (signingRequested ? QStringLiteral("Batch Build Signed Apps")
+                          : QStringLiteral("Batch Build macOS Apps"))
+      : (signingRequested ? QStringLiteral("Build Signed .app")
+                          : QStringLiteral("Build macOS App")));
+  } else if (selectedPlatform == TargetPlatform::Windows) {
 #if defined(Q_OS_WIN)
     signingNote_->setText(QStringLiteral(
       "Windows exports use the native Visual Studio 2022 MSVC x64 toolchain and are delivered unsigned."));
@@ -925,7 +1336,8 @@ void MainWindow::updatePlatformControls() {
       "Windows exports use the installed x86_64-w64-mingw32 MinGW toolchain and are delivered unsigned."));
 #endif
     outputEdit_->setPlaceholderText(QStringLiteral("Destination for the Windows app folder"));
-    buildButton_->setText(QStringLiteral("Build Windows App"));
+    buildButton_->setText(batchCheck_->isChecked()
+      ? QStringLiteral("Batch Build Windows Apps") : QStringLiteral("Build Windows App"));
   } else {
 #if defined(Q_OS_LINUX)
     signingNote_->setText(QStringLiteral(
@@ -935,7 +1347,8 @@ void MainWindow::updatePlatformControls() {
       "Linux exports use the installed x86_64-unknown-linux-gnu toolchain, bundle SDL2, and are delivered unsigned."));
 #endif
     outputEdit_->setPlaceholderText(QStringLiteral("Destination for the Linux app folder"));
-    buildButton_->setText(QStringLiteral("Build Linux App"));
+    buildButton_->setText(batchCheck_->isChecked()
+      ? QStringLiteral("Batch Build Linux Apps") : QStringLiteral("Build Linux App"));
   }
   updateBuildButton();
 }
@@ -946,12 +1359,19 @@ void MainWindow::updateBuildButton() {
   }
   const bool brandingReady = !biosPatchEnabled_->isChecked() ||
     (!biosInitialSplashEdit_->text().isEmpty() && !biosHandoffImageEdit_->text().isEmpty());
-  const bool macosTarget =
-    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::MacOS;
-  const bool signingReady = !macosTarget ||
+  const auto selectedPlatform = targetPlatformFromKey(platformCombo_->currentData().toString());
+  const bool includesMacos = selectedPlatform == TargetPlatform::MacOS ||
+                             selectedPlatform == TargetPlatform::All;
+  const bool signingReady = !includesMacos || !signingEnabled_->isChecked() ||
     (!certificateEdit_->text().isEmpty() && !certificatePasswordEdit_->text().isEmpty());
-  const bool ready = !discEdit_->text().isEmpty() && !biosEdit_->text().isEmpty() &&
-                     !iconEdit_->text().isEmpty() && !titleEdit_->text().trimmed().isEmpty() &&
+  bool gameReady = !discEdit_->text().isEmpty() && !titleEdit_->text().trimmed().isEmpty();
+  if (batchCheck_->isChecked()) {
+    gameReady = !batchEntries_.isEmpty() && std::all_of(
+      batchEntries_.cbegin(), batchEntries_.cend(), [](const BatchGameEntry& entry) {
+        return !entry.title.trimmed().isEmpty();
+      });
+  }
+  const bool ready = gameReady && !biosEdit_->text().isEmpty() &&
                      !outputEdit_->text().isEmpty() && !ghidraEdit_->text().isEmpty() &&
                      signingReady && brandingReady;
   buildButton_->setEnabled(ready);

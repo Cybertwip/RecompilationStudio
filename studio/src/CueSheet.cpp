@@ -18,12 +18,18 @@ QString canonicalOrAbsolute(const QString& path) {
 
 QString lookupSelected(const QString& reference, const QStringList& selectedBinPaths) {
   const QString wanted = QFileInfo(reference).fileName();
+  QString match;
   for (const auto& selected : selectedBinPaths) {
     if (QFileInfo(selected).fileName().compare(wanted, Qt::CaseInsensitive) == 0) {
-      return selected;
+      if (!match.isEmpty() &&
+          canonicalOrAbsolute(match).compare(canonicalOrAbsolute(selected),
+                                             Qt::CaseInsensitive) != 0) {
+        return {};
+      }
+      match = selected;
     }
   }
-  return {};
+  return match;
 }
 
 } // namespace
@@ -34,8 +40,18 @@ bool CueSheet::parse(const QString& cuePath,
                      QString& error) {
   out = {};
   const QFileInfo cueInfo(cuePath);
-  if (!cueInfo.isFile() || cueInfo.suffix().compare(QStringLiteral("cue"), Qt::CaseInsensitive) != 0) {
-    error = QStringLiteral("Select exactly one readable .cue file.");
+  if (!cueInfo.isFile()) {
+    error = QStringLiteral("Select one readable .cue or standalone .bin file.");
+    return false;
+  }
+  if (cueInfo.suffix().compare(QStringLiteral("bin"), Qt::CaseInsensitive) == 0) {
+    const QString sourcePath = canonicalOrAbsolute(cuePath);
+    out.cuePath = sourcePath;
+    out.files.append({ cueInfo.fileName(), sourcePath, cueInfo.fileName() });
+    return true;
+  }
+  if (cueInfo.suffix().compare(QStringLiteral("cue"), Qt::CaseInsensitive) != 0) {
+    error = QStringLiteral("Select one readable .cue or standalone .bin file.");
     return false;
   }
 

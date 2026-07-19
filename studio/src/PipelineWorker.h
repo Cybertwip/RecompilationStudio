@@ -38,13 +38,9 @@ private:
                   QByteArray* capturedOutput = nullptr,
                   const QProcessEnvironment* environmentOverride = nullptr);
   void emitProcessOutput(const QByteArray& bytes, QByteArray& pending);
-  void cleanupKeychain();
   bool cancellationRequested() const;
 
   std::atomic_bool cancelRequested_{ false };
-  QString temporaryKeychainPath_;
-  QString temporaryKeychainPassword_;
 };
 
 } // namespace psxstudio
-

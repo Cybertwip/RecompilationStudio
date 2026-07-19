@@ -2,12 +2,14 @@
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QList>
 #include <QString>
 #include <QStringList>
 
 namespace psxstudio {
 
 enum class TargetPlatform {
+  All,
   MacOS,
   Windows,
   Linux,
@@ -32,11 +34,23 @@ inline bool hostCanSelectTargetPlatform() {
 }
 
 inline bool targetPlatformSupportedOnHost(TargetPlatform platform) {
+  if (platform == TargetPlatform::All) {
+    return hostCanSelectTargetPlatform();
+  }
   return hostCanSelectTargetPlatform() || platform == hostTargetPlatform();
+}
+
+inline QList<TargetPlatform> concreteTargetPlatforms(TargetPlatform platform) {
+  if (platform == TargetPlatform::All) {
+    return { TargetPlatform::MacOS, TargetPlatform::Windows, TargetPlatform::Linux };
+  }
+  return { platform };
 }
 
 inline QString targetPlatformKey(TargetPlatform platform) {
   switch (platform) {
+    case TargetPlatform::All:
+      return QStringLiteral("all");
     case TargetPlatform::Windows:
       return QStringLiteral("windows");
     case TargetPlatform::Linux:
@@ -49,6 +63,8 @@ inline QString targetPlatformKey(TargetPlatform platform) {
 
 inline QString targetPlatformDisplayName(TargetPlatform platform) {
   switch (platform) {
+    case TargetPlatform::All:
+      return QStringLiteral("All");
     case TargetPlatform::Windows:
       return QStringLiteral("Windows");
     case TargetPlatform::Linux:
@@ -60,6 +76,9 @@ inline QString targetPlatformDisplayName(TargetPlatform platform) {
 }
 
 inline TargetPlatform targetPlatformFromKey(const QString& key) {
+  if (key.compare(QStringLiteral("all"), Qt::CaseInsensitive) == 0) {
+    return TargetPlatform::All;
+  }
   if (key.compare(QStringLiteral("windows"), Qt::CaseInsensitive) == 0) {
     return TargetPlatform::Windows;
   }

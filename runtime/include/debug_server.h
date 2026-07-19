@@ -77,6 +77,10 @@ typedef struct {
     FrameDiffEntry diffs[MAX_FRAME_DIFFS];
 } PSXFrameRecord;
 
+/* Runtime frame clock owned by debug_server.c and shared by device/frontend
+ * telemetry. Declaring it here preserves C linkage for C++ consumers. */
+extern uint64_t s_frame_count;
+
 /* ---- Public API (same names as NES version) ---- */
 
 /* Initialize the server. Call once at startup.

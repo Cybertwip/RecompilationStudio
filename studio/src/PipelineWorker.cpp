@@ -324,7 +324,7 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("cmake_minimum_required(VERSION 3.20)\n");
   cmake += windowsTarget ? QStringLiteral("project(GeneratedPSXApp C CXX RC)\n")
                          : QStringLiteral("project(GeneratedPSXApp C CXX)\n");
-  cmake += QStringLiteral("set(CMAKE_C_STANDARD 99)\nset(CMAKE_CXX_STANDARD 17)\n");
+  cmake += QStringLiteral("set(CMAKE_C_STANDARD 11)\nset(CMAKE_CXX_STANDARD 17)\n");
   if (windowsTarget) {
     cmake += QStringLiteral("include(FetchContent)\n");
     cmake += QStringLiteral("set(FETCHCONTENT_QUIET OFF)\n");

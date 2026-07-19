@@ -126,6 +126,15 @@ uint32_t dirty_ram_text_diverged_pages(void);
  * via debug_server.c if helpful. */
 extern uint64_t g_dirty_ram_blocks_run;     /* basic blocks interpreted */
 extern uint64_t g_dirty_ram_insns_run;      /* instructions interpreted */
+extern uint64_t g_slice_fired;              /* precise slices executed */
+extern uint64_t g_slice_irq_taken;          /* IRQs taken within slices */
+extern uint32_t g_slice_exit_pc;
+extern uint32_t g_slice_exit_reason;
+extern uint32_t g_slice_exit_iter;
+extern uint32_t g_slice_exit_dispatchable;
+extern uint32_t g_slice_exit_dirty;
+extern uint32_t g_slice_exit_in_text;
+extern uint32_t g_slice_exit_want;
 extern uint64_t g_dirty_window_dispatches;  /* interp dispatches inside a
                                              * capture window (autocapture
                                              * pressure signal, step 2.8) */

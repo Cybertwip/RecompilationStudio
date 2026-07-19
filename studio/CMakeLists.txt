@@ -30,6 +30,35 @@ set(QUAZIP_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 set(QUAZIP_INSTALL OFF CACHE BOOL "" FORCE)
 set(QUAZIP_BZIP2 OFF CACHE BOOL "" FORCE)
 
+
+# Force static zlib (matches QuaZip's BUILD_SHARED_LIBS=OFF and avoids
+# shipping a zlib DLL on Windows).  Also disable its install rules.
+set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_STATIC ON  CACHE BOOL "" FORCE)
+set(ZLIB_INSTALL      OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(3rdparty/zlib)
+
+# Make FindZLIB (used by QuaZip) happy with the in-tree build instead of
+# searching for a system zlib.
+set(ZLIB_INCLUDE_DIR
+    "${zlib_SOURCE_DIR};${zlib_BINARY_DIR}"
+    CACHE PATH "zlib include directory" FORCE)
+
+if(TARGET zlibstatic)
+  if(NOT TARGET ZLIB::ZLIB)
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+  endif()
+  set(ZLIB_LIBRARY ZLIB::ZLIB CACHE FILEPATH "zlib library" FORCE)
+elseif(TARGET zlib)
+  if(NOT TARGET ZLIB::ZLIB)
+    add_library(ZLIB::ZLIB ALIAS zlib)
+  endif()
+  set(ZLIB_LIBRARY ZLIB::ZLIB CACHE FILEPATH "zlib library" FORCE)
+else()
+  message(FATAL_ERROR "3rdparty/zlib did not create zlib or zlibstatic")
+endif()
+
 add_subdirectory(3rdparty/quazip)
 add_subdirectory(3rdparty/oclero/qlementine)
 add_subdirectory(3rdparty/oclero/qlementine-icons)

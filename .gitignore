@@ -108,3 +108,4 @@ runtime/tests/*.exe
 # PSXRecomp Studio local build
 /studio/build*/
 /studio/psx_*.json
+/studio/staging*/

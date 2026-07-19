@@ -22,6 +22,12 @@ QString sanitizedBundleIdentifier(const QString& serial, const QString& title);
  * shell- and filesystem-hostile characters (notably apostrophes) that
  * break CMake/Ninja /bin/sh -c rules on macOS paths. */
 QString cleanBundleName(const QString& title);
+/* Create a parenthesis-free symlink name for Apple binary-inspection tools.
+ * otool-classic interprets a trailing `(name)` in a Mach-O path as archive
+ * member syntax, even when the path is passed as one process argument. */
+QString createMacosInspectionAlias(const QString& sourcePath,
+                                   const QString& aliasDirectory,
+                                   QString& error);
 QString cmakeQuoted(const QString& value);
 QString tomlQuoted(const QString& value);
 QString hex32(quint32 value);

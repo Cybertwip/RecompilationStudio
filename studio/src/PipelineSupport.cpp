@@ -205,6 +205,35 @@ QString cleanBundleName(const QString& title) {
   return name.left(80);
 }
 
+QString createMacosInspectionAlias(const QString& sourcePath,
+                                   const QString& aliasDirectory,
+                                   QString& error) {
+  if (!QFileInfo(sourcePath).isFile()) {
+    error = QStringLiteral("Cannot create an inspection alias for a missing file: %1")
+              .arg(sourcePath);
+    return {};
+  }
+  if (!QDir().mkpath(aliasDirectory)) {
+    error = QStringLiteral("Could not create the macOS inspection directory: %1")
+              .arg(aliasDirectory);
+    return {};
+  }
+  const QString aliasPath =
+    QDir(aliasDirectory).filePath(QStringLiteral("mach-o-executable"));
+  if (QFileInfo::exists(aliasPath) || QFileInfo(aliasPath).isSymLink()) {
+    error = QStringLiteral("The macOS inspection alias already exists: %1")
+              .arg(aliasPath);
+    return {};
+  }
+  if (!QFile::link(QFileInfo(sourcePath).absoluteFilePath(), aliasPath) ||
+      !QFileInfo(aliasPath).isSymLink() || !QFileInfo(aliasPath).isFile()) {
+    error = QStringLiteral("Could not create the macOS inspection alias: %1")
+              .arg(aliasPath);
+    return {};
+  }
+  return aliasPath;
+}
+
 QString cmakeQuoted(const QString& value) {
   QString escaped = value;
   escaped.replace('\\', QStringLiteral("\\\\"));

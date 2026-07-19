@@ -1780,6 +1780,17 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("CMake did not stage the expected executable: %1").arg(mainExecutable), workspace);
     return;
   }
+  QString macosInspectionExecutable;
+  if (macosTarget) {
+    macosInspectionExecutable = createMacosInspectionAlias(
+      mainExecutable,
+      QDir(workspace).filePath(QStringLiteral("macos-inspection")),
+      error);
+    if (macosInspectionExecutable.isEmpty()) {
+      fail(error, workspace);
+      return;
+    }
+  }
   bool gipBackendCompiled = false;
   if (macosTarget) {
     QByteArray controllerSymbols;
@@ -2391,7 +2402,7 @@ void PipelineWorker::run(PipelineRequest request) {
 
   QByteArray dependencyOutput;
   if (!runCommand(QStringLiteral("/usr/bin/otool"),
-                  { QStringLiteral("-L"), mainExecutable }, workspace,
+                  { QStringLiteral("-L"), macosInspectionExecutable }, workspace,
                   QStringLiteral("otool -L <app executable>"), 30000, &dependencyOutput)) {
     fail(QStringLiteral("The staged app dependencies could not be inspected."), workspace);
     return;
@@ -2442,7 +2453,7 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     QByteArray fixedDependencies;
     if (!runCommand(QStringLiteral("/usr/bin/otool"),
-                    { QStringLiteral("-L"), mainExecutable }, workspace,
+                    { QStringLiteral("-L"), macosInspectionExecutable }, workspace,
                     QStringLiteral("otool -L <fixed app executable>"), 30000, &fixedDependencies) ||
         !QString::fromUtf8(fixedDependencies).contains(QStringLiteral("@rpath/libSDL2-2.0.0.dylib"))) {
       fail(QStringLiteral("The bundled executable still references an external SDL2 library."), workspace);

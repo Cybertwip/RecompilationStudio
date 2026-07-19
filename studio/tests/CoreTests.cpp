@@ -229,10 +229,34 @@ int main(int argc, char** argv) {
   check(psxstudio::cleanBundleName(QStringLiteral("Top Gun: Fire at Will!")) ==
           QStringLiteral("Top Gun - Fire at Will!"),
         QStringLiteral("bundle-name colon → dash keeps readable title"));
+  check(psxstudio::cleanBundleName(QStringLiteral("Evil Zone (Europe)")) ==
+          QStringLiteral("Evil Zone (Europe)"),
+        QStringLiteral("parenthesized region remains in the user-visible bundle name"));
   check(psxstudio::cleanBundleName(QStringLiteral("Foo/Bar:Baz")).isEmpty() == false &&
           psxstudio::cleanBundleName(QStringLiteral("Foo/Bar:Baz")) ==
             QStringLiteral("Foo - Bar -Baz"),
         QStringLiteral("bundle-name path separators"));
+#if defined(Q_OS_MACOS)
+  const QString parenthesizedMachO =
+    QDir(temp.path()).filePath(QStringLiteral("Evil Zone (Europe)"));
+  check(QFile::link(QCoreApplication::applicationFilePath(), parenthesizedMachO),
+        QStringLiteral("parenthesized Mach-O regression fixture"));
+  const QString inspectionAlias = psxstudio::createMacosInspectionAlias(
+    parenthesizedMachO,
+    QDir(temp.path()).filePath(QStringLiteral("macos-inspection")),
+    error);
+  check(!inspectionAlias.isEmpty() &&
+          QFileInfo(inspectionAlias).isSymLink() &&
+          QFileInfo(inspectionAlias).canonicalFilePath() ==
+            QFileInfo(QCoreApplication::applicationFilePath()).canonicalFilePath(),
+        error.isEmpty() ? QStringLiteral("parenthesis-free macOS inspection alias") : error);
+  QProcess otool;
+  otool.start(QStringLiteral("/usr/bin/otool"),
+              { QStringLiteral("-L"), inspectionAlias });
+  check(otool.waitForStarted(3000) && otool.waitForFinished(10000) &&
+          otool.exitStatus() == QProcess::NormalExit && otool.exitCode() == 0,
+        QStringLiteral("otool inspects Evil Zone (Europe) through its safe alias"));
+#endif
   const QString normalBoot = psxstudio::runtimeBootToml(false);
   check(normalBoot.contains(QStringLiteral("bios_hle_keep_intro = true")) &&
           normalBoot.contains(QStringLiteral("fast_boot = false")),

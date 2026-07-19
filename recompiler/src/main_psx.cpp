@@ -1260,7 +1260,14 @@ int main(int argc, char** argv) {
             // JIT (overlay_sljit.c) emits the CPS contract. Static ctor: no clash
             // with the BIOS dispatch's marker.
             ds << "\n/* CPS runtime-mode marker (overlay sljit JIT reads g_psx_cps_mode). */\n";
+            ds << "#if defined(_MSC_VER)\n";
+            ds << "static void __cdecl psx_cps_mark_game(void);\n";
+            ds << "#pragma section(\".CRT$XCU\", read)\n";
+            ds << "__declspec(allocate(\".CRT$XCU\")) static void (__cdecl *psx_cps_mark_game_ctor)(void) = psx_cps_mark_game;\n";
+            ds << "static void __cdecl psx_cps_mark_game(void) {\n";
+            ds << "#else\n";
             ds << "__attribute__((constructor)) static void psx_cps_mark_game(void) {\n";
+            ds << "#endif\n";
             ds << "    extern int g_psx_cps_mode; g_psx_cps_mode = 1;\n";
             ds << "}\n";
         }

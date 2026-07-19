@@ -12,6 +12,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 /* PSX pad word bits (active-low), standard DualShock layout. Matches the
  * PAD_* masks in main.cpp / beetle_main.cpp. */

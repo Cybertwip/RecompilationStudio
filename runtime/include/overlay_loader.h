@@ -19,6 +19,9 @@
 extern "C" {
 #endif
 
+/* Set by generated CPS dispatch constructors before main. */
+extern int g_psx_cps_mode;
+
 /* Called at game handoff to set the cache root directory and game ID.
  * cache_dir: absolute path to the cache root (e.g. "build-dev/cache")
  * game_id:   product code (e.g. "SCUS-94236") */

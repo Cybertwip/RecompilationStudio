@@ -531,7 +531,7 @@ function(psxrecomp_add_runtime_target target)
     if(MSVC)
         # windows.h defines function-like min/max macros unless NOMINMAX is set;
         # those macros corrupt qualified calls such as std::max(...).
-        target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_compile_definitions(${target} PRIVATE NOMINMAX)
     endif()
 
     if(PSXRT_ORACLE)

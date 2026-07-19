@@ -10,6 +10,8 @@
 #include "parity_trace.h"    /* general two-process control-flow parity ring */
 #include "device_trace.h"    /* general two-process device-event cycle ring */
 #include "psx_interpreter.h"
+#include "dirty_ram_interp.h"
+#include "psx_cycles.h"
 #include "cdrom.h"
 #include "fntrace.h"
 #include "text_xlate.h"
@@ -325,7 +327,6 @@ static std::array<int16_t, SDL_CONTROLLER_AXIS_MAX> g_frontend_sdl_axes{};
 
 static void frontend_input_trace_note(uint8_t kind, SDL_Scancode sc,
                                       uint16_t mask, uint16_t pad_word) {
-    extern uint64_t s_frame_count;
     uint64_t seq = g_frontend_input_seq++;
     FrontendInputTraceEntry *e =
         &g_frontend_input_trace[seq & (FRONTEND_INPUT_TRACE_CAP - 1u)];
@@ -1190,7 +1191,6 @@ static void sdl_audio_pump(void) {
      * built in a systematic -0.1% production deficit (measured: 43950/s
      * produced vs 44100/s consumed = recurring ring underruns no +/-0.5%
      * DRC trim could absorb during jitter spikes). */
-    extern uint64_t psx_cycle_count;
     static uint64_t last_cycles = 0;
     static uint64_t cycle_carry = 0;
     const uint64_t now_cycles = psx_cycle_count;
@@ -1294,7 +1294,6 @@ static void runtime_perf_diag_tick() {
     if (!enabled) return;
     uint64_t now = SDL_GetPerformanceCounter();
     uint64_t freq = SDL_GetPerformanceFrequency();
-    extern uint64_t s_frame_count;
     AudioTraceStats audio;
     audio_trace_get_stats(&audio);
     double fill_ms = 0.0, correction = 0.0;
@@ -1352,7 +1351,6 @@ static void runtime_perf_diag_tick() {
 static void sdl_audio_update(int turbo_active) {
     if (!sdl_audio_device) return;
     {   /* Tag audio events with the vblank frame counter. */
-        extern uint64_t s_frame_count;
         audio_trace_note_frame((uint32_t)s_frame_count);
     }
     const int HANGOVER_FRAMES = 8;  /* ~133 ms at 60 fps */
@@ -2689,7 +2687,6 @@ static uint32_t    g_stack_frame_now   = 0;
 static uint32_t    g_stack_used_max_kb = 0;
 
 static void stack_profile_sample(void) {
-    extern uint64_t s_frame_count;
     uint32_t f  = (uint32_t)s_frame_count;
     uint32_t kb = (uint32_t)(host_stack_used() >> 10);
     g_stack_frame_now   = f;
@@ -2852,7 +2849,6 @@ static void sdl_vblank_present(void) {
 #else
     /* Production: skip debug server. Still need to advance frame counter
      * locally so anything else that reads it continues to work. */
-    extern uint64_t s_frame_count;
     s_frame_count++;
     int override = -1;
 #endif
@@ -3743,7 +3739,6 @@ int main(int argc, char** argv) {
              * text end (0x98000) wedged Tomba 2 (text ends 0x38800, overlays at
              * 0x85000+) at the Whoopee-Camp splash. See dirty_ram_interp.h. */
             {
-                extern uint32_t g_overlay_region_floor;
                 uint32_t text_end = (gc.load_address + gc.text_size) & 0x1FFFFFFFu;
                 if (text_end > 0x00010000u /* DIRTY_RAM_KERNEL_WINDOW_END */)
                     g_overlay_region_floor = text_end;
@@ -3805,7 +3800,6 @@ int main(int argc, char** argv) {
                          * (<exe>/overlay_toolchain/ = embedded python + tcc +
                          * recompiler + compile_overlays.py + runtime headers). No
                          * system python or gcc required. */
-                        extern int g_psx_cps_mode;
                         std::filesystem::path xd = exe_dir_from_argv(argv[0]);
                         std::filesystem::path tk = xd / "overlay_toolchain";
                         std::filesystem::path py = tk / "python" / "python.exe";
@@ -4818,10 +4812,7 @@ int main(int argc, char** argv) {
     }
 
     std::fprintf(stdout, "psxrecomp runtime: execution completed, PC=0x%08X\n", cpu.pc);
-    { extern uint64_t g_slice_fired, g_slice_irq_taken, g_dirty_ram_insns_run;
-      extern uint32_t g_slice_exit_pc, g_slice_exit_reason, g_slice_exit_iter;
-      extern uint32_t g_slice_exit_dispatchable, g_slice_exit_dirty, g_slice_exit_in_text, g_slice_exit_want;
-      std::fprintf(stdout, "psxrecomp runtime: [slice diag] slice_fired=%llu slice_irq_taken=%llu dirty_insns=%llu exit_pc=0x%08X reason=%u iter=%u dispatchable=%u dirty=%u in_text=%u want=%u\n",
+    { std::fprintf(stdout, "psxrecomp runtime: [slice diag] slice_fired=%llu slice_irq_taken=%llu dirty_insns=%llu exit_pc=0x%08X reason=%u iter=%u dispatchable=%u dirty=%u in_text=%u want=%u\n",
                    (unsigned long long)g_slice_fired, (unsigned long long)g_slice_irq_taken,
                    (unsigned long long)g_dirty_ram_insns_run, g_slice_exit_pc, g_slice_exit_reason,
                    g_slice_exit_iter, g_slice_exit_dispatchable, g_slice_exit_dirty,

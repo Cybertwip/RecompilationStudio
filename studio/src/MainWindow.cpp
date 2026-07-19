@@ -217,12 +217,12 @@ MainWindow::MainWindow(QWidget* parent)
   auto* padModeLabel = new QLabel(QStringLiteral("Controller pad type"), padModeRow);
   padModeLabel->setMinimumWidth(142);
   padModeCombo_ = new QComboBox(padModeRow);
+  padModeCombo_->addItem(QStringLiteral("D-Pad (digital)"),
+                         QStringLiteral("digital"));
   padModeCombo_->addItem(QStringLiteral("Hybrid (auto digital / analog)"),
                          QStringLiteral("hybrid"));
   padModeCombo_->addItem(QStringLiteral("Analog (DualShock)"),
                          QStringLiteral("analog"));
-  padModeCombo_->addItem(QStringLiteral("D-Pad (digital)"),
-                         QStringLiteral("digital"));
   configureReadOnlyComboBox(padModeCombo_);
   padModeCombo_->setCurrentIndex(0);
   padModeCombo_->setToolTip(
@@ -550,7 +550,7 @@ void MainWindow::applyTheme() {
 
 QString MainWindow::detectGhidraHome() const {
   const QString environment = qEnvironmentVariable("GHIDRA_HOME");
-  if (QFileInfo(QDir(environment).filePath(QStringLiteral("support/analyzeHeadless"))).isExecutable()) {
+  if (!ghidraAnalyzeHeadlessPath(environment).isEmpty()) {
     return environment;
   }
   const QString toolsDir = QDir::home().filePath(QStringLiteral("Tools"));
@@ -558,7 +558,7 @@ QString MainWindow::detectGhidraHome() const {
   const auto candidates = tools.entryList({ QStringLiteral("ghidra_*_PUBLIC") }, QDir::Dirs, QDir::Name | QDir::Reversed);
   for (const auto& candidate : candidates) {
     const QString path = tools.filePath(candidate);
-    if (QFileInfo(QDir(path).filePath(QStringLiteral("support/analyzeHeadless"))).isExecutable()) {
+    if (!ghidraAnalyzeHeadlessPath(path).isEmpty()) {
       return path;
     }
   }
@@ -588,7 +588,7 @@ void MainWindow::loadSettings() {
   skipBiosBoot_->setChecked(settings.value(QStringLiteral("runtime/skip_bios_boot"), false).toBool());
   {
     const QString padMode = settings.value(QStringLiteral("runtime/pad_mode"),
-                                            QStringLiteral("hybrid")).toString();
+                                            QStringLiteral("digital")).toString();
     const int padIndex = padModeCombo_->findData(padMode);
     padModeCombo_->setCurrentIndex(padIndex >= 0 ? padIndex : 0);
   }
@@ -917,13 +917,23 @@ void MainWindow::updatePlatformControls() {
     outputEdit_->setPlaceholderText(QStringLiteral("Destination for the signed .app"));
     buildButton_->setText(QStringLiteral("Build Signed .app"));
   } else if (targetPlatform == TargetPlatform::Windows) {
+#if defined(Q_OS_WIN)
+    signingNote_->setText(QStringLiteral(
+      "Windows exports use the native Visual Studio 2022 MSVC x64 toolchain and are delivered unsigned."));
+#else
     signingNote_->setText(QStringLiteral(
       "Windows exports use the installed x86_64-w64-mingw32 MinGW toolchain and are delivered unsigned."));
+#endif
     outputEdit_->setPlaceholderText(QStringLiteral("Destination for the Windows app folder"));
     buildButton_->setText(QStringLiteral("Build Windows App"));
   } else {
+#if defined(Q_OS_LINUX)
+    signingNote_->setText(QStringLiteral(
+      "Linux exports use the native GCC toolchain, bundle SDL2, and are delivered unsigned."));
+#else
     signingNote_->setText(QStringLiteral(
       "Linux exports use the installed x86_64-unknown-linux-gnu toolchain, bundle SDL2, and are delivered unsigned."));
+#endif
     outputEdit_->setPlaceholderText(QStringLiteral("Destination for the Linux app folder"));
     buildButton_->setText(QStringLiteral("Build Linux App"));
   }

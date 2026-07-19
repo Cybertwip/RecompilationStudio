@@ -134,7 +134,7 @@ QString defaultControllerToml(const QString& padMode) {
   QString mode = padMode.trimmed().toLower();
   if (mode != QStringLiteral("hybrid") && mode != QStringLiteral("analog") &&
       mode != QStringLiteral("digital")) {
-    mode = QStringLiteral("hybrid");
+    mode = QStringLiteral("digital");
   }
   const bool hybrid = mode == QStringLiteral("hybrid");
   return QStringLiteral(
@@ -480,6 +480,21 @@ QString findExecutable(const QString& name) {
     }
   }
   return {};
+}
+
+QString ghidraAnalyzeHeadlessPath(const QString& ghidraHome) {
+  if (!QFileInfo(QDir(ghidraHome).filePath(
+        QStringLiteral("Ghidra/application.properties"))).isFile()) {
+    return {};
+  }
+  const QDir supportDir(QDir(ghidraHome).filePath(QStringLiteral("support")));
+#if defined(Q_OS_WIN)
+  const QString launcher = supportDir.filePath(QStringLiteral("analyzeHeadless.bat"));
+  return QFileInfo(launcher).isFile() ? launcher : QString();
+#else
+  const QString launcher = supportDir.filePath(QStringLiteral("analyzeHeadless"));
+  return QFileInfo(launcher).isExecutable() ? launcher : QString();
+#endif
 }
 
 } // namespace psxstudio

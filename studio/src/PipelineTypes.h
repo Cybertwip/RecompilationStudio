@@ -89,7 +89,7 @@ struct PipelineRequest {
   bool skipBiosBoot{ false };
   bool macosGipGamepad{ true };
   /* Fixed pad type baked into game.toml: hybrid | analog | digital. */
-  QString padMode{ QStringLiteral("hybrid") };
+  QString padMode{ QStringLiteral("digital") };
   bool overwriteOutput{ false };
 
   QJsonObject toJson(bool includeSecret = false) const {

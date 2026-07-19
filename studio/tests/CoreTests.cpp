@@ -86,6 +86,28 @@ int main(int argc, char** argv) {
   }
 
   QString error;
+  const QString fakeGhidraHome = QDir(temp.path()).filePath(QStringLiteral("ghidra"));
+  const QString fakeGhidraProperties =
+    QDir(fakeGhidraHome).filePath(QStringLiteral("Ghidra/application.properties"));
+#if defined(Q_OS_WIN)
+  const QString fakeGhidraLauncher =
+    QDir(fakeGhidraHome).filePath(QStringLiteral("support/analyzeHeadless.bat"));
+#else
+  const QString fakeGhidraLauncher =
+    QDir(fakeGhidraHome).filePath(QStringLiteral("support/analyzeHeadless"));
+#endif
+  check(psxstudio::writeText(fakeGhidraProperties, QStringLiteral("application.name=Ghidra"), error),
+        error);
+  check(psxstudio::writeText(fakeGhidraLauncher, QStringLiteral("launcher"), error), error);
+#if !defined(Q_OS_WIN)
+  check(QFile::setPermissions(fakeGhidraLauncher,
+                              QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                              QFileDevice::ExeOwner),
+        QStringLiteral("fake Ghidra launcher permissions"));
+#endif
+  check(psxstudio::ghidraAnalyzeHeadlessPath(fakeGhidraHome) == fakeGhidraLauncher,
+        QStringLiteral("host Ghidra analyzeHeadless launcher resolution"));
+
   const QString binPath = QDir(temp.path()).filePath(QStringLiteral("test.bin"));
   const QString cuePath = QDir(temp.path()).filePath(QStringLiteral("test.cue"));
   check(makeTestDisc(binPath, error), error);
@@ -138,11 +160,16 @@ int main(int argc, char** argv) {
         QStringLiteral("direct-to-game boot TOML"));
 
   const QString controllerDefaults = psxstudio::defaultControllerToml();
-  check(controllerDefaults.contains(QStringLiteral("default_mode = \"hybrid\"")) &&
-          controllerDefaults.contains(QStringLiteral("allow_hybrid = true")) &&
+  check(controllerDefaults.contains(QStringLiteral("default_mode = \"digital\"")) &&
+          controllerDefaults.contains(QStringLiteral("allow_hybrid = false")) &&
           controllerDefaults.contains(QStringLiteral("lock_mode = true")) &&
-          !controllerDefaults.contains(QStringLiteral("default_mode = \"digital\"")),
-        QStringLiteral("Studio locks a config-capable Hybrid pad by default"));
+          !controllerDefaults.contains(QStringLiteral("default_mode = \"hybrid\"")),
+        QStringLiteral("Studio locks a digital D-Pad by default"));
+  const QString hybridPad = psxstudio::defaultControllerToml(QStringLiteral("hybrid"));
+  check(hybridPad.contains(QStringLiteral("default_mode = \"hybrid\"")) &&
+          hybridPad.contains(QStringLiteral("allow_hybrid = true")) &&
+          hybridPad.contains(QStringLiteral("lock_mode = true")),
+        QStringLiteral("Studio can lock a config-capable Hybrid pad type"));
   const QString digitalPad = psxstudio::defaultControllerToml(QStringLiteral("digital"));
   check(digitalPad.contains(QStringLiteral("default_mode = \"digital\"")) &&
           digitalPad.contains(QStringLiteral("allow_hybrid = false")) &&

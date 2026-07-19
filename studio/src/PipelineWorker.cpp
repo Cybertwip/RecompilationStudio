@@ -318,6 +318,8 @@ QString makeProjectCMake(const PipelineRequest& request,
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
+  const bool nativeWindowsTarget = windowsTarget &&
+    hostTargetPlatform() == TargetPlatform::Windows;
   QString cmake;
   cmake += QStringLiteral("cmake_minimum_required(VERSION 3.20)\n");
   cmake += windowsTarget ? QStringLiteral("project(GeneratedPSXApp C CXX RC)\n")
@@ -328,19 +330,36 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("set(FETCHCONTENT_QUIET OFF)\n");
     cmake += QStringLiteral("set(FETCHCONTENT_BASE_DIR %1 CACHE PATH \"\" FORCE)\n")
                .arg(cmakeQuoted(dependencyCachePath));
-    cmake += QStringLiteral("FetchContent_Declare(SDL2Mingw\n");
-    cmake += QStringLiteral("  URL \"https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz\"\n");
-    cmake += QStringLiteral("  URL_HASH SHA256=83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2\n");
-    cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
-    cmake += QStringLiteral("FetchContent_GetProperties(SDL2Mingw)\n");
-    cmake += QStringLiteral("if(NOT sdl2mingw_POPULATED)\n");
-    cmake += QStringLiteral("  FetchContent_Populate(SDL2Mingw)\nendif()\n");
-    cmake += QStringLiteral("set(_PSX_SDL2_ROOT \"${sdl2mingw_SOURCE_DIR}/x86_64-w64-mingw32\")\n");
-    cmake += QStringLiteral("find_package(SDL2 CONFIG REQUIRED PATHS \"${_PSX_SDL2_ROOT}/lib/cmake/SDL2\" NO_DEFAULT_PATH)\n");
-    cmake += QStringLiteral("set(SDL2_INCLUDE_DIRS \"${_PSX_SDL2_ROOT}/include;${_PSX_SDL2_ROOT}/include/SDL2\")\n");
-    cmake += QStringLiteral("set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
-    cmake += QStringLiteral("set(SDL2_STATIC_LDFLAGS ${SDL2_LIBRARIES})\n");
-    cmake += QStringLiteral("set(PSX_STATIC_RUNTIME ON CACHE BOOL \"\" FORCE)\n");
+    if (nativeWindowsTarget) {
+      cmake += QStringLiteral("FetchContent_Declare(SDL2Source\n");
+      cmake += QStringLiteral("  URL %1\n")
+                 .arg(cmakeQuoted(QString::fromLatin1(kSdl2SourceUrl)));
+      cmake += QStringLiteral("  URL_HASH SHA256=%1\n")
+                 .arg(QString::fromLatin1(kSdl2SourceSha256));
+      cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
+      cmake += QStringLiteral("set(SDL_SHARED OFF CACHE BOOL \"\" FORCE)\n");
+      cmake += QStringLiteral("set(SDL_STATIC ON CACHE BOOL \"\" FORCE)\n");
+      cmake += QStringLiteral("set(SDL_TEST OFF CACHE BOOL \"\" FORCE)\n");
+      cmake += QStringLiteral("set(SDL2_DISABLE_INSTALL ON CACHE BOOL \"\" FORCE)\n");
+      cmake += QStringLiteral("set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded$<$<CONFIG:Debug>:Debug>\")\n");
+      cmake += QStringLiteral("FetchContent_MakeAvailable(SDL2Source)\n");
+      cmake += QStringLiteral("set(SDL2_INCLUDE_DIRS \"${sdl2source_SOURCE_DIR}/include\")\n");
+      cmake += QStringLiteral("set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
+    } else {
+      cmake += QStringLiteral("FetchContent_Declare(SDL2Mingw\n");
+      cmake += QStringLiteral("  URL \"https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz\"\n");
+      cmake += QStringLiteral("  URL_HASH SHA256=83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2\n");
+      cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
+      cmake += QStringLiteral("FetchContent_GetProperties(SDL2Mingw)\n");
+      cmake += QStringLiteral("if(NOT sdl2mingw_POPULATED)\n");
+      cmake += QStringLiteral("  FetchContent_Populate(SDL2Mingw)\nendif()\n");
+      cmake += QStringLiteral("set(_PSX_SDL2_ROOT \"${sdl2mingw_SOURCE_DIR}/x86_64-w64-mingw32\")\n");
+      cmake += QStringLiteral("find_package(SDL2 CONFIG REQUIRED PATHS \"${_PSX_SDL2_ROOT}/lib/cmake/SDL2\" NO_DEFAULT_PATH)\n");
+      cmake += QStringLiteral("set(SDL2_INCLUDE_DIRS \"${_PSX_SDL2_ROOT}/include;${_PSX_SDL2_ROOT}/include/SDL2\")\n");
+      cmake += QStringLiteral("set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
+      cmake += QStringLiteral("set(SDL2_STATIC_LDFLAGS ${SDL2_LIBRARIES})\n");
+      cmake += QStringLiteral("set(PSX_STATIC_RUNTIME ON CACHE BOOL \"\" FORCE)\n");
+    }
   } else if (linuxTarget) {
     cmake += QStringLiteral("include(FetchContent)\n");
     cmake += QStringLiteral("set(FETCHCONTENT_QUIET OFF)\n");
@@ -419,6 +438,11 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  APP_SUPPORT_DIR_NAME %1\n)\n").arg(cmakeQuoted(appSupportName));
   cmake += QStringLiteral("target_compile_definitions(psx-runtime PRIVATE PSX_EXPECTED_BIOS_CRC32=0x%1u)\n")
              .arg(expectedBiosCrc, 8, 16, QLatin1Char('0'));
+  cmake += QStringLiteral("if(MSVC)\n");
+  cmake += QStringLiteral("  target_compile_options(psx-runtime PRIVATE $<$<CONFIG:Release>:/O2> $<$<CONFIG:Release>:/Ob3>)\n");
+  cmake += QStringLiteral("else()\n");
+  cmake += QStringLiteral("  target_compile_options(psx-runtime PRIVATE $<$<CONFIG:Release>:-O3>)\n");
+  cmake += QStringLiteral("endif()\n");
   if (windowsTarget) {
     cmake += QStringLiteral("target_sources(psx-runtime PRIVATE %1)\n")
                .arg(cmakeQuoted(platformMetadataPath));
@@ -497,6 +521,138 @@ QString versionText(const QString& program, const QStringList& args) {
   return QString::fromUtf8(output).trimmed();
 }
 
+QString findWorkingPython() {
+  QStringList candidates;
+  candidates << findExecutable(QStringLiteral("python3"))
+             << findExecutable(QStringLiteral("python"));
+#if defined(Q_OS_WIN)
+  QDir pythonPrograms(QDir(qEnvironmentVariable("LOCALAPPDATA"))
+                        .filePath(QStringLiteral("Programs/Python")));
+  for (const auto& directory : pythonPrograms.entryList(
+         { QStringLiteral("Python3*") }, QDir::Dirs | QDir::NoDotAndDotDot,
+         QDir::Name | QDir::Reversed)) {
+    candidates << pythonPrograms.filePath(directory + QStringLiteral("/python.exe"));
+  }
+#endif
+  candidates.removeAll(QString());
+  candidates.removeDuplicates();
+  for (const auto& candidate : candidates) {
+    if (!QFileInfo(candidate).isExecutable()) {
+      continue;
+    }
+    QProcess process;
+    process.start(candidate, { QStringLiteral("--version") });
+    if (process.waitForStarted(3000) && process.waitForFinished(5000) &&
+        process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
+QString findJava21Home() {
+  QStringList candidates{ qEnvironmentVariable("JAVA_HOME") };
+#if defined(Q_OS_MACOS)
+  QProcess javaHomeProcess;
+  javaHomeProcess.start(QStringLiteral("/usr/libexec/java_home"),
+                        { QStringLiteral("-v"), QStringLiteral("21") });
+  if (javaHomeProcess.waitForStarted(3000) && javaHomeProcess.waitForFinished(5000) &&
+      javaHomeProcess.exitStatus() == QProcess::NormalExit &&
+      javaHomeProcess.exitCode() == 0) {
+    candidates << QString::fromUtf8(javaHomeProcess.readAllStandardOutput()).trimmed();
+  }
+#endif
+#if defined(Q_OS_WIN)
+  for (const auto& vendor : { QStringLiteral("Microsoft"),
+                              QStringLiteral("Eclipse Adoptium") }) {
+    QDir vendorDirectory(QDir(qEnvironmentVariable("ProgramFiles")).filePath(vendor));
+    for (const auto& directory : vendorDirectory.entryList(
+           { QStringLiteral("jdk-21*") }, QDir::Dirs | QDir::NoDotAndDotDot,
+           QDir::Name | QDir::Reversed)) {
+      candidates << vendorDirectory.filePath(directory);
+    }
+  }
+#endif
+  const QString pathJava = findExecutable(
+#if defined(Q_OS_WIN)
+    QStringLiteral("java.exe")
+#else
+    QStringLiteral("java")
+#endif
+  );
+  if (!pathJava.isEmpty()) {
+    const QString canonicalJava = QFileInfo(pathJava).canonicalFilePath();
+    candidates << QDir(QFileInfo(canonicalJava).absolutePath()).absoluteFilePath(
+      QStringLiteral(".."));
+  }
+  candidates.removeAll(QString());
+  candidates.removeDuplicates();
+  for (const auto& candidate : candidates) {
+#if defined(Q_OS_WIN)
+    const QString java = QDir(candidate).filePath(QStringLiteral("bin/java.exe"));
+#else
+    const QString java = QDir(candidate).filePath(QStringLiteral("bin/java"));
+#endif
+    if (!QFileInfo(java).isExecutable()) {
+      continue;
+    }
+    QProcess process;
+    process.start(java, { QStringLiteral("--version") });
+    if (!process.waitForStarted(3000) || !process.waitForFinished(5000) ||
+        process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+      continue;
+    }
+    const QString version = QString::fromUtf8(
+      process.readAllStandardOutput() + process.readAllStandardError());
+    if (version.contains(QRegularExpression(QStringLiteral(R"((?m)^openjdk 21\.)")))) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
+QString visualStudio2022Installation() {
+#if defined(Q_OS_WIN)
+  QString vswhere = QDir(qEnvironmentVariable("ProgramFiles(x86)"))
+                      .filePath(QStringLiteral("Microsoft Visual Studio/Installer/vswhere.exe"));
+  if (!QFileInfo(vswhere).isExecutable()) {
+    vswhere = findExecutable(QStringLiteral("vswhere.exe"));
+  }
+  if (!QFileInfo(vswhere).isExecutable()) {
+    return {};
+  }
+  QProcess process;
+  process.start(vswhere,
+                { QStringLiteral("-latest"), QStringLiteral("-version"),
+                  QStringLiteral("[17.0,18.0)"), QStringLiteral("-products"),
+                  QStringLiteral("*"), QStringLiteral("-requires"),
+                  QStringLiteral("Microsoft.VisualStudio.Component.VC.Tools.x86.x64"),
+                  QStringLiteral("-property"), QStringLiteral("installationPath") });
+  if (!process.waitForStarted(5000) || !process.waitForFinished(15000) ||
+      process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+    return {};
+  }
+  const QString installation = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+  return QFileInfo(installation).isDir() ? installation : QString();
+#else
+  return {};
+#endif
+}
+
+QString visualStudio2022Tool(const QString& installation, const QString& executable) {
+  QDir tools(QDir(installation).filePath(QStringLiteral("VC/Tools/MSVC")));
+  const auto versions = tools.entryList(QDir::Dirs | QDir::NoDotAndDotDot,
+                                        QDir::Name | QDir::Reversed);
+  for (const auto& version : versions) {
+    const QString path = tools.filePath(
+      version + QStringLiteral("/bin/Hostx64/x64/") + executable);
+    if (QFileInfo(path).isExecutable()) {
+      return path;
+    }
+  }
+  return {};
+}
+
 } // namespace
 
 PipelineWorker::PipelineWorker(QObject* parent)
@@ -544,14 +700,46 @@ bool PipelineWorker::runCommand(const QString& program,
   auto environment = environmentOverride
     ? *environmentOverride
     : QProcessEnvironment::systemEnvironment();
+#if defined(Q_OS_WIN)
+  const bool windowsBatch =
+    QFileInfo(program).suffix().compare(QStringLiteral("bat"), Qt::CaseInsensitive) == 0 ||
+    QFileInfo(program).suffix().compare(QStringLiteral("cmd"), Qt::CaseInsensitive) == 0;
+  if (windowsBatch) {
+    const QString javaHome = findJava21Home();
+    if (!javaHome.isEmpty()) {
+      environment.insert(QStringLiteral("JAVA_HOME"), javaHome);
+      const QString javaBin = QDir(javaHome).filePath(QStringLiteral("bin"));
+      QString path = environment.value(QStringLiteral("PATH"));
+      if (!path.startsWith(javaBin + QDir::listSeparator(), Qt::CaseInsensitive)) {
+        path.prepend(javaBin + QDir::listSeparator());
+      }
+      environment.insert(QStringLiteral("PATH"), path);
+    }
+  }
+#endif
+#if !defined(Q_OS_WIN)
   QString path = environment.value(QStringLiteral("PATH"));
   const QString additions = QStringLiteral("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
   if (!path.startsWith(additions)) {
     path = additions + QStringLiteral(":") + path;
   }
   environment.insert(QStringLiteral("PATH"), path);
+#endif
   process.setProcessEnvironment(environment);
-  process.start(program, arguments);
+  QString processProgram = program;
+  QStringList processArguments = arguments;
+#if defined(Q_OS_WIN)
+  if (windowsBatch) {
+    processProgram = environment.value(QStringLiteral("COMSPEC"));
+    if (processProgram.isEmpty()) {
+      processProgram = findExecutable(QStringLiteral("cmd.exe"));
+    }
+    processArguments.prepend(program);
+    processArguments.prepend(QStringLiteral("/c"));
+    processArguments.prepend(QStringLiteral("/d"));
+  }
+#endif
+  process.start(processProgram, processArguments);
   if (!process.waitForStarted(15000)) {
     emit logLine(QStringLiteral("Could not start %1: %2").arg(program, process.errorString()));
     return false;
@@ -623,6 +811,12 @@ void PipelineWorker::run(PipelineRequest request) {
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
+  const bool nativeWindowsTarget = windowsTarget &&
+    hostTargetPlatform() == TargetPlatform::Windows;
+  const bool nativeLinuxTarget = linuxTarget &&
+    hostTargetPlatform() == TargetPlatform::Linux;
+  const bool crossWindowsTarget = windowsTarget && !nativeWindowsTarget;
+  const bool crossLinuxTarget = linuxTarget && !nativeLinuxTarget;
   const bool directoryPackageTarget = windowsTarget || linuxTarget;
 
   constexpr int totalStages = 9;
@@ -711,65 +905,127 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("The PSXRecomp framework root is invalid."), {});
     return;
   }
-  const QString analyzeHeadless = QDir(request.ghidraHome).filePath(QStringLiteral("support/analyzeHeadless"));
-  if (!QFileInfo(analyzeHeadless).isExecutable()) {
+  const QString analyzeHeadless = ghidraAnalyzeHeadlessPath(request.ghidraHome);
+  if (analyzeHeadless.isEmpty()) {
     fail(QStringLiteral("The selected Ghidra installation does not provide analyzeHeadless."), {});
     return;
   }
   const QString cmake = findExecutable(QStringLiteral("cmake"));
-  const QString ninja = findExecutable(QStringLiteral("ninja"));
-  const QString python = findExecutable(QStringLiteral("python3"));
+  const QString ninja = hostTargetPlatform() == TargetPlatform::Windows
+    ? QString() : findExecutable(QStringLiteral("ninja"));
+  const QString python = findWorkingPython();
+  const QString javaHome = findJava21Home();
+#if defined(Q_OS_WIN)
+  const QString java = javaHome.isEmpty()
+    ? QString() : QDir(javaHome).filePath(QStringLiteral("bin/java.exe"));
+#else
+  const QString java = javaHome.isEmpty()
+    ? QString() : QDir(javaHome).filePath(QStringLiteral("bin/java"));
+#endif
+  const QString git = findExecutable(QStringLiteral("git"));
   const QString pkgConfig = macosTarget ? findExecutable(QStringLiteral("pkg-config")) : QString();
   const QString nm = macosTarget ? QStringLiteral("/usr/bin/nm") : QString();
   const QString openssl = macosTarget ? findOpenSsl3() : QString();
-  const QString mingwGcc = windowsTarget
+  const QString hostClang = hostTargetPlatform() == TargetPlatform::MacOS
+    ? QStringLiteral("/usr/bin/clang") : QString();
+  const QString hostClangxx = hostTargetPlatform() == TargetPlatform::MacOS
+    ? QStringLiteral("/usr/bin/clang++") : QString();
+  const QString visualStudio = nativeWindowsTarget ? visualStudio2022Installation() : QString();
+  const QString msvcCl = nativeWindowsTarget
+    ? visualStudio2022Tool(visualStudio, QStringLiteral("cl.exe")) : QString();
+  const QString msvcDumpbin = nativeWindowsTarget
+    ? visualStudio2022Tool(visualStudio, QStringLiteral("dumpbin.exe")) : QString();
+  const QString mingwGcc = crossWindowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-gcc")) : QString();
-  const QString mingwGxx = windowsTarget
+  const QString mingwGxx = crossWindowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-g++")) : QString();
-  const QString mingwWindres = windowsTarget
+  const QString mingwWindres = crossWindowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-windres")) : QString();
-  const QString mingwAr = windowsTarget
+  const QString mingwAr = crossWindowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-ar")) : QString();
-  const QString mingwRanlib = windowsTarget
+  const QString mingwRanlib = crossWindowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-ranlib")) : QString();
-  const QString mingwStrip = windowsTarget
+  const QString mingwStrip = crossWindowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-strip")) : QString();
-  const QString mingwObjdump = windowsTarget
+  const QString mingwObjdump = crossWindowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-objdump")) : QString();
   const QString linuxGcc = linuxTarget
-    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-gcc")) : QString();
+    ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-gcc")
+                                      : QStringLiteral("gcc")) : QString();
   const QString linuxGxx = linuxTarget
-    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-g++")) : QString();
+    ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-g++")
+                                      : QStringLiteral("g++")) : QString();
   const QString linuxAr = linuxTarget
-    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-ar")) : QString();
+    ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-ar")
+                                      : QStringLiteral("ar")) : QString();
   const QString linuxRanlib = linuxTarget
-    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-ranlib")) : QString();
+    ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-ranlib")
+                                      : QStringLiteral("ranlib")) : QString();
   const QString linuxStrip = linuxTarget
-    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-strip")) : QString();
+    ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-strip")
+                                      : QStringLiteral("strip")) : QString();
   const QString linuxReadelf = linuxTarget
-    ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-readelf")) : QString();
+    ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-readelf")
+                                      : QStringLiteral("readelf")) : QString();
   QString linuxSysroot;
   if (macosTarget && openssl.isEmpty()) {
     fail(QStringLiteral("OpenSSL 3 with PKCS#12 legacy-provider support is required. Install openssl@3 with Homebrew or set PSXRECOMP_OPENSSL."), {});
     return;
   }
-  QStringList requiredTools{ cmake, ninja, python };
-  if (windowsTarget) {
-    requiredTools << mingwGcc << mingwGxx << mingwWindres << mingwAr
-                  << mingwRanlib << mingwStrip << mingwObjdump;
-  } else if (linuxTarget) {
-    requiredTools << linuxGcc << linuxGxx << linuxAr << linuxRanlib
-                  << linuxStrip << linuxReadelf;
-  } else {
-    requiredTools << pkgConfig << openssl
-                  << QStringLiteral("/usr/bin/iconutil") << QStringLiteral("/usr/bin/security")
-                  << QStringLiteral("/usr/bin/codesign") << QStringLiteral("/usr/bin/ditto")
-                  << QStringLiteral("/usr/bin/otool") << nm
-                  << QStringLiteral("/usr/bin/install_name_tool");
+  QList<QPair<QString, QString>> requiredTools{
+    { QStringLiteral("CMake"), cmake },
+    { QStringLiteral("Python 3"), python },
+    { QStringLiteral("OpenJDK 21 for Ghidra"), java },
+    { QStringLiteral("Git"), git },
+  };
+  if (hostTargetPlatform() != TargetPlatform::Windows) {
+    requiredTools.append({ QStringLiteral("Ninja"), ninja });
+  }
+  if (hostTargetPlatform() == TargetPlatform::MacOS) {
+    requiredTools.append({ QStringLiteral("Apple Clang C compiler"), hostClang });
+    requiredTools.append({ QStringLiteral("Apple Clang C++ compiler"), hostClangxx });
+  }
+  if (nativeWindowsTarget) {
+    requiredTools.append({ QStringLiteral("Visual Studio 2022 MSVC compiler (cl.exe)"), msvcCl });
+    requiredTools.append({ QStringLiteral("Visual Studio 2022 PE inspector (dumpbin.exe)"), msvcDumpbin });
+  } else if (crossWindowsTarget) {
+    requiredTools.append({ QStringLiteral("MinGW x86_64 C compiler"), mingwGcc });
+    requiredTools.append({ QStringLiteral("MinGW x86_64 C++ compiler"), mingwGxx });
+    requiredTools.append({ QStringLiteral("MinGW resource compiler"), mingwWindres });
+    requiredTools.append({ QStringLiteral("MinGW archiver"), mingwAr });
+    requiredTools.append({ QStringLiteral("MinGW ranlib"), mingwRanlib });
+    requiredTools.append({ QStringLiteral("MinGW strip"), mingwStrip });
+    requiredTools.append({ QStringLiteral("MinGW objdump"), mingwObjdump });
+  }
+  if (linuxTarget) {
+    requiredTools.append({ nativeLinuxTarget ? QStringLiteral("GCC C compiler")
+                                             : QStringLiteral("Linux cross C compiler"), linuxGcc });
+    requiredTools.append({ nativeLinuxTarget ? QStringLiteral("GCC C++ compiler")
+                                             : QStringLiteral("Linux cross C++ compiler"), linuxGxx });
+    requiredTools.append({ QStringLiteral("GNU ar"), linuxAr });
+    requiredTools.append({ QStringLiteral("GNU ranlib"), linuxRanlib });
+    requiredTools.append({ QStringLiteral("GNU strip"), linuxStrip });
+    requiredTools.append({ QStringLiteral("GNU readelf"), linuxReadelf });
+  }
+  if (macosTarget) {
+    requiredTools.append({ QStringLiteral("pkg-config"), pkgConfig });
+    requiredTools.append({ QStringLiteral("OpenSSL 3"), openssl });
+    requiredTools.append({ QStringLiteral("iconutil"), QStringLiteral("/usr/bin/iconutil") });
+    requiredTools.append({ QStringLiteral("security"), QStringLiteral("/usr/bin/security") });
+    requiredTools.append({ QStringLiteral("codesign"), QStringLiteral("/usr/bin/codesign") });
+    requiredTools.append({ QStringLiteral("ditto"), QStringLiteral("/usr/bin/ditto") });
+    requiredTools.append({ QStringLiteral("otool"), QStringLiteral("/usr/bin/otool") });
+    requiredTools.append({ QStringLiteral("nm"), nm });
+    requiredTools.append({ QStringLiteral("install_name_tool"), QStringLiteral("/usr/bin/install_name_tool") });
   }
   for (const auto& tool : requiredTools) {
-    if (tool.isEmpty() || !QFileInfo(tool).isExecutable()) {
-      fail(QStringLiteral("A required build tool is unavailable: %1").arg(tool.isEmpty() ? QStringLiteral("unknown") : tool), {});
+    if (tool.second.isEmpty()) {
+      fail(QStringLiteral("A required build tool is unavailable: %1").arg(tool.first), {});
+      return;
+    }
+    if (!QFileInfo(tool.second).isExecutable()) {
+      fail(QStringLiteral("A required build tool is not executable: %1 (%2)")
+             .arg(tool.first, tool.second), {});
       return;
     }
   }
@@ -777,16 +1033,26 @@ void PipelineWorker::run(PipelineRequest request) {
     const QString compilerTarget =
       versionText(linuxGcc, { QStringLiteral("-dumpmachine") }).trimmed();
     linuxSysroot = versionText(linuxGcc, { QStringLiteral("-print-sysroot") }).trimmed();
-    if (compilerTarget != QStringLiteral("x86_64-unknown-linux-gnu") ||
-        !QFileInfo(linuxSysroot).isDir()) {
-      fail(QStringLiteral("The selected Linux compiler does not provide the required x86_64-unknown-linux-gnu target and sysroot."),
+    const bool compilerValid = nativeLinuxTarget
+      ? compilerTarget.contains(QStringLiteral("x86_64")) &&
+        compilerTarget.contains(QStringLiteral("linux"))
+      : compilerTarget == QStringLiteral("x86_64-unknown-linux-gnu") &&
+        QFileInfo(linuxSysroot).isDir();
+    if (!compilerValid) {
+      fail(nativeLinuxTarget
+             ? QStringLiteral("The native GCC compiler does not target x86-64 Linux: %1")
+                 .arg(compilerTarget)
+             : QStringLiteral("The Linux cross-compiler does not provide the required x86_64-unknown-linux-gnu target and sysroot."),
            {});
       return;
     }
   }
   emit logLine(QStringLiteral("Target platform: %1")
                  .arg(targetPlatformDisplayName(request.targetPlatform)));
-  if (windowsTarget) {
+  if (nativeWindowsTarget) {
+    emit logLine(QStringLiteral("Visual Studio 2022: %1").arg(visualStudio));
+    emit logLine(QStringLiteral("MSVC C/C++ compiler: %1").arg(msvcCl));
+  } else if (crossWindowsTarget) {
     emit logLine(QStringLiteral("MinGW C compiler: %1").arg(mingwGcc));
     emit logLine(QStringLiteral("MinGW C++ compiler: %1").arg(mingwGxx));
   } else if (linuxTarget) {
@@ -915,7 +1181,9 @@ void PipelineWorker::run(PipelineRequest request) {
     sensitivePemPath.clear();
     emit logLine(QStringLiteral("Signing certificate password validated; PKCS#12 normalized for macOS."));
   } else if (windowsTarget) {
-    emit logLine(QStringLiteral("Windows package signing: not requested; the MinGW export is unsigned."));
+    emit logLine(nativeWindowsTarget
+      ? QStringLiteral("Windows package signing: not requested; the Visual Studio 2022 MSVC export is unsigned.")
+      : QStringLiteral("Windows package signing: not requested; the MinGW cross-compiled export is unsigned."));
   } else {
     emit logLine(QStringLiteral("Linux package signing: not requested; the cross-compiled export is unsigned."));
   }
@@ -1125,20 +1393,47 @@ void PipelineWorker::run(PipelineRequest request) {
   nextStage(QStringLiteral("Generate native sources"));
   const QString cacheRoot = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
                               .filePath(QStringLiteral("org.psxrecomp.studio"));
-  const QString recompilerBuild = QDir(cacheRoot).filePath(QStringLiteral("recompiler-build"));
+  const QString recompilerBuild = QDir(cacheRoot).filePath(
+    hostTargetPlatform() == TargetPlatform::Windows
+      ? QStringLiteral("recompiler-build-vs2022-release")
+      : QStringLiteral("recompiler-build-ninja-release"));
   QDir().mkpath(recompilerBuild);
   const QString recompilerSource = QDir(request.frameworkRoot).filePath(QStringLiteral("recompiler"));
+  QStringList recompilerConfigureArguments{
+    QStringLiteral("-S"), recompilerSource, QStringLiteral("-B"), recompilerBuild
+  };
+  if (hostTargetPlatform() == TargetPlatform::Windows) {
+    recompilerConfigureArguments << QStringLiteral("-G")
+                                 << QStringLiteral("Visual Studio 17 2022")
+                                 << QStringLiteral("-A") << QStringLiteral("x64");
+  } else {
+    recompilerConfigureArguments << QStringLiteral("-G") << QStringLiteral("Ninja")
+                                 << QStringLiteral("-DCMAKE_BUILD_TYPE=Release");
+    if (hostTargetPlatform() == TargetPlatform::MacOS) {
+      recompilerConfigureArguments << QStringLiteral("-DCMAKE_C_COMPILER=%1").arg(hostClang)
+                                   << QStringLiteral("-DCMAKE_CXX_COMPILER=%1").arg(hostClangxx);
+    } else {
+      recompilerConfigureArguments << QStringLiteral("-DCMAKE_C_COMPILER=%1").arg(linuxGcc)
+                                   << QStringLiteral("-DCMAKE_CXX_COMPILER=%1").arg(linuxGxx);
+    }
+  }
+  QStringList recompilerBuildArguments{
+    QStringLiteral("--build"), recompilerBuild, QStringLiteral("--target"),
+    QStringLiteral("psxrecomp-bios"), QStringLiteral("psxrecomp-game"),
+    QStringLiteral("--parallel"), QString::number(std::max(1, QThread::idealThreadCount()))
+  };
+  if (hostTargetPlatform() == TargetPlatform::Windows) {
+    recompilerBuildArguments << QStringLiteral("--config") << QStringLiteral("Release");
+  }
   if (!runCommand(cmake,
-                  { QStringLiteral("-S"), recompilerSource, QStringLiteral("-B"), recompilerBuild,
-                    QStringLiteral("-G"), QStringLiteral("Ninja"),
-                    QStringLiteral("-DCMAKE_BUILD_TYPE=Release") },
+                  recompilerConfigureArguments,
                   request.frameworkRoot,
-                  QStringLiteral("cmake -S recompiler -B <tool-cache> -G Ninja -DCMAKE_BUILD_TYPE=Release"),
+                  hostTargetPlatform() == TargetPlatform::Windows
+                    ? QStringLiteral("cmake -S recompiler -B <tool-cache> -G \"Visual Studio 17 2022\" -A x64")
+                    : QStringLiteral("cmake -S recompiler -B <tool-cache> -G Ninja -DCMAKE_BUILD_TYPE=Release"),
                   10 * 60 * 1000) ||
       !runCommand(cmake,
-                  { QStringLiteral("--build"), recompilerBuild, QStringLiteral("--target"),
-                    QStringLiteral("psxrecomp-bios"), QStringLiteral("psxrecomp-game"),
-                    QStringLiteral("--parallel"), QString::number(std::max(1, QThread::idealThreadCount())) },
+                  recompilerBuildArguments,
                   request.frameworkRoot,
                   QStringLiteral("cmake --build <tool-cache> --target psxrecomp-bios psxrecomp-game"),
                   45 * 60 * 1000)) {
@@ -1150,8 +1445,14 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     return;
   }
-  const QString gameTool = QDir(recompilerBuild).filePath(QStringLiteral("psxrecomp-game"));
-  const QString biosTool = QDir(recompilerBuild).filePath(QStringLiteral("psxrecomp-bios"));
+  const QString recompilerToolDirectory = hostTargetPlatform() == TargetPlatform::Windows
+    ? QDir(recompilerBuild).filePath(QStringLiteral("Release")) : recompilerBuild;
+  const QString executableSuffix = hostTargetPlatform() == TargetPlatform::Windows
+    ? QStringLiteral(".exe") : QString();
+  const QString gameTool = QDir(recompilerToolDirectory).filePath(
+    QStringLiteral("psxrecomp-game") + executableSuffix);
+  const QString biosTool = QDir(recompilerToolDirectory).filePath(
+    QStringLiteral("psxrecomp-bios") + executableSuffix);
   if (!QFileInfo(gameTool).isExecutable() || !QFileInfo(biosTool).isExecutable()) {
     fail(QStringLiteral("The recompiler build completed without producing its required tools."), workspace);
     return;
@@ -1399,7 +1700,7 @@ void PipelineWorker::run(PipelineRequest request) {
     return;
   }
   const QString mingwToolchainPath = QDir(projectDir).filePath(QStringLiteral("mingw-toolchain.cmake"));
-  if (windowsTarget &&
+  if (crossWindowsTarget &&
       !writeText(mingwToolchainPath,
                  makeMingwToolchain(mingwGcc, mingwGxx, mingwWindres,
                                     mingwAr, mingwRanlib, mingwStrip), error)) {
@@ -1407,7 +1708,7 @@ void PipelineWorker::run(PipelineRequest request) {
     return;
   }
   const QString linuxToolchainPath = QDir(projectDir).filePath(QStringLiteral("linux-toolchain.cmake"));
-  if (linuxTarget &&
+  if (crossLinuxTarget &&
       !writeText(linuxToolchainPath,
                  makeLinuxToolchain(linuxGcc, linuxGxx, linuxAr,
                                     linuxRanlib, linuxStrip), error)) {
@@ -1415,46 +1716,73 @@ void PipelineWorker::run(PipelineRequest request) {
     return;
   }
 
-  nextStage(directoryPackageTarget
+  const bool crossCompilationTarget = crossWindowsTarget || crossLinuxTarget;
+  nextStage(crossCompilationTarget
     ? QStringLiteral("Cross-compile %1 app")
         .arg(targetPlatformDisplayName(request.targetPlatform))
     : QStringLiteral("Compile native app"));
   QStringList configureArguments{
-    QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
-    QStringLiteral("-G"), QStringLiteral("Ninja"),
-    QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
-    QStringLiteral("-DPSX_LAUNCHER=OFF"),
-    QStringLiteral("-DPSX_DEBUG_TOOLS=OFF")
+    QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir
   };
-  if (windowsTarget) {
+  if (nativeWindowsTarget) {
+    configureArguments << QStringLiteral("-G") << QStringLiteral("Visual Studio 17 2022")
+                       << QStringLiteral("-A") << QStringLiteral("x64");
+  } else {
+    configureArguments << QStringLiteral("-G") << QStringLiteral("Ninja")
+                       << QStringLiteral("-DCMAKE_BUILD_TYPE=Release");
+  }
+  configureArguments << QStringLiteral("-DPSX_LAUNCHER=OFF")
+                     << QStringLiteral("-DPSX_DEBUG_TOOLS=OFF");
+  if (crossWindowsTarget) {
     configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(mingwToolchainPath)
                        << QStringLiteral("-DPSX_STATIC_RUNTIME=ON")
                        << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
-  } else if (linuxTarget) {
+  } else if (nativeWindowsTarget) {
+    configureArguments << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
+  } else if (crossLinuxTarget) {
     configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(linuxToolchainPath)
                        << QStringLiteral("-DPSX_STATIC_RUNTIME=OFF")
                        << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
+  } else if (nativeLinuxTarget) {
+    configureArguments << QStringLiteral("-DCMAKE_C_COMPILER=%1").arg(linuxGcc)
+                       << QStringLiteral("-DCMAKE_CXX_COMPILER=%1").arg(linuxGxx)
+                       << QStringLiteral("-DPSX_STATIC_RUNTIME=OFF")
+                       << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
   } else {
-    configureArguments << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=%1")
+    configureArguments << QStringLiteral("-DCMAKE_C_COMPILER=%1").arg(hostClang)
+                       << QStringLiteral("-DCMAKE_CXX_COMPILER=%1").arg(hostClangxx)
+                       << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=%1")
                             .arg(request.macosGipGamepad ? QStringLiteral("ON")
                                                        : QStringLiteral("OFF"));
+  }
+  QStringList appBuildArguments{
+    QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
+    QStringLiteral("psx-runtime"), QStringLiteral("--parallel"),
+    QString::number(std::max(1, QThread::idealThreadCount()))
+  };
+  QStringList appInstallArguments{
+    QStringLiteral("--install"), buildDir, QStringLiteral("--prefix"), stageDir
+  };
+  if (nativeWindowsTarget) {
+    appBuildArguments << QStringLiteral("--config") << QStringLiteral("Release");
+    appInstallArguments << QStringLiteral("--config") << QStringLiteral("Release");
   }
   if (!runCommand(cmake,
                   configureArguments,
                   workspace,
-                  directoryPackageTarget
+                  nativeWindowsTarget
+                    ? QStringLiteral("cmake -S <project> -B <build> -G \"Visual Studio 17 2022\" -A x64")
+                  : crossCompilationTarget
                     ? QStringLiteral("cmake -S <project> -B <build> -G Ninja -DCMAKE_TOOLCHAIN_FILE=<cross-toolchain> -DCMAKE_BUILD_TYPE=Release")
                     : QStringLiteral("cmake -S <project> -B <build> -G Ninja -DCMAKE_BUILD_TYPE=Release"),
                   15 * 60 * 1000) ||
       !runCommand(cmake,
-                  { QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
-                    QStringLiteral("psx-runtime"), QStringLiteral("--parallel"),
-                    QString::number(std::max(1, QThread::idealThreadCount())) },
+                  appBuildArguments,
                   workspace,
                   QStringLiteral("cmake --build <build> --target psx-runtime"),
                   2 * 60 * 60 * 1000) ||
       !runCommand(cmake,
-                  { QStringLiteral("--install"), buildDir, QStringLiteral("--prefix"), stageDir },
+                  appInstallArguments,
                   workspace,
                   QStringLiteral("cmake --install <build> --prefix <stage>"),
                   20 * 60 * 1000)) {
@@ -1462,10 +1790,11 @@ void PipelineWorker::run(PipelineRequest request) {
       QDir(workspace).removeRecursively();
       emit cancelled();
     } else {
-      fail(directoryPackageTarget
+      fail(crossCompilationTarget
              ? QStringLiteral("The %1 app could not be cross-compiled and staged.")
                  .arg(targetPlatformDisplayName(request.targetPlatform))
-             : QStringLiteral("The native macOS app could not be compiled and staged."),
+             : QStringLiteral("The native %1 app could not be compiled and staged.")
+                 .arg(targetPlatformDisplayName(request.targetPlatform)),
            workspace);
     }
     return;
@@ -1569,26 +1898,34 @@ void PipelineWorker::run(PipelineRequest request) {
   }
 
   QByteArray gitOutput;
-  runCommand(QStringLiteral("/usr/bin/git"),
+  runCommand(git,
              { QStringLiteral("-C"), request.frameworkRoot, QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
              request.frameworkRoot, QStringLiteral("git -C <framework> rev-parse HEAD"), 15000, &gitOutput);
-  const QString targetArchitecture = windowsTarget
-    ? QStringLiteral("x86_64-w64-mingw32")
-    : linuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu")
+  const QString targetArchitecture = nativeWindowsTarget
+    ? QStringLiteral("x86_64-pc-windows-msvc")
+    : crossWindowsTarget ? QStringLiteral("x86_64-w64-mingw32")
+    : nativeLinuxTarget ? QStringLiteral("x86_64-linux-gnu")
+    : crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu")
                   : QSysInfo::currentCpuArchitecture();
-  const QString compilerVersion = windowsTarget
-    ? versionText(mingwGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
+  const QString compilerVersion = nativeWindowsTarget
+    ? versionText(msvcCl, {}).section('\n', 0, 0)
+    : crossWindowsTarget
+      ? versionText(mingwGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
     : linuxTarget
       ? versionText(linuxGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
-      : versionText(QStringLiteral("/usr/bin/clang"),
+      : versionText(hostClang,
                     { QStringLiteral("--version") }).section('\n', 0, 0);
-  const QString sdl2Source = windowsTarget
-    ? QStringLiteral("SDL2-devel-2.32.10-mingw.tar.gz")
+  const QString sdl2Source = nativeWindowsTarget
+    ? QStringLiteral("SDL2-2.32.10.tar.gz (MSVC static source build)")
+    : crossWindowsTarget
+      ? QStringLiteral("SDL2-devel-2.32.10-mingw.tar.gz")
     : linuxTarget
       ? QStringLiteral("pysdl2_dll-2.32.10-py2.py3-none-manylinux_2_28_x86_64.whl")
       : QStringLiteral("host pkg-config");
-  const QString sdl2Sha256 = windowsTarget
-    ? QStringLiteral("83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2")
+  const QString sdl2Sha256 = nativeWindowsTarget
+    ? QString::fromLatin1(kSdl2SourceSha256)
+    : crossWindowsTarget
+      ? QStringLiteral("83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2")
     : linuxTarget ? QString::fromLatin1(kLinuxSdl2WheelSha256) : QString();
   const QJsonObject buildManifest{
     { QStringLiteral("schema"), 1 },
@@ -1610,10 +1947,17 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("libusb_version"), libusbVersion },
     { QStringLiteral("framework_commit"), QString::fromUtf8(gitOutput).trimmed() },
     { QStringLiteral("cmake"), versionText(cmake, { QStringLiteral("--version") }).section('\n', 0, 0) },
-    { QStringLiteral("ninja"), versionText(ninja, { QStringLiteral("--version") }) },
+    { QStringLiteral("generator"), nativeWindowsTarget
+        ? QStringLiteral("Visual Studio 17 2022") : QStringLiteral("Ninja") },
+    { QStringLiteral("ninja"), ninja.isEmpty()
+        ? QString() : versionText(ninja, { QStringLiteral("--version") }) },
     { QStringLiteral("ghidra_home"), request.ghidraHome },
     { QStringLiteral("host_architecture"), QSysInfo::currentCpuArchitecture() },
     { QStringLiteral("compiler"), compilerVersion },
+    { QStringLiteral("build_configuration"), QStringLiteral("Release") },
+    { QStringLiteral("optimization"), nativeWindowsTarget
+        ? QStringLiteral("MSVC /O2 /Ob3 (favor speed)")
+        : QStringLiteral("GCC/Clang -O3 (favor speed)") },
     { QStringLiteral("linux_sysroot"), linuxTarget ? linuxSysroot : QString() },
     { QStringLiteral("sdl2_source"), sdl2Source },
     { QStringLiteral("sdl2_sha256"), sdl2Sha256 },
@@ -1649,23 +1993,35 @@ void PipelineWorker::run(PipelineRequest request) {
   if (windowsTarget) {
     nextStage(QStringLiteral("Verify Windows package"));
     QByteArray peOutput;
-    if (!runCommand(mingwObjdump,
-                    { QStringLiteral("-p"), mainExecutable }, workspace,
-                    QStringLiteral("x86_64-w64-mingw32-objdump -p <Windows executable>"),
+    const QString windowsInspector = nativeWindowsTarget ? msvcDumpbin : mingwObjdump;
+    const QStringList windowsInspectorArguments = nativeWindowsTarget
+      ? QStringList{ QStringLiteral("/headers"), QStringLiteral("/imports"), mainExecutable }
+      : QStringList{ QStringLiteral("-p"), mainExecutable };
+    if (!runCommand(windowsInspector,
+                    windowsInspectorArguments, workspace,
+                    nativeWindowsTarget
+                      ? QStringLiteral("dumpbin /headers /imports <Windows executable>")
+                      : QStringLiteral("x86_64-w64-mingw32-objdump -p <Windows executable>"),
                     30000, &peOutput)) {
       fail(QStringLiteral("The staged Windows executable could not be inspected."), workspace);
       return;
     }
     const QString peText = QString::fromUtf8(peOutput);
-    if (!peText.contains(QStringLiteral("file format pei-x86-64")) ||
-        !peText.contains(QRegularExpression(QStringLiteral(
-          R"((?m)^Subsystem\s+00000002\s+\(Windows GUI\))")))) {
+    const bool windowsIdentityVerified = nativeWindowsTarget
+      ? peText.contains(QRegularExpression(QStringLiteral(R"((?im)\b8664 machine \(x64\))"))) &&
+        peText.contains(QRegularExpression(QStringLiteral(R"((?im)\b2 subsystem \(Windows GUI\))")))
+      : peText.contains(QStringLiteral("file format pei-x86-64")) &&
+        peText.contains(QRegularExpression(QStringLiteral(
+          R"((?m)^Subsystem\s+00000002\s+\(Windows GUI\))")));
+    if (!windowsIdentityVerified) {
       fail(QStringLiteral("The staged executable is not an x86-64 Windows GUI PE binary."), workspace);
       return;
     }
 
     QJsonArray importedDlls;
-    const QRegularExpression dllPattern(QStringLiteral(R"((?m)^\s*DLL Name:\s*(\S+)\s*$)"));
+    const QRegularExpression dllPattern(nativeWindowsTarget
+      ? QStringLiteral(R"((?im)^\s*([A-Za-z0-9_.-]+\.dll)\s*$)")
+      : QStringLiteral(R"((?m)^\s*DLL Name:\s*(\S+)\s*$)"));
     auto matches = dllPattern.globalMatch(peText);
     QStringList forbiddenImports;
     while (matches.hasNext()) {
@@ -1674,7 +2030,10 @@ void PipelineWorker::run(PipelineRequest request) {
       if (dll.compare(QStringLiteral("SDL2.dll"), Qt::CaseInsensitive) == 0 ||
           dll.startsWith(QStringLiteral("libgcc_"), Qt::CaseInsensitive) ||
           dll.startsWith(QStringLiteral("libstdc++"), Qt::CaseInsensitive) ||
-          dll.startsWith(QStringLiteral("libwinpthread"), Qt::CaseInsensitive)) {
+          dll.startsWith(QStringLiteral("libwinpthread"), Qt::CaseInsensitive) ||
+          (nativeWindowsTarget &&
+           (dll.startsWith(QStringLiteral("vcruntime"), Qt::CaseInsensitive) ||
+            dll.startsWith(QStringLiteral("msvcp"), Qt::CaseInsensitive)))) {
         forbiddenImports.append(dll);
       }
     }
@@ -1688,15 +2047,22 @@ void PipelineWorker::run(PipelineRequest request) {
       { QStringLiteral("schema"), 1 },
       { QStringLiteral("platform"), QStringLiteral("windows") },
       { QStringLiteral("architecture"), QStringLiteral("x86_64") },
-      { QStringLiteral("toolchain"), QStringLiteral("x86_64-w64-mingw32") },
-      { QStringLiteral("compiler"), versionText(mingwGcc, { QStringLiteral("--version") }).section('\n', 0, 0) },
+      { QStringLiteral("toolchain"), nativeWindowsTarget
+          ? QStringLiteral("Visual Studio 2022 MSVC x64")
+          : QStringLiteral("x86_64-w64-mingw32") },
+      { QStringLiteral("compiler"), compilerVersion },
+      { QStringLiteral("build_configuration"), QStringLiteral("Release") },
+      { QStringLiteral("optimization"), nativeWindowsTarget
+          ? QStringLiteral("/O2 /Ob3") : QStringLiteral("-O3") },
       { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
       { QStringLiteral("executable_sha256"), stagedExeHash },
       { QStringLiteral("subsystem"), QStringLiteral("Windows GUI") },
       { QStringLiteral("imported_dlls"), importedDlls },
       { QStringLiteral("self_contained_runtime"), true },
       { QStringLiteral("signed"), false },
-      { QStringLiteral("verification"), QStringLiteral("MinGW objdump PE header and import-table inspection") },
+      { QStringLiteral("verification"), nativeWindowsTarget
+          ? QStringLiteral("Visual Studio 2022 dumpbin PE header and import-table inspection")
+          : QStringLiteral("MinGW objdump PE header and import-table inspection") },
     };
     if (stagedExeHash.isEmpty() ||
         !writeJson(QDir(proofDir).filePath(QStringLiteral("windows_binary_verification.json")),
@@ -1786,7 +2152,9 @@ void PipelineWorker::run(PipelineRequest request) {
                     { QStringLiteral("-h"), QStringLiteral("-l"), QStringLiteral("-d"),
                       QStringLiteral("--version-info"), mainExecutable },
                     workspace,
-                    QStringLiteral("x86_64-unknown-linux-gnu-readelf -h -l -d --version-info <Linux executable>"),
+                    nativeLinuxTarget
+                      ? QStringLiteral("readelf -h -l -d --version-info <Linux executable>")
+                      : QStringLiteral("x86_64-unknown-linux-gnu-readelf -h -l -d --version-info <Linux executable>"),
                     30000, &executableElfOutput)) {
       fail(QStringLiteral("The staged Linux executable could not be inspected."), workspace);
       return;
@@ -1796,7 +2164,9 @@ void PipelineWorker::run(PipelineRequest request) {
                     { QStringLiteral("-h"), QStringLiteral("-d"),
                       QStringLiteral("--version-info"), stagedSdl },
                     workspace,
-                    QStringLiteral("x86_64-unknown-linux-gnu-readelf -h -d --version-info <bundled SDL2>"),
+                    nativeLinuxTarget
+                      ? QStringLiteral("readelf -h -d --version-info <bundled SDL2>")
+                      : QStringLiteral("x86_64-unknown-linux-gnu-readelf -h -d --version-info <bundled SDL2>"),
                     30000, &sdlElfOutput)) {
       fail(QStringLiteral("The bundled Linux SDL2 runtime could not be inspected."), workspace);
       return;
@@ -1923,8 +2293,12 @@ void PipelineWorker::run(PipelineRequest request) {
       { QStringLiteral("maximum_glibc_version"), QStringLiteral("2.28") },
       { QStringLiteral("observed_glibc_versions"), glibcVersionsJson },
       { QStringLiteral("interpreter"), QStringLiteral("/lib64/ld-linux-x86-64.so.2") },
-      { QStringLiteral("toolchain"), QStringLiteral("x86_64-unknown-linux-gnu") },
+      { QStringLiteral("toolchain"), nativeLinuxTarget
+          ? QStringLiteral("native GCC x86_64-linux-gnu")
+          : QStringLiteral("x86_64-unknown-linux-gnu cross-toolchain") },
       { QStringLiteral("compiler"), compilerVersion },
+      { QStringLiteral("build_configuration"), QStringLiteral("Release") },
+      { QStringLiteral("optimization"), QStringLiteral("-O3") },
       { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
       { QStringLiteral("executable_sha256"), stagedExeHash },
       { QStringLiteral("executable_needed_libraries"), executableNeededJson },

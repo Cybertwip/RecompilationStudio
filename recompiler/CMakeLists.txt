@@ -17,7 +17,48 @@ if(NOT MSVC)
 endif()
 
 # Rabbitizer MIPS decoder
+set(RABBITIZER_TABLE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/lib/rabbitizer/tables")
+set(RABBITIZER_GENERATED_ROOT "${CMAKE_CURRENT_BINARY_DIR}/rabbitizer-generated")
+file(GLOB RABBITIZER_C_TABLE_TEMPLATES CONFIGURE_DEPENDS
+    "${RABBITIZER_TABLE_ROOT}/templates/c/*.table.template")
+file(GLOB RABBITIZER_CXX_TABLE_TEMPLATES CONFIGURE_DEPENDS
+    "${RABBITIZER_TABLE_ROOT}/templates/cplusplus/*.table.template")
+file(GLOB_RECURSE RABBITIZER_TABLE_INPUTS CONFIGURE_DEPENDS
+    "${RABBITIZER_TABLE_ROOT}/tables/*.inc")
+
+set(RABBITIZER_GENERATED_HEADERS)
+foreach(_template IN LISTS RABBITIZER_C_TABLE_TEMPLATES RABBITIZER_CXX_TABLE_TEMPLATES)
+    get_filename_component(_template_name "${_template}" NAME)
+    if(_template IN_LIST RABBITIZER_C_TABLE_TEMPLATES)
+        string(REGEX REPLACE "\\.table\\.template$" ".h" _generated_name "${_template_name}")
+        set(_generated_dir "${RABBITIZER_GENERATED_ROOT}/include/generated")
+    else()
+        string(REGEX REPLACE "\\.table\\.template$" ".hpp" _generated_name "${_template_name}")
+        set(_generated_dir "${RABBITIZER_GENERATED_ROOT}/cplusplus/include/generated")
+    endif()
+    set(_generated_header "${_generated_dir}/${_generated_name}")
+    add_custom_command(
+        OUTPUT "${_generated_header}"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DINPUT=${_template}"
+            "-DOUTPUT=${_generated_header}"
+            "-DTABLE_INCLUDE_DIR=${RABBITIZER_TABLE_ROOT}/tables"
+            "-DC_COMPILER=${CMAKE_C_COMPILER}"
+            "-DMSVC_PREPROCESSOR=${MSVC}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_rabbitizer_table.cmake"
+        DEPENDS
+            "${_template}"
+            ${RABBITIZER_TABLE_INPUTS}
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_rabbitizer_table.cmake"
+        COMMENT "Generating Rabbitizer table ${_generated_name}"
+        VERBATIM)
+    list(APPEND RABBITIZER_GENERATED_HEADERS "${_generated_header}")
+endforeach()
+
+add_custom_target(rabbitizer-generated-tables DEPENDS ${RABBITIZER_GENERATED_HEADERS})
+
 add_library(rabbitizer STATIC)
+add_dependencies(rabbitizer rabbitizer-generated-tables)
 target_sources(rabbitizer PRIVATE
     lib/rabbitizer/cplusplus/src/analysis/LoPairingInfo.cpp
     lib/rabbitizer/cplusplus/src/analysis/RegistersTracker.cpp
@@ -57,6 +98,10 @@ target_sources(rabbitizer PRIVATE
     lib/rabbitizer/src/instructions/RabbitizerRegister.c
     lib/rabbitizer/src/instructions/RabbitizerRegisterDescriptor.c
 )
+target_include_directories(rabbitizer PUBLIC
+    ${RABBITIZER_GENERATED_ROOT}/include
+    ${RABBITIZER_GENERATED_ROOT}/cplusplus/include
+)
 target_include_directories(rabbitizer PRIVATE
     lib/rabbitizer/include
     lib/rabbitizer/cplusplus/include
@@ -85,8 +130,10 @@ target_include_directories(psxrecomp-game PRIVATE
     lib/ELFIO
 )
 target_link_libraries(psxrecomp-game PRIVATE fmt rabbitizer)
-if(MINGW OR WIN32)
+if(MINGW)
     target_link_options(psxrecomp-game PRIVATE -Wl,--stack,16777216)
+elseif(MSVC)
+    target_link_options(psxrecomp-game PRIVATE /STACK:16777216)
 endif()
 
 # psxrecomp-toml — PS-X EXE → game.toml generator.
@@ -143,8 +190,10 @@ target_include_directories(PSXRecomp PRIVATE
 target_link_libraries(PSXRecomp PRIVATE fmt rabbitizer)
 
 # Increase stack size for large binaries (1447+ functions)
-if(MINGW OR WIN32)
+if(MINGW)
     target_link_options(PSXRecomp PRIVATE -Wl,--stack,16777216)
+elseif(MSVC)
+    target_link_options(PSXRecomp PRIVATE /STACK:16777216)
 endif()
 
 # psxrecomp-bios — Phase 1a BIOS boot slice recompiler.
@@ -171,8 +220,10 @@ target_include_directories(psxrecomp-bios PRIVATE
     lib/toml11
 )
 target_link_libraries(psxrecomp-bios PRIVATE fmt rabbitizer)
-if(MINGW OR WIN32)
+if(MINGW)
     target_link_options(psxrecomp-bios PRIVATE -Wl,--stack,16777216)
+elseif(MSVC)
+    target_link_options(psxrecomp-bios PRIVATE /STACK:16777216)
 endif()
 
 # L1 decoder conformance test — compares MipsDecoder against Rabbitizer

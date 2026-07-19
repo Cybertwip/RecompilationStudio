@@ -24,7 +24,7 @@ QString runtimeBootToml(bool skipBiosBoot);
 /* Emit [controller] defaults for a packaged game. padMode is one of
  * "hybrid", "analog", or "digital" (D-Pad). The pad type is locked so the
  * in-game settings UI cannot change it after packaging. */
-QString defaultControllerToml(const QString& padMode = QStringLiteral("hybrid"));
+QString defaultControllerToml(const QString& padMode = QStringLiteral("digital"));
 QString macosGipCmakeOption(bool enabled);
 bool nmOutputHasMacosGipBackend(const QByteArray& output);
 bool writeBytes(const QString& path, const QByteArray& bytes, QString& error);
@@ -51,5 +51,6 @@ QList<QPair<quint32, quint32>> parseCodeRanges(const QString& path, QString& err
 QSet<quint32> parseFunctionEntries(const QString& path, QString& error);
 bool addressInRanges(quint32 address, const QList<QPair<quint32, quint32>>& ranges);
 QString findExecutable(const QString& name);
+QString ghidraAnalyzeHeadlessPath(const QString& ghidraHome);
 
 } // namespace psxstudio

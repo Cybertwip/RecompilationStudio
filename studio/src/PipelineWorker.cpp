@@ -24,6 +24,7 @@
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUuid>
+#include <QVersionNumber>
 
 #include <algorithm>
 
@@ -2252,21 +2253,24 @@ void PipelineWorker::run(PipelineRequest request) {
     QSet<QString> glibcVersionSet;
     const QRegularExpression glibcPattern(
       QStringLiteral(R"(GLIBC_(\d+)\.(\d+)(?:\.(\d+))?)"));
-    bool newerThanGlibc228 = false;
+    QVersionNumber maximumObservedGlibcVersion;
     for (const auto& readelfText : { executableElfText, sdlElfText }) {
       auto matches = glibcPattern.globalMatch(readelfText);
       while (matches.hasNext()) {
         const auto match = matches.next();
         glibcVersionSet.insert(match.captured(0));
-        const int major = match.captured(1).toInt();
-        const int minor = match.captured(2).toInt();
-        if (major > 2 || (major == 2 && minor > 28)) {
-          newerThanGlibc228 = true;
+        QString versionText = match.captured(1) + QStringLiteral(".") + match.captured(2);
+        if (!match.captured(3).isEmpty()) {
+          versionText += QStringLiteral(".") + match.captured(3);
+        }
+        const auto version = QVersionNumber::fromString(versionText);
+        if (QVersionNumber::compare(version, maximumObservedGlibcVersion) > 0) {
+          maximumObservedGlibcVersion = version;
         }
       }
     }
-    if (newerThanGlibc228) {
-      fail(QStringLiteral("The Linux package requires a glibc version newer than the declared 2.28 baseline."),
+    if (maximumObservedGlibcVersion.isNull()) {
+      fail(QStringLiteral("The Linux package does not expose any versioned glibc symbol requirements."),
            workspace);
       return;
     }
@@ -2298,7 +2302,7 @@ void PipelineWorker::run(PipelineRequest request) {
       { QStringLiteral("platform"), QStringLiteral("linux") },
       { QStringLiteral("architecture"), QStringLiteral("x86_64") },
       { QStringLiteral("abi"), QStringLiteral("glibc") },
-      { QStringLiteral("maximum_glibc_version"), QStringLiteral("2.28") },
+      { QStringLiteral("minimum_required_glibc_version"), maximumObservedGlibcVersion.toString() },
       { QStringLiteral("observed_glibc_versions"), glibcVersionsJson },
       { QStringLiteral("interpreter"), QStringLiteral("/lib64/ld-linux-x86-64.so.2") },
       { QStringLiteral("toolchain"), nativeLinuxTarget

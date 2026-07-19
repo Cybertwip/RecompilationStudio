@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "verified_utc_date": "2026-07-19",
+  "features": [
+    "batch_icon_persistence",
+    "macos_jdk21_discovery"
+  ],
+  "batch_icon_persistence": {
+    "identity": "sha256(canonical_disc_source_path)",
+    "settings_prefix": "batch/icons/",
+    "save_event": "icon_selection",
+    "clear_event": "use_default",
+    "restore_event": "batch_directory_scan",
+    "missing_icon_behavior": "remove_stale_setting_and_use_builtin_icon"
+  },
+  "macos_jdk21_discovery": {
+    "observed_registered_jdk": "24.0.2",
+    "observed_path_jdk": "25.0.2",
+    "observed_homebrew_jdk21": "/usr/local/opt/openjdk@21 (21.0.11)",
+    "candidate_sources": [
+      "JAVA_HOME",
+      "/usr/libexec/java_home",
+      "Intel Homebrew openjdk@21",
+      "Apple Silicon Homebrew openjdk@21",
+      "MacPorts openjdk21",
+      "system and user JavaVirtualMachines",
+      "SDKMAN",
+      "ASDF",
+      "PATH"
+    ],
+    "selection_rule": "execute each candidate's bin/java and require parsed major version 21",
+    "ghidra_environment": [
+      "JAVA_HOME points to the selected JDK 21 home",
+      "the selected JDK 21 bin directory is first in PATH"
+    ]
+  },
+  "verification": [
+    {
+      "command": "cmake --build studio/build --target PSXRecompStudio PSXRecompStudioTests -j8",
+      "result": "pass"
+    },
+    {
+      "command": "ctest --test-dir studio/build --output-on-failure",
+      "result": "pass",
+      "detail": "2/2 tests passed"
+    },
+    {
+      "check": "java_version_formats",
+      "result": "pass",
+      "detail": "OpenJDK, modern Oracle, and legacy Oracle JDK 21 formats parse as major 21; JDK 24 parses as 24"
+    },
+    {
+      "check": "installed_keg_only_jdk",
+      "result": "pass",
+      "detail": "Studio discovery selected an executable Java home whose java --version reports major 21"
+    },
+    {
+      "check": "stable_batch_identity",
+      "result": "pass",
+      "detail": "same disc source resolves to the same 64-character settings ID; a different source resolves to a different ID"
+    },
+    {
+      "check": "studio_ui_smoke",
+      "command": "QT_QPA_PLATFORM=offscreen studio/build/PSXRecomp Studio.app/Contents/MacOS/PSXRecomp Studio",
+      "result": "pass",
+      "detail": "application entered its event loop without a startup failure and was then stopped by the test harness"
+    },
+    {
+      "command": "git diff --check",
+      "result": "pass"
+    }
+  ]
+}

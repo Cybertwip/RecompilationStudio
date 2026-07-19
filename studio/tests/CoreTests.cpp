@@ -172,10 +172,19 @@ int main(int argc, char** argv) {
   check(gipRequest.macosGipGamepad &&
           gipRequest.toJson().value(QStringLiteral("macos_gip_gamepad")).toBool(),
         QStringLiteral("GIP export defaults enabled and is serialized"));
-  check(gipRequest.targetPlatform == psxstudio::TargetPlatform::MacOS &&
+  check(gipRequest.targetPlatform == psxstudio::hostTargetPlatform() &&
           gipRequest.toJson().value(QStringLiteral("platform")).toString() ==
-            QStringLiteral("macos"),
-        QStringLiteral("Studio export defaults to macOS and serializes the platform"));
+            psxstudio::targetPlatformKey(psxstudio::hostTargetPlatform()),
+        QStringLiteral("Studio export defaults to its host and serializes the platform"));
+  check(psxstudio::targetPlatformSupportedOnHost(psxstudio::hostTargetPlatform()),
+        QStringLiteral("Studio always supports its native host target"));
+  check(psxstudio::hostCanSelectTargetPlatform() ||
+          (!psxstudio::targetPlatformSupportedOnHost(psxstudio::TargetPlatform::MacOS) &&
+           !psxstudio::targetPlatformSupportedOnHost(
+             psxstudio::hostTargetPlatform() == psxstudio::TargetPlatform::Windows
+               ? psxstudio::TargetPlatform::Linux
+               : psxstudio::TargetPlatform::Windows)),
+        QStringLiteral("Only macOS Studio builds support cross-platform targets"));
   gipRequest.targetPlatform = psxstudio::TargetPlatform::Windows;
   check(psxstudio::targetPlatformKey(gipRequest.targetPlatform) == QStringLiteral("windows") &&
           psxstudio::targetPlatformFromKey(QStringLiteral("WINDOWS")) ==
@@ -208,8 +217,10 @@ int main(int argc, char** argv) {
   QFile copiedFile(QDir(copiedTree).filePath(QStringLiteral("nested/file.txt")));
   check(copiedFile.open(QIODevice::ReadOnly) && copiedFile.readAll() == "windows-package",
         QStringLiteral("directory-package file copy"));
+#if !defined(Q_OS_WIN)
   check(QFileInfo(copiedFile).isExecutable(),
         QStringLiteral("Linux package executable permissions survive directory copy"));
+#endif
 
   QImage sourceIcon(64, 64, QImage::Format_ARGB32);
   sourceIcon.fill(QColor(32, 96, 192));

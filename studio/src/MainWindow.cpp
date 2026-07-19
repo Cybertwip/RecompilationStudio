@@ -171,12 +171,20 @@ MainWindow::MainWindow(QWidget* parent)
   auto* platformLabel = new QLabel(QStringLiteral("Platform"), platformRow);
   platformLabel->setMinimumWidth(142);
   platformCombo_ = new QComboBox(platformRow);
+#if defined(Q_OS_MACOS)
   platformCombo_->addItem(QStringLiteral("macOS"), targetPlatformKey(TargetPlatform::MacOS));
   platformCombo_->addItem(QStringLiteral("Windows"), targetPlatformKey(TargetPlatform::Windows));
   platformCombo_->addItem(QStringLiteral("Linux"), targetPlatformKey(TargetPlatform::Linux));
+#else
+  const auto hostPlatform = hostTargetPlatform();
+  platformCombo_->addItem(targetPlatformDisplayName(hostPlatform),
+                          targetPlatformKey(hostPlatform));
+#endif
+  platformCombo_->setCurrentIndex(0);
   platformLayout->addWidget(platformLabel);
   platformLayout->addWidget(platformCombo_, 1);
   inputLayout->addWidget(platformRow);
+  platformRow->setVisible(hostCanSelectTargetPlatform());
 
   discEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("Disc BIN/CUE"),
                          QStringLiteral("One .cue and all referenced .bin files"), SLOT(chooseDisc()));
@@ -204,6 +212,7 @@ MainWindow::MainWindow(QWidget* parent)
                          QStringLiteral("analog"));
   padModeCombo_->addItem(QStringLiteral("D-Pad (digital)"),
                          QStringLiteral("digital"));
+  padModeCombo_->setCurrentIndex(0);
   padModeCombo_->setToolTip(
     QStringLiteral("Fixed pad type baked into the packaged game. The in-game "
                    "settings menu will not offer Hybrid / Analog / D-Pad switching."));
@@ -546,8 +555,10 @@ QString MainWindow::detectGhidraHome() const {
 
 void MainWindow::loadSettings() {
   QSettings settings;
-  const QString platformKey = settings.value(QStringLiteral("app/platform"),
-                                              QStringLiteral("macos")).toString();
+  const QString platformKey = hostCanSelectTargetPlatform()
+    ? settings.value(QStringLiteral("app/platform"),
+                     targetPlatformKey(hostTargetPlatform())).toString()
+    : targetPlatformKey(hostTargetPlatform());
   const int platformIndex = platformCombo_->findData(platformKey);
   platformCombo_->setCurrentIndex(platformIndex >= 0 ? platformIndex : 0);
   biosEdit_->setText(settings.value(QStringLiteral("paths/bios")).toString());

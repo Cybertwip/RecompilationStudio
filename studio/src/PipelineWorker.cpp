@@ -645,6 +645,11 @@ void PipelineWorker::run(PipelineRequest request) {
   };
 
   nextStage(QStringLiteral("Validate inputs"));
+  if (!targetPlatformSupportedOnHost(request.targetPlatform)) {
+    fail(QStringLiteral("This %1 build of PSXRecomp Studio can only create %1 apps.")
+           .arg(targetPlatformDisplayName(hostTargetPlatform())), {});
+    return;
+  }
   QString error;
   DiscDescription disc;
   if (!CueSheet::parse(request.cuePath, request.selectedBinPaths, disc, error)) {

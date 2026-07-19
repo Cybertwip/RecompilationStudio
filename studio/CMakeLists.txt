@@ -129,6 +129,25 @@ set_target_properties(PSXRecompStudio PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/Info.plist.in"
 )
 
+if(WIN32)
+  get_target_property(PSX_STUDIO_QMAKE Qt6::qmake IMPORTED_LOCATION)
+  get_filename_component(PSX_STUDIO_QT_BIN_DIR "${PSX_STUDIO_QMAKE}" DIRECTORY)
+  find_program(PSX_STUDIO_WINDEPLOYQT
+    NAMES windeployqt
+    HINTS "${PSX_STUDIO_QT_BIN_DIR}"
+    REQUIRED
+  )
+
+  add_custom_command(TARGET PSXRecompStudio POST_BUILD
+    COMMAND "${PSX_STUDIO_WINDEPLOYQT}"
+      --dir "$<TARGET_FILE_DIR:PSXRecompStudio>"
+      --no-translations
+      "$<TARGET_FILE:PSXRecompStudio>"
+    COMMENT "Deploying Qt runtime dependencies for PSXRecomp Studio"
+    VERBATIM
+  )
+endif()
+
 qt_add_executable(PSXBiosBrandingPatch
   src/bios_patch_main.cpp
   src/BiosBrandingPatcher.cpp

@@ -13,6 +13,28 @@ enum class TargetPlatform {
   Linux,
 };
 
+inline TargetPlatform hostTargetPlatform() {
+#if defined(Q_OS_WIN)
+  return TargetPlatform::Windows;
+#elif defined(Q_OS_LINUX)
+  return TargetPlatform::Linux;
+#else
+  return TargetPlatform::MacOS;
+#endif
+}
+
+inline bool hostCanSelectTargetPlatform() {
+#if defined(Q_OS_MACOS)
+  return true;
+#else
+  return false;
+#endif
+}
+
+inline bool targetPlatformSupportedOnHost(TargetPlatform platform) {
+  return hostCanSelectTargetPlatform() || platform == hostTargetPlatform();
+}
+
 inline QString targetPlatformKey(TargetPlatform platform) {
   switch (platform) {
     case TargetPlatform::Windows:
@@ -48,7 +70,7 @@ inline TargetPlatform targetPlatformFromKey(const QString& key) {
 }
 
 struct PipelineRequest {
-  TargetPlatform targetPlatform{ TargetPlatform::MacOS };
+  TargetPlatform targetPlatform{ hostTargetPlatform() };
   QString cuePath;
   QStringList selectedBinPaths;
   QString biosPath;

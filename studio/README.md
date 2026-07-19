@@ -56,8 +56,8 @@ Linux archives contain the package contents directly at ZIP root, so the native
 executable is not hidden inside an extra package-directory layer. Disable the
 option to retain the unpacked `.app`, `-Windows`, and `-Linux` outputs.
 Every archive also contains a root `game.manifest.json` with `name` set to the
-edited game title and `executable` set to the root `.app`, `.exe`, or Linux
-executable name.
+edited game title, `executable` set to the root `.app`, `.exe`, or Linux
+executable name, and `platform` set to `macOS`, `Windows`, or `Linux`.
 
 ## Host tools
 

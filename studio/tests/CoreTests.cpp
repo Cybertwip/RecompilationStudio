@@ -306,11 +306,13 @@ int main(int argc, char** argv) {
         QStringLiteral("macOS ZIP output name"));
   const QJsonObject macosGameManifest =
     psxstudio::gameManifestForRequest(gipRequest);
-  check(macosGameManifest.size() == 2 &&
+  check(macosGameManifest.size() == 3 &&
           macosGameManifest.value(QStringLiteral("executable")).toString() ==
             QStringLiteral("Evil Zone (Europe).app") &&
           macosGameManifest.value(QStringLiteral("name")).toString() ==
-            QStringLiteral("Evil Zone (Europe)"),
+            QStringLiteral("Evil Zone (Europe)") &&
+          macosGameManifest.value(QStringLiteral("platform")).toString() ==
+            QStringLiteral("macOS"),
         QStringLiteral("macOS game manifest names the root app"));
   gipRequest.targetPlatform = psxstudio::TargetPlatform::Windows;
   check(psxstudio::exportOutputName(gipRequest) ==
@@ -318,7 +320,10 @@ int main(int argc, char** argv) {
         QStringLiteral("Windows ZIP output name"));
   check(psxstudio::gameManifestForRequest(gipRequest)
           .value(QStringLiteral("executable")).toString() ==
-            QStringLiteral("Evil Zone (Europe).exe"),
+            QStringLiteral("Evil Zone (Europe).exe") &&
+          psxstudio::gameManifestForRequest(gipRequest)
+            .value(QStringLiteral("platform")).toString() ==
+              QStringLiteral("Windows"),
         QStringLiteral("Windows game manifest names the root executable"));
   gipRequest.targetPlatform = psxstudio::TargetPlatform::Linux;
   check(psxstudio::exportOutputName(gipRequest) ==
@@ -326,7 +331,10 @@ int main(int argc, char** argv) {
         QStringLiteral("Linux ZIP output name"));
   check(psxstudio::gameManifestForRequest(gipRequest)
           .value(QStringLiteral("executable")).toString() ==
-            QStringLiteral("Evil Zone (Europe)"),
+            QStringLiteral("Evil Zone (Europe)") &&
+          psxstudio::gameManifestForRequest(gipRequest)
+            .value(QStringLiteral("platform")).toString() ==
+              QStringLiteral("Linux"),
         QStringLiteral("Linux game manifest names the root executable"));
   gipRequest.exportAsZip = false;
   check(psxstudio::exportOutputName(gipRequest) ==
@@ -498,11 +506,13 @@ int main(int argc, char** argv) {
   const QJsonObject archivedGameManifest =
     QJsonDocument::fromJson(gameManifestFile.readAll()).object();
   gameManifestFile.close();
-  check(archivedGameManifest.size() == 2 &&
+  check(archivedGameManifest.size() == 3 &&
           archivedGameManifest.value(QStringLiteral("executable")).toString() ==
             QStringLiteral("Evil Zone (Europe).exe") &&
           archivedGameManifest.value(QStringLiteral("name")).toString() ==
-            QStringLiteral("Evil Zone (Europe)"),
+            QStringLiteral("Evil Zone (Europe)") &&
+          archivedGameManifest.value(QStringLiteral("platform")).toString() ==
+            QStringLiteral("Windows"),
         QStringLiteral("root ZIP game manifest contents"));
   check(rootContentsArchive.setCurrentFile(QStringLiteral("Evil Zone (Europe).exe")),
         QStringLiteral("root ZIP executable entry"));

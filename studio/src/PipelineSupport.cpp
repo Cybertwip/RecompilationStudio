@@ -255,6 +255,7 @@ QJsonObject gameManifestForRequest(const PipelineRequest& request) {
   return {
     { QStringLiteral("executable"), executable },
     { QStringLiteral("name"), request.windowTitle },
+    { QStringLiteral("platform"), targetPlatformDisplayName(request.targetPlatform) },
   };
 }
 

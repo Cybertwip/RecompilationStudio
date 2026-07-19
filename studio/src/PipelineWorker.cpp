@@ -1865,6 +1865,22 @@ void PipelineWorker::run(PipelineRequest request) {
   const QString resourcesDir = directoryPackageTarget
     ? stagedApp
     : QDir(stagedApp).filePath(QStringLiteral("Contents/Resources"));
+  const QStringList requiredFrontendAssets{
+    QStringLiteral("launcher.rml"),
+    QStringLiteral("fonts/LatoLatin-Regular.ttf"),
+    QStringLiteral("fonts/LatoLatin-Bold.ttf"),
+    QStringLiteral("img/logo.png"),
+    QStringLiteral("img/caret.png"),
+  };
+  for (const auto& relativePath : requiredFrontendAssets) {
+    const QString installedPath = QDir(resourcesDir).filePath(relativePath);
+    if (!QFileInfo(installedPath).isFile()) {
+      fail(QStringLiteral("The staged %1 package is missing a settings-menu asset: %2")
+             .arg(targetPlatformDisplayName(request.targetPlatform), relativePath),
+           workspace);
+      return;
+    }
+  }
   const QString packagedBiosDir = QDir(resourcesDir).filePath(QStringLiteral("bios"));
   const QString packagedGameDir = QDir(resourcesDir).filePath(QStringLiteral("game"));
   const QString packagedDiscDir = QDir(resourcesDir).filePath(QStringLiteral("disc"));

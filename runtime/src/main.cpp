@@ -4431,11 +4431,26 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* The wall-clock pacer is the authoritative cadence source. On Windows,
+     * blocking again in the graphics driver's vsync wait after that pacer can
+     * miss the just-reached desktop vblank and wait for the following one.
+     * That halves a nominal 60 Hz run to ~30 Hz (and SPU production to ~22
+     * kHz). Keep presentation immediate on Windows and let the pacer hold the
+     * requested refresh rate. Other platforms retain their native vsync policy. */
+    int effective_present_vsync = g_video_vsync;
+#ifdef _WIN32
+    if (effective_present_vsync != 0) {
+        effective_present_vsync = 0;
+        std::printf("psxrecomp: Windows present uses the wall-clock pacer "
+                    "(driver vsync disabled)\n");
+    }
+#endif
+
     /* OpenGL backend: create the GL context now. On failure, relabel the
      * facade back to software (rasterization already runs through software in
      * this phase) and fall through to the SDL_Renderer present path below. */
     if (g_video_renderer == 1) {
-        gl_renderer_set_swap_interval(g_video_vsync);   /* applied at context init */
+        gl_renderer_set_swap_interval(effective_present_vsync); /* applied at context init */
         g_gl_active = (gl_renderer_init_context(sdl_window) != 0);
         if (!g_gl_active) gr_set_backend(GR_BACKEND_SOFTWARE);
         /* The GL backend establishes its real internal scale HERE (raster init),
@@ -4452,13 +4467,13 @@ int main(int argc, char** argv) {
      * SDL_WINDOW_VULKAN window. On failure, fall back to software (vkb_init
      * already initialized the software renderer on the shared VRAM array). */
     if (g_video_renderer == 2) {
-        vk_renderer_set_present_mode(g_video_vsync);
+        vk_renderer_set_present_mode(effective_present_vsync);
         g_vk_active = (vk_renderer_init_context(sdl_window) != 0);
         if (!g_vk_active) gr_set_backend(GR_BACKEND_SOFTWARE);
         g_video_scale = gr_scale();
     }
     latency_ring_set_backend(g_vk_active ? "vulkan" : g_gl_active ? "opengl" : "software");
-    latency_ring_set_present_mode(g_video_vsync);
+    latency_ring_set_present_mode(effective_present_vsync);
     /* Title bar shows the clean game title (set at window creation); the active
      * renderer is reported via the debug server / config, not appended here. */
 
@@ -4493,10 +4508,10 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
 #endif
-    /* Vsync off (g_video_vsync==0) drops PRESENTVSYNC for lowest display
+    /* Vsync off drops PRESENTVSYNC for lowest display
      * latency; the wall-clock pacer still holds 59.94Hz (may tear). */
     Uint32 rflags = SDL_RENDERER_ACCELERATED |
-                    (g_video_vsync != 0 ? SDL_RENDERER_PRESENTVSYNC : 0u);
+                    (effective_present_vsync != 0 ? SDL_RENDERER_PRESENTVSYNC : 0u);
     sdl_renderer = SDL_CreateRenderer(sdl_window, -1, rflags);
     if (!sdl_renderer)
         sdl_renderer = SDL_CreateRenderer(sdl_window, -1, SDL_RENDERER_ACCELERATED);

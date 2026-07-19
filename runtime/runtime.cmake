@@ -614,6 +614,16 @@ function(psxrecomp_add_runtime_target target)
                 "${_psxrt_frontend_assets_dir}"
             COMMENT "Copying frontend assets for ${target}"
             VERBATIM)
+        # Windows and Linux directory packages are assembled with
+        # `cmake --install`. POST_BUILD populates the build output, but install
+        # only copies declared artifacts, so explicitly install the frontend
+        # tree as well. A macOS bundle already carries the POST_BUILD Resources
+        # directory when the bundle target is installed.
+        if(NOT PSXRT_MACOSX_BUNDLE)
+            install(DIRECTORY
+                "${PSXRECOMP_ROOT}/runtime/launcher/assets/"
+                DESTINATION .)
+        endif()
     endif()
 
     if(WIN32 OR MINGW)

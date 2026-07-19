@@ -34,6 +34,120 @@ QString sha256File(const QString& path, QString& error) {
   return QString::fromLatin1(hash.result().toHex());
 }
 
+QString batchEntrySettingsId(const QString& sourcePath) {
+  const QFileInfo info(sourcePath);
+  QString normalized = info.canonicalFilePath();
+  if (normalized.isEmpty()) {
+    normalized = info.absoluteFilePath();
+  }
+  normalized = QDir::cleanPath(QDir::fromNativeSeparators(normalized));
+#if defined(Q_OS_WIN)
+  normalized = normalized.toCaseFolded();
+#endif
+  return QString::fromLatin1(
+    QCryptographicHash::hash(normalized.toUtf8(), QCryptographicHash::Sha256).toHex());
+}
+
+int javaMajorVersion(const QString& versionOutput) {
+  const QRegularExpression pattern(QStringLiteral(
+    R"((?im)^\s*(?:openjdk|java)(?:\s+version)?\s+"?(\d+)(?:\.(\d+))?)"));
+  const auto match = pattern.match(versionOutput);
+  if (!match.hasMatch()) {
+    return -1;
+  }
+  bool ok = false;
+  int major = match.captured(1).toInt(&ok);
+  if (!ok) {
+    return -1;
+  }
+  if (major == 1 && !match.captured(2).isEmpty()) {
+    major = match.captured(2).toInt(&ok);
+  }
+  return ok ? major : -1;
+}
+
+QString findJava21Home() {
+  QStringList candidates{ qEnvironmentVariable("JAVA_HOME") };
+#if defined(Q_OS_MACOS)
+  QProcess javaHomeProcess;
+  javaHomeProcess.start(QStringLiteral("/usr/libexec/java_home"),
+                        { QStringLiteral("-v"), QStringLiteral("21") });
+  if (javaHomeProcess.waitForStarted(3000) &&
+      javaHomeProcess.waitForFinished(5000) &&
+      javaHomeProcess.exitStatus() == QProcess::NormalExit &&
+      javaHomeProcess.exitCode() == 0) {
+    candidates << QString::fromUtf8(
+      javaHomeProcess.readAllStandardOutput()).trimmed();
+  }
+
+  /* Versioned Homebrew JDKs are keg-only and need not appear in java_home. */
+  candidates << QStringLiteral("/usr/local/opt/openjdk@21")
+             << QStringLiteral("/opt/homebrew/opt/openjdk@21")
+             << QStringLiteral("/opt/local/libexec/openjdk21");
+  for (const QString& root : {
+         QStringLiteral("/Library/Java/JavaVirtualMachines"),
+         QDir::home().filePath(QStringLiteral("Library/Java/JavaVirtualMachines")),
+         QDir::home().filePath(QStringLiteral(".sdkman/candidates/java")),
+         QDir::home().filePath(QStringLiteral(".asdf/installs/java")),
+       }) {
+    QDir directory(root);
+    for (const auto& name : directory.entryList(
+           QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name | QDir::Reversed)) {
+      const QString path = directory.filePath(name);
+      candidates << path
+                 << QDir(path).filePath(QStringLiteral("Contents/Home"))
+                 << QDir(path).filePath(
+                      QStringLiteral("libexec/openjdk.jdk/Contents/Home"));
+    }
+  }
+#endif
+#if defined(Q_OS_WIN)
+  for (const auto& vendor : { QStringLiteral("Microsoft"),
+                              QStringLiteral("Eclipse Adoptium") }) {
+    QDir vendorDirectory(QDir(qEnvironmentVariable("ProgramFiles")).filePath(vendor));
+    for (const auto& directory : vendorDirectory.entryList(
+           { QStringLiteral("jdk-21*") }, QDir::Dirs | QDir::NoDotAndDotDot,
+           QDir::Name | QDir::Reversed)) {
+      candidates << vendorDirectory.filePath(directory);
+    }
+  }
+#endif
+
+  const QString pathJava = QStandardPaths::findExecutable(
+#if defined(Q_OS_WIN)
+    QStringLiteral("java.exe")
+#else
+    QStringLiteral("java")
+#endif
+  );
+  if (!pathJava.isEmpty()) {
+    const QString canonicalJava = QFileInfo(pathJava).canonicalFilePath();
+    candidates << QDir(QFileInfo(canonicalJava).absolutePath()).absoluteFilePath(
+      QStringLiteral(".."));
+  }
+
+  candidates.removeAll(QString());
+  candidates.removeDuplicates();
+  for (const auto& candidate : candidates) {
+#if defined(Q_OS_WIN)
+    const QString java = QDir(candidate).filePath(QStringLiteral("bin/java.exe"));
+#else
+    const QString java = QDir(candidate).filePath(QStringLiteral("bin/java"));
+#endif
+    if (!QFileInfo(java).isExecutable()) continue;
+    QProcess process;
+    process.start(java, { QStringLiteral("--version") });
+    if (!process.waitForStarted(3000) || !process.waitForFinished(5000) ||
+        process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+      continue;
+    }
+    const QString version = QString::fromUtf8(
+      process.readAllStandardOutput() + process.readAllStandardError());
+    if (javaMajorVersion(version) == 21) return candidate;
+  }
+  return {};
+}
+
 QString sanitizedFileStem(const QString& value) {
   QString result;
   bool capitalize = true;

@@ -39,10 +39,12 @@ pass; Apple's `codesign` independently verifies the result.
 ## Batch and platform behavior
 
 Enable **Batch**, choose the game directory, then edit the detected names and
-pick optional icons from the generated list. One selected BIOS and the common
-runtime/branding settings apply to the whole queue. A directory containing both
-a CUE and its referenced BIN tracks produces one game entry, not one entry per
-track; unowned standalone BIN images become their own entries.
+pick optional icons from the generated list. Icon choices are keyed to each
+disc's stable source identity and restored on later Studio runs. One selected
+BIOS and the common runtime/branding settings apply to the whole queue. A
+directory containing both a CUE and its referenced BIN tracks produces one game
+entry, not one entry per track; unowned standalone BIN images become their own
+entries.
 
 On Windows and Linux, Batch exports every listed game for the native host
 platform. On macOS, an individual platform does the same for that target, while
@@ -51,7 +53,9 @@ platform. On macOS, an individual platform does the same for that target, while
 ## Host tools
 
 Every export requires CMake, Python 3, Ghidra 11.3.2, and OpenJDK 21. Non-Windows
-hosts also require Ninja.
+hosts also require Ninja. On macOS, Studio detects both registered JDK bundles
+and keg-only Homebrew `openjdk@21` installations, then passes that exact
+`JAVA_HOME` to Ghidra.
 macOS exports additionally require:
 
 - Xcode command-line tools (`iconutil`, `otool`, and `install_name_tool`)

@@ -11,6 +11,7 @@
 #include <QFile>
 #include <QImage>
 #include <QJsonObject>
+#include <QProcess>
 #include <QTemporaryDir>
 #include <QtEndian>
 
@@ -110,12 +111,46 @@ int main(int argc, char** argv) {
   check(psxstudio::ghidraAnalyzeHeadlessPath(fakeGhidraHome) == fakeGhidraLauncher,
         QStringLiteral("host Ghidra analyzeHeadless launcher resolution"));
 
+  check(psxstudio::javaMajorVersion(
+          QStringLiteral("openjdk 21.0.11 2026-04-21\nOpenJDK Runtime Environment")) == 21,
+        QStringLiteral("OpenJDK 21 version parsing"));
+  check(psxstudio::javaMajorVersion(
+          QStringLiteral("java version \"21.0.8\" 2025-07-15 LTS")) == 21,
+        QStringLiteral("Oracle JDK 21 legacy version parsing"));
+  check(psxstudio::javaMajorVersion(
+          QStringLiteral("java 21.0.8 2025-07-15 LTS")) == 21,
+        QStringLiteral("Oracle JDK 21 modern version parsing"));
+  check(psxstudio::javaMajorVersion(
+          QStringLiteral("openjdk 24.0.2 2025-07-15")) == 24,
+        QStringLiteral("non-21 Java version rejection input"));
+#if defined(Q_OS_MACOS)
+  if (QFileInfo(QStringLiteral("/usr/local/opt/openjdk@21/bin/java")).isExecutable() ||
+      QFileInfo(QStringLiteral("/opt/homebrew/opt/openjdk@21/bin/java")).isExecutable()) {
+    const QString detectedJavaHome = psxstudio::findJava21Home();
+    check(!detectedJavaHome.isEmpty(),
+          QStringLiteral("keg-only Homebrew JDK 21 discovery"));
+    QProcess java;
+    java.start(QDir(detectedJavaHome).filePath(QStringLiteral("bin/java")),
+               { QStringLiteral("--version") });
+    check(java.waitForStarted(3000) && java.waitForFinished(5000) &&
+            java.exitStatus() == QProcess::NormalExit && java.exitCode() == 0 &&
+            psxstudio::javaMajorVersion(QString::fromUtf8(
+              java.readAllStandardOutput() + java.readAllStandardError())) == 21,
+          QStringLiteral("discovered macOS Java home executes JDK 21"));
+  }
+#endif
+
   const QString binPath = QDir(temp.path()).filePath(QStringLiteral("test.bin"));
   const QString cuePath = QDir(temp.path()).filePath(QStringLiteral("test.cue"));
   check(makeTestDisc(binPath, error), error);
   check(psxstudio::writeText(cuePath,
                   QStringLiteral("FILE \"test.bin\" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n"),
                   error), error);
+  const QString batchId = psxstudio::batchEntrySettingsId(cuePath);
+  check(batchId.size() == 64 &&
+          batchId == psxstudio::batchEntrySettingsId(QFileInfo(cuePath).absoluteFilePath()) &&
+          batchId != psxstudio::batchEntrySettingsId(binPath),
+        QStringLiteral("stable distinct batch settings identity"));
 
   psxstudio::DiscDescription disc;
   check(psxstudio::CueSheet::parse(cuePath, {}, disc, error), error);

@@ -10,6 +10,11 @@
 namespace psxstudio {
 
 QString sha256File(const QString& path, QString& error);
+/* Stable QSettings-safe identity for one catalogued disc across rescans/runs. */
+QString batchEntrySettingsId(const QString& sourcePath);
+/* Parse the major version from `java --version` / `java -version` output. */
+int javaMajorVersion(const QString& versionOutput);
+QString findJava21Home();
 QString sanitizedFileStem(const QString& value);
 QString sanitizedBundleIdentifier(const QString& serial, const QString& title);
 /* Human-readable package / .app / exe stem from a window title.

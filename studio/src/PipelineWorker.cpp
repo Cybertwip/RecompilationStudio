@@ -545,65 +545,19 @@ QString findWorkingPython() {
   return {};
 }
 
-QString findJava21Home() {
-  QStringList candidates{ qEnvironmentVariable("JAVA_HOME") };
-#if defined(Q_OS_MACOS)
-  QProcess javaHomeProcess;
-  javaHomeProcess.start(QStringLiteral("/usr/libexec/java_home"),
-                        { QStringLiteral("-v"), QStringLiteral("21") });
-  if (javaHomeProcess.waitForStarted(3000) && javaHomeProcess.waitForFinished(5000) &&
-      javaHomeProcess.exitStatus() == QProcess::NormalExit &&
-      javaHomeProcess.exitCode() == 0) {
-    candidates << QString::fromUtf8(javaHomeProcess.readAllStandardOutput()).trimmed();
-  }
-#endif
+void configureJavaEnvironment(QProcessEnvironment& environment,
+                              const QString& javaHome) {
+  if (javaHome.isEmpty()) return;
+  environment.insert(QStringLiteral("JAVA_HOME"), javaHome);
+  const QString javaBin = QDir(javaHome).filePath(QStringLiteral("bin"));
+  QString path = environment.value(QStringLiteral("PATH"));
+  const QString prefix = javaBin + QDir::listSeparator();
 #if defined(Q_OS_WIN)
-  for (const auto& vendor : { QStringLiteral("Microsoft"),
-                              QStringLiteral("Eclipse Adoptium") }) {
-    QDir vendorDirectory(QDir(qEnvironmentVariable("ProgramFiles")).filePath(vendor));
-    for (const auto& directory : vendorDirectory.entryList(
-           { QStringLiteral("jdk-21*") }, QDir::Dirs | QDir::NoDotAndDotDot,
-           QDir::Name | QDir::Reversed)) {
-      candidates << vendorDirectory.filePath(directory);
-    }
-  }
-#endif
-  const QString pathJava = findExecutable(
-#if defined(Q_OS_WIN)
-    QStringLiteral("java.exe")
+  if (!path.startsWith(prefix, Qt::CaseInsensitive)) path.prepend(prefix);
 #else
-    QStringLiteral("java")
+  if (!path.startsWith(prefix)) path.prepend(prefix);
 #endif
-  );
-  if (!pathJava.isEmpty()) {
-    const QString canonicalJava = QFileInfo(pathJava).canonicalFilePath();
-    candidates << QDir(QFileInfo(canonicalJava).absolutePath()).absoluteFilePath(
-      QStringLiteral(".."));
-  }
-  candidates.removeAll(QString());
-  candidates.removeDuplicates();
-  for (const auto& candidate : candidates) {
-#if defined(Q_OS_WIN)
-    const QString java = QDir(candidate).filePath(QStringLiteral("bin/java.exe"));
-#else
-    const QString java = QDir(candidate).filePath(QStringLiteral("bin/java"));
-#endif
-    if (!QFileInfo(java).isExecutable()) {
-      continue;
-    }
-    QProcess process;
-    process.start(java, { QStringLiteral("--version") });
-    if (!process.waitForStarted(3000) || !process.waitForFinished(5000) ||
-        process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-      continue;
-    }
-    const QString version = QString::fromUtf8(
-      process.readAllStandardOutput() + process.readAllStandardError());
-    if (version.contains(QRegularExpression(QStringLiteral(R"((?m)^openjdk 21\.)")))) {
-      return candidate;
-    }
-  }
-  return {};
+  environment.insert(QStringLiteral("PATH"), path);
 }
 
 QString visualStudio2022Installation() {
@@ -695,23 +649,6 @@ bool PipelineWorker::runCommand(const QString& program,
   auto environment = environmentOverride
     ? *environmentOverride
     : QProcessEnvironment::systemEnvironment();
-#if defined(Q_OS_WIN)
-  const bool windowsBatch =
-    QFileInfo(program).suffix().compare(QStringLiteral("bat"), Qt::CaseInsensitive) == 0 ||
-    QFileInfo(program).suffix().compare(QStringLiteral("cmd"), Qt::CaseInsensitive) == 0;
-  if (windowsBatch) {
-    const QString javaHome = findJava21Home();
-    if (!javaHome.isEmpty()) {
-      environment.insert(QStringLiteral("JAVA_HOME"), javaHome);
-      const QString javaBin = QDir(javaHome).filePath(QStringLiteral("bin"));
-      QString path = environment.value(QStringLiteral("PATH"));
-      if (!path.startsWith(javaBin + QDir::listSeparator(), Qt::CaseInsensitive)) {
-        path.prepend(javaBin + QDir::listSeparator());
-      }
-      environment.insert(QStringLiteral("PATH"), path);
-    }
-  }
-#endif
 #if !defined(Q_OS_WIN)
   QString path = environment.value(QStringLiteral("PATH"));
   const QString additions = QStringLiteral("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
@@ -720,6 +657,10 @@ bool PipelineWorker::runCommand(const QString& program,
   }
   environment.insert(QStringLiteral("PATH"), path);
 #endif
+  if (QFileInfo(program).fileName().startsWith(
+        QStringLiteral("analyzeHeadless"), Qt::CaseInsensitive)) {
+    configureJavaEnvironment(environment, findJava21Home());
+  }
   process.setProcessEnvironment(environment);
   QString processProgram = program;
   QStringList processArguments = arguments;

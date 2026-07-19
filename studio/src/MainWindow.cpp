@@ -42,13 +42,16 @@
 #include <QThread>
 #include <QUrl>
 #include <QVBoxLayout>
-#include <QUuid>
 
 #include <algorithm>
 
 namespace psxstudio {
 
 namespace {
+
+QString batchIconSettingKey(const QString& id) {
+  return QStringLiteral("batch/icons/%1").arg(id);
+}
 
 QFrame* makeCard(const QString& objectName, QWidget* parent) {
   auto* frame = new QFrame(parent);
@@ -730,13 +733,21 @@ void MainWindow::populateBatchDirectory(const QString& path, bool showDialogs) {
 
   batchDirectoryEdit_->setText(path);
   batchEntries_.clear();
+  QSettings settings;
   for (const auto& disc : catalog) {
+    const QString id = batchEntrySettingsId(disc.sourcePath);
+    const QString iconKey = batchIconSettingKey(id);
+    QString savedIcon = settings.value(iconKey).toString();
+    if (!savedIcon.isEmpty() && !QFileInfo(savedIcon).isFile()) {
+      settings.remove(iconKey);
+      savedIcon.clear();
+    }
     batchEntries_.append({
-      QUuid::createUuid().toString(QUuid::WithoutBraces),
+      id,
       disc.sourcePath,
       disc.selectedBinPaths,
       disc.suggestedTitle,
-      {},
+      savedIcon,
       disc.serial,
       disc.volumeId,
     });
@@ -854,6 +865,9 @@ void MainWindow::chooseBatchIcon(const QString& id) {
       QStringLiteral("App icons (*.png *.svg *.icns);;All files (*)"));
     if (!path.isEmpty()) {
       entry.iconPath = path;
+      QSettings settings;
+      settings.setValue(batchIconSettingKey(entry.id), path);
+      settings.sync();
       rebuildBatchList();
       updateBuildButton();
     }
@@ -865,6 +879,9 @@ void MainWindow::clearBatchIcon(const QString& id) {
   for (auto& entry : batchEntries_) {
     if (entry.id == id) {
       entry.iconPath.clear();
+      QSettings settings;
+      settings.remove(batchIconSettingKey(entry.id));
+      settings.sync();
       rebuildBatchList();
       updateBuildButton();
       return;

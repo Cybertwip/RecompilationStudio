@@ -14,6 +14,7 @@
 
 #include "sio.h"
 #include "memcard.h"
+#include "pad_negotiation.h"
 #include "debug_server.h"
 #include "event_ring.h"
 #include <string.h>
@@ -50,9 +51,9 @@ static uint8_t pad_analog[2]    = { 0, 0 };
 static uint8_t pad_stick[2][4]  = { { 0x80, 0x80, 0x80, 0x80 },
                                     { 0x80, 0x80, 0x80, 0x80 } }; /* lx,ly,rx,ry */
 
-/* Analog-mode lock, per slot. A real DualShock's config command 0x44 0x..02/0x03
- * locks/unlocks the mode (dualshock.cpp:714-725); a locked pad ignores the
- * physical analog button (dualshock.cpp:203). We emulate the analog button via
+/* Analog-mode lock, per slot. DualShock config command 0x44 0x..02/0x03
+ * locks/unlocks the mode; a locked pad ignores the physical analog button.
+ * We emulate the analog button via
  * the host hybrid heuristic (pad_type_req), so when a game LOCKS the mode the
  * hybrid auto-flip must not override it — else the type flips underneath a game
  * that pinned DualShock, the exact desync the deferred-request machinery cannot
@@ -94,8 +95,14 @@ static uint8_t pad_in_config[2] = { 0, 0 };
  * (wrongly) answered 0x43 for its digital pad it went down the DualShock config
  * path and read the 0x00 config-response bytes as buttons -> phantom "all
  * pressed" input. Default 1 keeps analog/hybrid pads unchanged; main.cpp sets 0
- * for PAD_MODE_DIGITAL. */
+ * for PAD_MODE_DIGITAL. Automatic mode derives capability from the negotiation
+ * state below instead of this manual-mode setting. */
 static uint8_t pad_supports_config[2] = { 1, 1 };
+
+/* Per-port automatic selection policy. BIOS polling is ignored while the state
+ * is WAITING_FOR_GAME. The game-entry handoff arms D-Pad negotiation, after
+ * which actual pad command bytes select D-Pad or the one-way Hybrid fallback. */
+static PsxPadNegotiation pad_negotiation[2];
 
 /* Coherent-DualShock model (Tomba phantom-input fix). A real controller never
  * changes its reported type (0x41 digital <-> 0x73 analog) in the middle of a
@@ -545,6 +552,11 @@ void sio_init(void) {
     pad_in_config[0] = pad_in_config[1] = 0;   /* clear stale config latch on reset */
     pad_type_req[0]  = pad_type_req[1]  = -1;  /* no pending host type change */
     analog_mode_locked[0] = analog_mode_locked[1] = 0;  /* unlocked on reset */
+    for (int s = 0; s < 2; ++s) {
+        const int auto_enabled =
+            psx_pad_negotiation_is_enabled(&pad_negotiation[s]);
+        psx_pad_negotiation_reset(&pad_negotiation[s], auto_enabled);
+    }
     pad_connected = 0;
     mc_state = MC_IDLE;
     for (int i = 0; i < 2; i++) {
@@ -620,6 +632,56 @@ void sio_set_pad_config_capable(int slot, int capable) {
     if (!capable) pad_in_config[slot] = 0;
 }
 
+static int pad_effective_config_capable(int slot) {
+    if (slot < 0 || slot > 1) return 0;
+    if (psx_pad_negotiation_is_enabled(&pad_negotiation[slot]))
+        return psx_pad_negotiation_uses_hybrid(&pad_negotiation[slot]);
+    return pad_supports_config[slot] ? 1 : 0;
+}
+
+void sio_set_pad_auto_negotiate(int slot, int enabled) {
+    if (slot < 0 || slot > 1) return;
+    const int want = enabled ? 1 : 0;
+    if (psx_pad_negotiation_is_enabled(&pad_negotiation[slot]) == want) return;
+    psx_pad_negotiation_reset(&pad_negotiation[slot], want);
+    if (want) {
+        pad_analog[slot] = 0;
+        pad_in_config[slot] = 0;
+        pad_type_req[slot] = -1;
+        analog_mode_locked[slot] = 0;
+    }
+}
+
+void sio_begin_game_pad_negotiation(void) {
+    for (int slot = 0; slot < 2; ++slot) {
+        if (!psx_pad_negotiation_is_enabled(&pad_negotiation[slot])) continue;
+        psx_pad_negotiation_begin_game(&pad_negotiation[slot]);
+        pad_analog[slot] = 0;
+        pad_in_config[slot] = 0;
+        pad_type_req[slot] = -1;
+        analog_mode_locked[slot] = 0;
+    }
+}
+
+int sio_get_pad_auto_negotiate(int slot) {
+    return (slot >= 0 && slot <= 1)
+        ? psx_pad_negotiation_is_enabled(&pad_negotiation[slot]) : 0;
+}
+
+int sio_get_pad_negotiated_hybrid(int slot) {
+    return (slot >= 0 && slot <= 1)
+        ? psx_pad_negotiation_uses_hybrid(&pad_negotiation[slot]) : 0;
+}
+
+int sio_get_pad_config_capable(int slot) {
+    return pad_effective_config_capable(slot);
+}
+
+const char* sio_get_pad_negotiation_state_name(int slot) {
+    return (slot >= 0 && slot <= 1)
+        ? psx_pad_negotiation_state_name(&pad_negotiation[slot]) : "off";
+}
+
 void sio_set_pad_state(uint16_t buttons) {
     pad_buttons[0] = buttons;
 }
@@ -636,6 +698,7 @@ void sio_set_pad_state_slot(int slot, uint16_t buttons) {
 void sio_set_pad_analog(int slot, int enabled,
                         uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry) {
     if (slot < 0 || slot > 1) return;
+    if (psx_pad_negotiation_uses_dpad(&pad_negotiation[slot])) enabled = 0;
     pad_analog[slot]   = enabled ? 1 : 0;
     pad_type_req[slot] = -1;   /* explicit set supersedes any pending request */
     pad_stick[slot][0] = lx; pad_stick[slot][1] = ly;
@@ -655,6 +718,7 @@ void sio_set_pad_sticks(int slot, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry
 void sio_request_pad_type(int slot, int analog) {
     if (slot < 0 || slot > 1) return;
     int want = analog ? 1 : 0;
+    if (psx_pad_negotiation_uses_dpad(&pad_negotiation[slot])) want = 0;
     pad_type_req[slot] = (pad_analog[slot] == want) ? -1 : (int8_t)want;
 }
 
@@ -779,7 +843,9 @@ static void pad_process_byte(uint8_t tx_byte) {
          * that probes with 0x43 to detect a DualShock then classifies it as
          * digital-only and just polls. Gate all config branches on this so a
          * digital-mode pad behaves like real hardware (see pad_supports_config). */
-        const int ds = pad_supports_config[selected_slot];
+        (void)psx_pad_negotiation_observe_command(
+            &pad_negotiation[selected_slot], tx_byte);
+        const int ds = pad_effective_config_capable(selected_slot);
         if (tx_byte == 0x42) {
             /* Read poll. Analog (or in-config) uses the 8-byte format with the
              * four stick axes; a plain digital pad uses the 4-byte format. */
@@ -816,7 +882,7 @@ static void pad_process_byte(uint8_t tx_byte) {
                 pad_response_len = 8;
             } else if (!pad_in_config[selected_slot]) {
                 /* ENTER attempt (normal mode): a real DualShock transmits the LIVE
-                 * poll frame here — identical framing to 0x42 (dualshock.cpp:471-490)
+                 * poll frame here — identical framing to 0x42
                  * — and only latches config entry from the 0x01 data byte AFTERWARD.
                  * The old all-zero frame fed any driver that reads the 0x43 frame as
                  * input (most do; 0x43-with-data is a poll on the wire) a phantom
@@ -835,8 +901,8 @@ static void pad_process_byte(uint8_t tx_byte) {
                     pad_response_len = 4;
                 }
             } else {
-                /* EXIT attempt (in config): config-mode 0x43 returns the zero frame
-                 * (dualshock.cpp:660-674); cur_id is 0xF3 while in config. */
+                /* EXIT attempt (in config): config-mode 0x43 returns the zero
+                 * frame; cur_id is 0xF3 while in config. */
                 pad_response[0] = cur_id;
                 pad_response[2] = 0x00; pad_response[3] = 0x00;
                 pad_response[4] = 0x00; pad_response[5] = 0x00;
@@ -864,7 +930,7 @@ static void pad_process_byte(uint8_t tx_byte) {
             else if (tx_byte == 0x4C) r = r_4c;
             memcpy(pad_response, r, 8);
             /* 0x45 status byte must report the LIVE analog mode, not a fixed
-             * analog-on (dualshock.cpp:743) — see fix below for the modern path. */
+             * analog-on value — see the modern path below. */
             if (tx_byte == 0x45)
                 pad_response[3] = pad_analog[selected_slot] ? 0x01 : 0x00;
             pad_response_len = 8;
@@ -891,7 +957,7 @@ static void pad_process_byte(uint8_t tx_byte) {
             memcpy(pad_response, r, 8);
             /* 0x45 reports the analog-status byte: a driver polling 0x45 to learn
              * the live mode must read the CURRENT analog state, not a hard-coded
-             * analog-on (dualshock.cpp:743 transmit_buffer[1]=analog_mode?1:0).
+             * analog-on value.
              * Reporting "analog" while we present digital (or vice-versa) makes the
              * driver mis-parse the poll frame length → off-by-frame garbage buttons
              * (axis5_sio_controller.md D8). */
@@ -931,7 +997,7 @@ static void pad_process_byte(uint8_t tx_byte) {
             pad_type_req[selected_slot] = -1;
         }
         /* 0x44 lock byte (data position 4, the byte after the mode byte): 0x03 =>
-         * lock analog mode, 0x02 => unlock (dualshock.cpp:714-725). A locked slot
+         * lock analog mode, 0x02 => unlock. A locked slot
          * ignores the host hybrid auto-flip (see analog_mode_locked). */
         if (!g_pad_legacy_cfg && pad_current_cmd == 0x44 && pad_response_idx == 3) {
             if      (tx_byte == 0x03) analog_mode_locked[selected_slot] = 1;
@@ -996,7 +1062,7 @@ static void mc_process_byte(uint8_t tx_byte) {
              * card; cleared on first read or write. Without this clear, the BIOS
              * sees 0x08 forever, treats every read as a fresh-card probe, and
              * resets the chain counter (v0=-1 + 0x7520=1 path in BFC152E0).
-             * Beetle's card sim returns 0x00 in steady-state — match that. */
+             * The card returns 0x00 in steady-state. */
             mc_flag = 0x00;
         } else {
             mc_state = MC_IDLE;
@@ -1071,7 +1137,7 @@ static void mc_process_byte(uint8_t tx_byte) {
         } else {
             mc_data_idx = 0;
             mc_state = MC_WRITE_LSB_ECHO;
-            /* Hardware/Beetle echo the high address byte on the address-LSB
+            /* The card echoes the high address byte on the address-LSB
              * transfer (zero for all 1Mbit card sectors), then echo the low
              * address byte while receiving the first payload byte.  Some BIOS
              * card-write paths validate this handshake before they schedule the
@@ -2191,7 +2257,8 @@ void sio_get_pace_state(uint64_t out[16]) {
     /* pad-config FSM */ \
     X(pad_analog) X(pad_connected) X(pad_state) X(selected_slot) \
     X(pad_response) X(pad_response_len) X(pad_response_idx) X(pad_current_cmd) \
-    X(pad_in_config) X(pad_type_req) \
+    X(pad_in_config) X(pad_type_req) X(analog_mode_locked) \
+    X(pad_supports_config) X(pad_negotiation) \
     /* memcard working FSM vars */ \
     X(mc_state) X(mc_slot) X(mc_cmd) X(mc_sector) X(mc_sector_msb) X(mc_sector_lsb) \
     X(mc_data) X(mc_data_idx) X(mc_checksum) X(mc_flag) \

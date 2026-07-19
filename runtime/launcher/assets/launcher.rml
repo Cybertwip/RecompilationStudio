@@ -383,7 +383,7 @@ button:hover { background-color: #232d3c; }
 					</div>
 				</div>
 				<div class="card-body player">
-					<div class="pad-art" data-class-analog="p1_mode != 2" data-class-digital="p1_mode == 2"></div>
+					<div class="pad-art" data-class-analog="p1_mode == 0 || p1_mode == 1" data-class-digital="p1_mode == 2 || p1_mode == 3"></div>
 					<div class="card-col">
 						<div class="field-lbl">Device</div>
 						<div class="dropdown-wrap">
@@ -407,7 +407,7 @@ button:hover { background-color: #232d3c; }
 					</div>
 				</div>
 				<div class="card-body player">
-					<div class="pad-art" data-class-analog="p2_mode != 2" data-class-digital="p2_mode == 2"></div>
+					<div class="pad-art" data-class-analog="p2_mode == 0 || p2_mode == 1" data-class-digital="p2_mode == 2 || p2_mode == 3"></div>
 					<div class="card-col">
 						<div class="field-lbl">Device</div>
 						<div class="dropdown-wrap">

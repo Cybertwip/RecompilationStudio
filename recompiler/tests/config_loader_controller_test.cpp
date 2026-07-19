@@ -59,13 +59,19 @@ int main() {
             "[controller]\n"
             "p1_device = \"auto\"\n"
             "p2_device = \"gip:0e6f:02f1:001:2.3\"\n"
-            "default_mode = \"digital\"\n");
+            "default_mode = \"auto\"\n");
         const auto config = PSXRecompV4::load_game_config(configured);
         check(config.runtime.has_p1_device, "p1_device presence");
         check(config.runtime.default_p1_device == "auto", "p1_device value");
         check(config.runtime.has_p2_device, "p2_device presence");
         check(config.runtime.default_p2_device == "gip:0e6f:02f1:001:2.3",
               "p2_device value");
+        check(config.runtime.default_p1_mode == PSXRecompV4::PAD_MODE_AUTO &&
+                  config.runtime.default_p2_mode == PSXRecompV4::PAD_MODE_AUTO,
+              "automatic controller mode loads for both ports");
+        check(std::string(PSXRecompV4::pad_mode_to_string(
+                  PSXRecompV4::PAD_MODE_AUTO)) == "auto",
+              "automatic controller mode formats as auto");
 
         const fs::path defaults = make_case(root, "defaults", "");
         const auto default_config = PSXRecompV4::load_game_config(defaults);
@@ -89,7 +95,7 @@ int main() {
             "sdl:030000004c050000e60c000000000000:path-fedcba9876543210";
         saved.has_p1_device = saved.has_p2_device = true;
         saved.p1_mode = PSXRecompV4::PAD_MODE_ANALOG;
-        saved.p2_mode = PSXRecompV4::PAD_MODE_DIGITAL;
+        saved.p2_mode = PSXRecompV4::PAD_MODE_AUTO;
         saved.has_p1_mode = saved.has_p2_mode = true;
         saved.renderer = 1; saved.has_renderer = true;
         check(PSXRecompV4::save_user_settings(settings_path, saved),
@@ -101,6 +107,8 @@ int main() {
               "P2 persistent identity round trip");
         check(loaded.has_p1_mode && loaded.p1_mode == PSXRecompV4::PAD_MODE_ANALOG,
               "analog mode round trip");
+        check(loaded.has_p2_mode && loaded.p2_mode == PSXRecompV4::PAD_MODE_AUTO,
+              "automatic mode round trip");
         check(loaded.has_renderer && loaded.renderer == 1,
               "OpenGL setting round trip");
 

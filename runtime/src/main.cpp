@@ -285,9 +285,9 @@ struct PlayerInput {
     PsxGipGamepad* gip = nullptr;
 #endif
     /* Pad input mode (PSXRecompV4::PadMode): 0=hybrid, 1=analog (default),
-     * 2=digital. hybrid_analog is the per-frame auto-switch latch used only in
-     * hybrid mode: true => currently presenting DualShock (stick was the last
-     * input), false => currently presenting a digital pad (D-pad was last). */
+     * 2=D-Pad, 3=automatic D-Pad-first negotiation. hybrid_analog is the
+     * per-frame source latch used by Hybrid and by Auto after its fallback:
+     * true => currently presenting DualShock (stick was last), false => D-Pad. */
     int   mode = PSXRecompV4::PAD_MODE_ANALOG;
     bool  hybrid_analog = true;
     SDL_GameController* handle = nullptr;
@@ -393,6 +393,7 @@ extern "C" int frontend_input_state_json(char *out, int cap) {
         "\"keyboard_pad\":\"0x%04X\",\"physical_pad\":\"0x%04X\","
         "\"routed_pad\":\"0x%04X\",\"sdl_buttons\":\"0x%08X\","
         "\"sio_pad\":\"0x%04X\",\"sio_connected\":%s,\"sio_analog\":%s,"
+        "\"sio_config_capable\":%s,\"controller_negotiation\":\"%s\","
         "\"sdl_axes\":[%d,%d,%d,%d,%d,%d],"
         "\"entries\":[",
         (unsigned long long)total, g_players[0].kind, g_players[0].mode,
@@ -404,6 +405,8 @@ extern "C" int frontend_input_state_json(char *out, int cap) {
         sio_get_pad_buttons_slot(0),
         sio_get_pad_connected(0) ? "true" : "false",
         sio_get_pad_analog(0) ? "true" : "false",
+        sio_get_pad_config_capable(0) ? "true" : "false",
+        sio_get_pad_negotiation_state_name(0),
         (int)g_frontend_sdl_axes[0], (int)g_frontend_sdl_axes[1],
         (int)g_frontend_sdl_axes[2], (int)g_frontend_sdl_axes[3],
         (int)g_frontend_sdl_axes[4], (int)g_frontend_sdl_axes[5]);
@@ -1779,15 +1782,42 @@ static bool open_sdl_player(PlayerInput& p,
     return true;
 }
 
-/* The pad type a mode reports before any input has been sampled (boot /
- * hotplug). analog pins DualShock; digital and hybrid both start as a digital
- * pad (hybrid only flips to DualShock once the player nudges the stick). */
+/* The pad type a manual mode reports before input is sampled. Auto is handled
+ * by configure_sio_pad_mode() and always starts as a D-Pad. */
 static int pad_mode_boot_analog(int mode) {
     /* Hybrid boots ANALOG-on (matches a DualShock powered up with the analog LED
      * lit): the seamless auto-switch then drops to digital only if the player
      * reaches for the d-pad. Pinned-analog also boots analog; digital boots off. */
     return (mode == PSXRecompV4::PAD_MODE_ANALOG ||
             mode == PSXRecompV4::PAD_MODE_HYBRID) ? 1 : 0;
+}
+
+/* Apply a configured mode without restarting an automatic decision during a
+ * hotplug refresh. Manual modes retain their legacy behaviour. Auto is owned
+ * by SIO: before fallback it is pinned to a plain D-Pad; after fallback its
+ * current Hybrid type is left untouched and the per-frame sampler drives it. */
+static void configure_sio_pad_mode(int slot, const PlayerInput& player) {
+    const bool automatic = player.mode == PSXRecompV4::PAD_MODE_AUTO;
+    sio_set_pad_auto_negotiate(slot, automatic ? 1 : 0);
+    if (automatic) {
+        if (!sio_get_pad_negotiated_hybrid(slot)) {
+            sio_set_pad_analog(slot, 0, 0x80, 0x80, 0x80, 0x80);
+        }
+        return;
+    }
+    sio_set_pad_analog(slot, pad_mode_boot_analog(player.mode),
+                       0x80, 0x80, 0x80, 0x80);
+    sio_set_pad_config_capable(
+        slot, player.mode != PSXRecompV4::PAD_MODE_DIGITAL);
+}
+
+/* Auto uses the existing Hybrid host-input policy only after the SIO protocol
+ * selects it. Until then every input source is sampled as a D-Pad. */
+static int pad_mode_for_sampling(int slot, int configured_mode) {
+    if (configured_mode != PSXRecompV4::PAD_MODE_AUTO) return configured_mode;
+    return sio_get_pad_negotiated_hybrid(slot)
+        ? (int)PSXRecompV4::PAD_MODE_HYBRID
+        : (int)PSXRecompV4::PAD_MODE_DIGITAL;
 }
 
 /* Open/close physical handles so they match g_players, and (re)assert each
@@ -1911,12 +1941,7 @@ static void refresh_player_devices(void) {
         const bool connected = player_physical_attached(p) ||
                                player_keyboard_fallback(p, s);
         sio_set_pad_connected(s, connected ? 1 : 0);
-        sio_set_pad_analog(s, pad_mode_boot_analog(p.mode), 0x80, 0x80, 0x80, 0x80);
-        /* DIGITAL mode == a plain digital controller that ignores the DualShock
-         * config-mode commands (real SCPH-1080 behaviour); ANALOG/HYBRID == a
-         * config-capable DualShock. A digital pad that wrongly answered 0x43
-         * sent Tomba 2's pad driver down the config path -> phantom 0x00 reads. */
-        sio_set_pad_config_capable(s, p.mode != PSXRecompV4::PAD_MODE_DIGITAL);
+        configure_sio_pad_mode(s, p);
     }
     if (routes_changed) persist_controller_settings();
 }
@@ -1928,8 +1953,8 @@ static void refresh_player_devices(void) {
 static void set_player_device(PlayerInput& p, const std::string& dev, int mode) {
     close_player(p);
     p.mode = mode;
-    /* Hybrid starts in ANALOG (analog LED on); the auto-switch drops to digital
-     * only when the player uses the d-pad. */
+    /* Hybrid starts in ANALOG. Auto keeps the same latch dormant so, if SIO
+     * selects Hybrid, it can immediately present a complete DualShock. */
     p.hybrid_analog = true;
     p.device_id.clear();
     std::string d = lower_copy(trim_copy(dev));
@@ -2352,6 +2377,7 @@ static void apply_input_override_to_sio(int override_word) {
     if (p.kind != 0)                  mode = p.mode;
     else if (dev_any_input_enabled()) mode = (int)PSXRecompV4::PAD_MODE_HYBRID;
     else                              mode = (int)PSXRecompV4::PAD_MODE_DIGITAL;
+    mode = pad_mode_for_sampling(0, mode);
 
     int eff_analog;
     if (mode == (int)PSXRecompV4::PAD_MODE_DIGITAL) {
@@ -2428,6 +2454,7 @@ static void sample_pad_into_sio(int override) {
         if (p.kind != 0)      mode = p.mode;
         else if (dev_here)    mode = (int)PSXRecompV4::PAD_MODE_HYBRID;
         else                  mode = (int)PSXRecompV4::PAD_MODE_DIGITAL;
+        mode = pad_mode_for_sampling(s, mode);
         int eff_analog;
         uint8_t st[4] = { 0x80, 0x80, 0x80, 0x80 };
         if (mode == PSXRecompV4::PAD_MODE_DIGITAL) {
@@ -3917,9 +3944,9 @@ int main(int argc, char** argv) {
             g_frame_interpolation_fps = us.frame_interpolation_fps;
     }
 
-    /* lock_mode: the game supports exactly ONE pad type (e.g. X4 / Tomba 2 are
-     * digital-only — X4's pre-DualShock libpad silently discards input from a
-     * pad answering id 0x73). The launcher hides its selector for such games,
+    /* lock_mode: the game owns one controller policy. This includes Auto, which
+     * starts at D-Pad and may promote itself from the observed SIO protocol.
+     * The launcher hides its selector for such games,
      * but that alone left two holes: (a) launcher-less builds still honoured a
      * settings.toml p1_mode/p2_mode, and (b) a settings.toml persisted BEFORE
      * the game declared lock_mode fed the stale mode back as the launcher's
@@ -4258,7 +4285,7 @@ int main(int argc, char** argv) {
             g_players[s].kind, false, s);
         sio_set_pad_connected(s,
             (g_players[s].kind == PSXRecompV4::HOST_INPUT_KEYBOARD || keyboard) ? 1 : 0);
-        sio_set_pad_analog(s, pad_mode_boot_analog(g_players[s].mode), 0x80, 0x80, 0x80, 0x80);
+        configure_sio_pad_mode(s, g_players[s]);
     }
     /* SPU float-shadow gate must be set before spu_init() (which runs
      * spu_shadow_reset()). Default OFF; PSX_AUDIO_SHADOW env overrides. */

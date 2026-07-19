@@ -26,7 +26,7 @@
 namespace PSXRecompV4 {
 
 // Pad input mode (per player). Replaces the old analog on/off boolean.
-//   hybrid  — auto-switch DualShock(analog)/digital per the most-recent input:
+//   hybrid  — auto-switch DualShock(analog)/D-Pad per the most-recent input:
 //             nudge the stick -> report DualShock (0x73, variable sticks);
 //             press the D-pad -> report a digital pad (0x41) so the game runs
 //             its OWN d-pad path at true digital sensitivity. Mirrors a
@@ -36,11 +36,18 @@ namespace PSXRecompV4 {
 //             folded onto the stick at full deflection so it still moves you.
 //             This is the host default unless a game explicitly locks another
 //             mode.
-//   digital — always present a digital pad (id 0x41); sticks disabled.
-enum PadMode { PAD_MODE_HYBRID = 0, PAD_MODE_ANALOG = 1, PAD_MODE_DIGITAL = 2 };
+//   digital — always present a D-Pad (id 0x41); sticks disabled.
+//   auto    — game-aware policy: start as a real D-Pad, then promote to Hybrid
+//             only when the game's SIO command sequence rejects that D-Pad.
+enum PadMode {
+    PAD_MODE_HYBRID = 0,
+    PAD_MODE_ANALOG = 1,
+    PAD_MODE_DIGITAL = 2,
+    PAD_MODE_AUTO = 3
+};
 
 // Parse/format a pad mode. pad_mode_from_string accepts "hybrid"/"analog"/
-// "digital" (case-insensitive) and returns `fallback` for anything else.
+// "digital"/"auto" (case-insensitive) and returns `fallback` for anything else.
 int         pad_mode_from_string(const std::string& s, int fallback);
 const char* pad_mode_to_string(int mode);
 
@@ -265,11 +272,11 @@ struct RuntimeConfig {
     std::string           default_p2_device = "auto";
 
     // default_mode: the pad input mode this game ships with (see PadMode):
-    // "hybrid" auto-switches DualShock/digital from the player's input,
-    // "analog" (default) pins DualShock (0x73), "digital" pins a digital pad
-    // (0x41). A stick-capable title (e.g. Tomba) ships "hybrid" so the stick
-    // gives variable run speed yet the D-pad keeps its classic digital feel,
-    // with no launcher toggling. Per-install settings.toml [controller]
+    // "auto" starts with a D-Pad and selects Hybrid only when the game's SIO
+    // negotiation rejects it; "hybrid" auto-switches DualShock/D-Pad from
+    // player input, "analog" (default for legacy configs) pins DualShock
+    // (0x73), and "digital" pins a D-Pad (0x41). Per-install settings.toml
+    // [controller]
     // p1_mode/p2_mode still override. `default_mode` sets both ports;
     // `p1_mode`/`p2_mode` set one. Legacy `default_analog`/`p1_analog`/
     // `p2_analog` booleans are still accepted (true->analog, false->digital).
@@ -284,10 +291,9 @@ struct RuntimeConfig {
     bool                  controller_allow_hybrid = true;
 
     // lock_mode: when true the launcher HIDES the whole pad-mode selector
-    // (Hybrid | Analog | D-Pad) and forces every port to default_p1_mode. For a
-    // game that supports exactly one pad type — e.g. Tomba 2, whose driver only
-    // works as a plain digital pad because the DualShock config-mode handshake
-    // is unhandled — so the player can't pick a broken mode. Supersedes
+    // (Hybrid | Analog | D-Pad) and forces every port to default_p1_mode. Auto
+    // policies use this so stale settings cannot bypass runtime negotiation.
+    // Supersedes
     // allow_hybrid (which only hides the Hybrid segment). Default false.
     bool                  controller_lock_mode = false;
 
@@ -690,12 +696,12 @@ struct UserSettings {
     //   "gip:..."   — a macOS direct-USB Xbox GIP selector emitted by the launcher
     //   "auto"      — SDL first, then direct USB GIP when the macOS backend exists
     // p1_mode/p2_mode select the emulated pad behaviour (see PadMode):
-    // hybrid / analog (default) / digital. Automatic routing remembers at most
+    // hybrid / analog (default) / digital / auto. Automatic routing remembers at most
     // two physical pads; P1 falls back to keyboard while its pad is absent.
     bool has_p1_device = false; std::string p1_device = "auto";
     bool has_p2_device = false; std::string p2_device = "auto";
     // Pad input mode per player (see PadMode): hybrid / analog (default) /
-    // digital. Persisted as p1_mode/p2_mode strings. Legacy p1_analog/p2_analog
+    // digital / auto. Persisted as p1_mode/p2_mode strings. Legacy p1_analog/p2_analog
     // booleans are still read for back-compat (true->analog, false->digital).
     bool has_p1_mode = false; int p1_mode = PAD_MODE_ANALOG;
     bool has_p2_mode = false; int p2_mode = PAD_MODE_ANALOG;

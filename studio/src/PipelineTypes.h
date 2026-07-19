@@ -107,8 +107,6 @@ struct PipelineRequest {
   bool biosRemoveStockPsGlyph{ true };
   bool skipBiosBoot{ false };
   bool macosGipGamepad{ true };
-  /* Fixed pad type baked into game.toml: hybrid | analog | digital. */
-  QString padMode{ QStringLiteral("digital") };
   bool overwriteOutput{ false };
 
   QJsonObject toJson(bool includeSecret = false) const {
@@ -134,7 +132,6 @@ struct PipelineRequest {
       { QStringLiteral("bios_remove_stock_ps_glyph"), biosRemoveStockPsGlyph },
       { QStringLiteral("skip_bios_boot"), skipBiosBoot },
       { QStringLiteral("macos_gip_gamepad"), macosGipGamepad },
-      { QStringLiteral("pad_mode"), padMode },
       { QStringLiteral("overwrite_output"), overwriteOutput },
     };
     if (includeSecret) {

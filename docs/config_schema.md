@@ -115,12 +115,12 @@ mode. Per-install `settings.toml` values override these defaults.
 [controller]
 p1_device = "auto"       # none | keyboard | auto | persistent SDL id | gip: selector
 p2_device = "auto"
-default_mode = "analog"  # hybrid | analog | digital
+default_mode = "auto"    # auto | hybrid | analog | digital
 deadzone = 12000
 allow_hybrid = true
-lock_mode = false        # true hides Hybrid|Analog|D-Pad in the settings UI
-                         # and clamps runtime mode to default_mode (Studio packages
-                         # always set lock_mode = true with the builder's pad type)
+lock_mode = true         # hides Hybrid|Analog|D-Pad in the settings UI and
+                         # clamps runtime mode to default_mode; Studio uses Auto
+                         # so each title starts D-Pad and can fall back to Hybrid
 ```
 
 Automatic routing assigns the first two connected controllers exclusively to

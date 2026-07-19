@@ -6751,18 +6751,26 @@ extern uint16_t sio_get_pad_buttons(void);
 extern uint16_t sio_get_pad_buttons_slot(int slot);
 extern int sio_get_pad_connected(int slot);
 extern int sio_get_pad_analog(int slot);
+extern int sio_get_pad_config_capable(int slot);
+extern const char* sio_get_pad_negotiation_state_name(int slot);
 static void handle_pad_status(int id, const char *json)
 {
     (void)json;
     uint16_t pad0 = sio_get_pad_buttons_slot(0);
     uint16_t pad1 = sio_get_pad_buttons_slot(1);
     send_fmt("{\"id\":%d,\"ok\":true,\"pad\":\"0x%04X\","
-             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s},"
-             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s},"
+             "\"slot0\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,"
+             "\"config_capable\":%s,\"negotiation\":\"%s\"},"
+             "\"slot1\":{\"buttons\":\"0x%04X\",\"connected\":%s,\"analog\":%s,"
+             "\"config_capable\":%s,\"negotiation\":\"%s\"},"
              "\"override\":%d,\"override_frames\":%d}\n",
              id, pad0,
              pad0, sio_get_pad_connected(0) ? "true" : "false", sio_get_pad_analog(0) ? "true" : "false",
+             sio_get_pad_config_capable(0) ? "true" : "false",
+             sio_get_pad_negotiation_state_name(0),
              pad1, sio_get_pad_connected(1) ? "true" : "false", sio_get_pad_analog(1) ? "true" : "false",
+             sio_get_pad_config_capable(1) ? "true" : "false",
+             sio_get_pad_negotiation_state_name(1),
              s_input_override, s_input_frames);
 }
 

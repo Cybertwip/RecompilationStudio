@@ -217,7 +217,7 @@ QString makeGameToml(const PipelineRequest& request,
   text += QStringLiteral("antialiasing = false\n");
   text += QStringLiteral("texture_filtering = \"nearest\"\n");
   text += QStringLiteral("aspect_ratio = \"4:3\"\n\n");
-  text += defaultControllerToml(request.padMode);
+  text += defaultControllerToml();
   text += QStringLiteral("[audit]\n\n");
   text += QStringLiteral("[[audit.regions]]\n");
   text += QStringLiteral("name = \"Text\"\n");
@@ -1986,7 +1986,8 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("effective_bios_crc32"), QStringLiteral("0x%1").arg(effectiveBiosCrc, 8, 16, QLatin1Char('0')).toUpper() },
     { QStringLiteral("bios_branding_patched"), request.patchBiosBranding },
     { QStringLiteral("skip_bios_boot"), request.skipBiosBoot },
-    { QStringLiteral("pad_mode"), request.padMode },
+    { QStringLiteral("pad_mode"), QStringLiteral("auto") },
+    { QStringLiteral("controller_policy"), QStringLiteral("dpad_then_hybrid") },
     { QStringLiteral("macos_gip_gamepad_requested"), macosTarget && request.macosGipGamepad },
     { QStringLiteral("macos_gip_gamepad_compiled"), gipBackendCompiled },
     { QStringLiteral("libusb_version"), libusbVersion },

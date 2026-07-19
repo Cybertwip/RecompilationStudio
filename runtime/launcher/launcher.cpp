@@ -385,9 +385,13 @@ void refresh_player(LauncherModel& m, int player, const std::vector<DeviceOption
     label   = o.label;
     options = build_options_rml(player, opts);
 
-    const char* type = mode == 1 ? "DualShock (analog)"
-                     : mode == 2 ? "digital pad"
-                                 : "hybrid (auto analog/d-pad)";
+    const char* type = mode == PSXRecompV4::PAD_MODE_ANALOG
+                         ? "DualShock (analog)"
+                     : mode == PSXRecompV4::PAD_MODE_DIGITAL
+                         ? "D-Pad"
+                     : mode == PSXRecompV4::PAD_MODE_AUTO
+                         ? "automatic (D-Pad first, Hybrid fallback)"
+                         : "Hybrid (auto analog/D-Pad)";
     if (o.kind == 0)      { status = "No device — port empty"; dot = "off"; }
     else if (o.kind == 1) { status = Rml::String("Keyboard \xE2\x80\x94 ") + type; dot = ""; }
     else if (o.kind == 4) {

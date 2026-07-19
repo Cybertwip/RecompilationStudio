@@ -246,27 +246,14 @@ MainWindow::MainWindow(QWidget* parent)
     QStringLiteral("Keeps the recompiled BIOS linked, but skips its visible shell/intro and proceeds directly to disc boot."));
   inputLayout->addWidget(skipBiosBoot_);
 
-  auto* padModeRow = new QWidget(inputCard_);
-  padModeRow->setMinimumHeight(34);
-  auto* padModeLayout = new QHBoxLayout(padModeRow);
-  padModeLayout->setContentsMargins(0, 0, 0, 0);
-  auto* padModeLabel = new QLabel(QStringLiteral("Controller pad type"), padModeRow);
-  padModeLabel->setMinimumWidth(142);
-  padModeCombo_ = new QComboBox(padModeRow);
-  padModeCombo_->addItem(QStringLiteral("D-Pad (digital)"),
-                         QStringLiteral("digital"));
-  padModeCombo_->addItem(QStringLiteral("Hybrid (auto digital / analog)"),
-                         QStringLiteral("hybrid"));
-  padModeCombo_->addItem(QStringLiteral("Analog (DualShock)"),
-                         QStringLiteral("analog"));
-  configureReadOnlyComboBox(padModeCombo_);
-  padModeCombo_->setCurrentIndex(0);
-  padModeCombo_->setToolTip(
-    QStringLiteral("Fixed pad type baked into the packaged game. The in-game "
-                   "settings menu will not offer Hybrid / Analog / D-Pad switching."));
-  padModeLayout->addWidget(padModeLabel);
-  padModeLayout->addWidget(padModeCombo_, 1);
-  inputLayout->addWidget(padModeRow);
+  auto* padPolicy = new QLabel(
+    QStringLiteral("Controller: automatic D-Pad first, Hybrid fallback"), inputCard_);
+  padPolicy->setObjectName(QStringLiteral("secondaryText"));
+  padPolicy->setWordWrap(true);
+  padPolicy->setToolTip(
+    QStringLiteral("Each game negotiates its controller at runtime. A real D-Pad is "
+                   "presented first; Hybrid is enabled only if the game rejects it."));
+  inputLayout->addWidget(padPolicy);
 
   macosGipGamepad_ = new QCheckBox(
     QStringLiteral("Enable wired Xbox/PDP controllers on macOS"), inputCard_);
@@ -644,12 +631,6 @@ void MainWindow::loadSettings() {
   biosMuteAudio_->setChecked(settings.value(QStringLiteral("bios_patch/mute_audio"), true).toBool());
   biosRemovePsGlyph_->setChecked(settings.value(QStringLiteral("bios_patch/remove_ps_glyph"), true).toBool());
   skipBiosBoot_->setChecked(settings.value(QStringLiteral("runtime/skip_bios_boot"), false).toBool());
-  {
-    const QString padMode = settings.value(QStringLiteral("runtime/pad_mode"),
-                                            QStringLiteral("digital")).toString();
-    const int padIndex = padModeCombo_->findData(padMode);
-    padModeCombo_->setCurrentIndex(padIndex >= 0 ? padIndex : 0);
-  }
   macosGipGamepad_->setChecked(
     settings.value(QStringLiteral("runtime/macos_gip_gamepad"), true).toBool());
 
@@ -676,7 +657,7 @@ void MainWindow::saveSettings() const {
   settings.setValue(QStringLiteral("bios_patch/mute_audio"), biosMuteAudio_->isChecked());
   settings.setValue(QStringLiteral("bios_patch/remove_ps_glyph"), biosRemovePsGlyph_->isChecked());
   settings.setValue(QStringLiteral("runtime/skip_bios_boot"), skipBiosBoot_->isChecked());
-  settings.setValue(QStringLiteral("runtime/pad_mode"), padModeCombo_->currentData().toString());
+  settings.remove(QStringLiteral("runtime/pad_mode"));
   settings.setValue(QStringLiteral("runtime/macos_gip_gamepad"), macosGipGamepad_->isChecked());
 }
 
@@ -1024,7 +1005,6 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   request.biosMuteBootAudio = biosMuteAudio_->isChecked();
   request.biosRemoveStockPsGlyph = biosRemovePsGlyph_->isChecked();
   request.skipBiosBoot = skipBiosBoot_->isChecked();
-  request.padMode = padModeCombo_->currentData().toString();
   request.macosGipGamepad = macosGipGamepad_->isChecked();
   request.overwriteOutput = overwrite;
   return request;
@@ -1277,7 +1257,6 @@ void MainWindow::setBusy(bool busy) {
   signingEnabled_->setEnabled(!busy);
   platformCombo_->setEnabled(!busy);
   skipBiosBoot_->setEnabled(!busy);
-  padModeCombo_->setEnabled(!busy);
   macosGipGamepad_->setEnabled(!busy);
   biosMuteAudio_->setEnabled(!busy && biosPatchEnabled_->isChecked());
   biosRemovePsGlyph_->setEnabled(!busy && biosPatchEnabled_->isChecked());

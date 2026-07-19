@@ -209,25 +209,12 @@ int main(int argc, char** argv) {
         QStringLiteral("direct-to-game boot TOML"));
 
   const QString controllerDefaults = psxstudio::defaultControllerToml();
-  check(controllerDefaults.contains(QStringLiteral("default_mode = \"digital\"")) &&
-          controllerDefaults.contains(QStringLiteral("allow_hybrid = false")) &&
+  check(controllerDefaults.contains(QStringLiteral("default_mode = \"auto\"")) &&
+          controllerDefaults.contains(QStringLiteral("allow_hybrid = true")) &&
           controllerDefaults.contains(QStringLiteral("lock_mode = true")) &&
-          !controllerDefaults.contains(QStringLiteral("default_mode = \"hybrid\"")),
-        QStringLiteral("Studio locks a digital D-Pad by default"));
-  const QString hybridPad = psxstudio::defaultControllerToml(QStringLiteral("hybrid"));
-  check(hybridPad.contains(QStringLiteral("default_mode = \"hybrid\"")) &&
-          hybridPad.contains(QStringLiteral("allow_hybrid = true")) &&
-          hybridPad.contains(QStringLiteral("lock_mode = true")),
-        QStringLiteral("Studio can lock a config-capable Hybrid pad type"));
-  const QString digitalPad = psxstudio::defaultControllerToml(QStringLiteral("digital"));
-  check(digitalPad.contains(QStringLiteral("default_mode = \"digital\"")) &&
-          digitalPad.contains(QStringLiteral("allow_hybrid = false")) &&
-          digitalPad.contains(QStringLiteral("lock_mode = true")),
-        QStringLiteral("Studio can lock a digital D-Pad pad type"));
-  const QString analogPad = psxstudio::defaultControllerToml(QStringLiteral("analog"));
-  check(analogPad.contains(QStringLiteral("default_mode = \"analog\"")) &&
-          analogPad.contains(QStringLiteral("lock_mode = true")),
-        QStringLiteral("Studio can lock an analog DualShock pad type"));
+          !controllerDefaults.contains(QStringLiteral("default_mode = \"digital\"")) &&
+          !controllerDefaults.contains(QStringLiteral("default_mode = \"analog\"")),
+        QStringLiteral("Studio locks automatic D-Pad-to-Hybrid negotiation"));
 
   check(psxstudio::macosGipCmakeOption(true).contains(
           QStringLiteral("PSX_MACOS_GIP_GAMEPAD ON")),

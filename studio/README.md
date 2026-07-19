@@ -89,9 +89,11 @@ path. Linux input uses SDL's kernel evdev path rather than direct HIDRAW access,
 loads a checksum-pinned SDL GameController mapping database, and routes Player
 1's `auto` selection to the keyboard whenever no physical controller is live.
 
-**Controller pad type** (Hybrid / Analog / D-Pad) is chosen in Studio and baked
-into the packaged `game.toml` with `lock_mode = true`, so the in-game settings
-menu does not expose pad-type switching for that title.
+**Controller type is negotiated per game at runtime.** Every Studio export
+starts with a real D-Pad. If the title repeatedly requests DualShock
+configuration without accepting a normal D-Pad poll, that port promotes to
+Hybrid. The generated `game.toml` records `default_mode = "auto"` with
+`lock_mode = true`, so Batch exports do not need a controller choice per title.
 The resulting package records its actual minimum glibc requirement from the
 versioned symbols observed in the delivered executable and bundled SDL2 runtime;
 it does not declare or enforce a fixed glibc baseline. The package is also

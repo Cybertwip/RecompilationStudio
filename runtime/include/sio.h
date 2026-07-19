@@ -94,6 +94,18 @@ void sio_set_pad_connected(int slot, int connected);
  * unchanged. */
 void sio_set_pad_config_capable(int slot, int capable);
 
+/* Automatic per-game controller selection. Enabling a slot presents a real
+ * D-Pad during BIOS boot. sio_begin_game_pad_negotiation() is called at the
+ * registered game-entry handoff; from then on the SIO command sequence either
+ * keeps the D-Pad or promotes the slot to Hybrid. Re-applying enabled=1 is
+ * idempotent, so controller hotplug refreshes cannot restart a decision. */
+void sio_set_pad_auto_negotiate(int slot, int enabled);
+void sio_begin_game_pad_negotiation(void);
+int sio_get_pad_auto_negotiate(int slot);
+int sio_get_pad_negotiated_hybrid(int slot);
+int sio_get_pad_config_capable(int slot);
+const char* sio_get_pad_negotiation_state_name(int slot);
+
 /* Return current pad button state (for debug server). _slot targets either. */
 uint16_t sio_get_pad_buttons(void);
 uint16_t sio_get_pad_buttons_slot(int slot);

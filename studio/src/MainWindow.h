@@ -115,7 +115,6 @@ private:
   QCheckBox* biosMuteAudio_{ nullptr };
   QCheckBox* biosRemovePsGlyph_{ nullptr };
   QCheckBox* skipBiosBoot_{ nullptr };
-  QComboBox* padModeCombo_{ nullptr };
   QCheckBox* macosGipGamepad_{ nullptr };
   QLabel* stageLabel_{ nullptr };
   QProgressBar* progressBar_{ nullptr };

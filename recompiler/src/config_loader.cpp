@@ -18,7 +18,8 @@ namespace PSXRecompV4 {
 
 namespace fs = std::filesystem;
 
-// Pad mode <-> string. Accepts "hybrid"/"analog"/"digital" (case-insensitive);
+// Pad mode <-> string. Accepts "hybrid"/"analog"/"digital"/"auto"
+// (case-insensitive);
 // returns `fallback` for anything unrecognised so a typo never silently flips
 // the pad type.
 int pad_mode_from_string(const std::string& s, int fallback) {
@@ -28,6 +29,7 @@ int pad_mode_from_string(const std::string& s, int fallback) {
     if (l == "hybrid")  return PAD_MODE_HYBRID;
     if (l == "analog")  return PAD_MODE_ANALOG;
     if (l == "digital") return PAD_MODE_DIGITAL;
+    if (l == "auto")    return PAD_MODE_AUTO;
     return fallback;
 }
 
@@ -35,6 +37,7 @@ const char* pad_mode_to_string(int mode) {
     switch (mode) {
         case PAD_MODE_ANALOG:  return "analog";
         case PAD_MODE_DIGITAL: return "digital";
+        case PAD_MODE_AUTO:    return "auto";
         default:               return "hybrid";
     }
 }

@@ -62,6 +62,13 @@ if(PSXRECOMP_GIP_GAMEPAD_AVAILABLE)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(pad_negotiation_test
+        tests/pad_negotiation_test.c
+        src/pad_negotiation.c
+    )
+    target_include_directories(pad_negotiation_test PRIVATE include)
+    add_test(NAME pad_negotiation COMMAND pad_negotiation_test)
+
     add_executable(host_input_policy_test
         tests/host_input_policy_test.cpp
         src/psx_keybinds.c

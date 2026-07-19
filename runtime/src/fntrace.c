@@ -1,6 +1,7 @@
 /* fntrace.c — runtime side of psx_dispatch call ring. See fntrace.h. */
 
 #include "fntrace.h"
+#include "sio.h"
 #include "text_xlate.h"     /* on-the-fly string translation hook (framework) */
 #include "parity_trace.h"   /* general control-flow parity ring (native producer) */
 #include <string.h>
@@ -139,6 +140,10 @@ void fntrace_record(CPUState* cpu, uint32_t target) {
             dirty_ram_clear_image_baseline();
             memory_clear_low_boot_scratch();
             cdrom_notify_game_started();
+            /* BIOS pad polls cannot answer what the title accepts. Arm the
+             * automatic D-Pad-first policy only at the registered game entry,
+             * before the handoff snapshot captures SIO state. */
+            sio_begin_game_pad_negotiation();
             boot_state_trigger_capture(cpu);
         }
     }

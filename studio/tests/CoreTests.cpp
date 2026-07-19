@@ -5,6 +5,7 @@
 
 #include "quazip.h"
 #include "quazipfile.h"
+#include "quazipfileinfo.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -294,6 +295,28 @@ int main(int argc, char** argv) {
   check(gipRequest.macosGipGamepad &&
           gipRequest.toJson().value(QStringLiteral("macos_gip_gamepad")).toBool(),
         QStringLiteral("GIP export defaults enabled and is serialized"));
+  check(gipRequest.exportAsZip &&
+          gipRequest.toJson().value(QStringLiteral("export_as_zip")).toBool(),
+        QStringLiteral("ZIP export defaults enabled and is serialized"));
+  gipRequest.windowTitle = QStringLiteral("Evil Zone (Europe)");
+  gipRequest.targetPlatform = psxstudio::TargetPlatform::MacOS;
+  check(psxstudio::exportOutputName(gipRequest) ==
+          QStringLiteral("Evil Zone (Europe)-macOS.zip"),
+        QStringLiteral("macOS ZIP output name"));
+  gipRequest.targetPlatform = psxstudio::TargetPlatform::Windows;
+  check(psxstudio::exportOutputName(gipRequest) ==
+          QStringLiteral("Evil Zone (Europe)-Windows.zip"),
+        QStringLiteral("Windows ZIP output name"));
+  gipRequest.targetPlatform = psxstudio::TargetPlatform::Linux;
+  check(psxstudio::exportOutputName(gipRequest) ==
+          QStringLiteral("Evil Zone (Europe)-Linux.zip"),
+        QStringLiteral("Linux ZIP output name"));
+  gipRequest.exportAsZip = false;
+  check(psxstudio::exportOutputName(gipRequest) ==
+          QStringLiteral("Evil Zone (Europe)-Linux"),
+        QStringLiteral("unpacked export output name remains available"));
+  gipRequest.exportAsZip = true;
+  gipRequest.targetPlatform = psxstudio::hostTargetPlatform();
   check(gipRequest.targetPlatform == psxstudio::hostTargetPlatform() &&
           gipRequest.toJson().value(QStringLiteral("platform")).toString() ==
             psxstudio::targetPlatformKey(psxstudio::hostTargetPlatform()),
@@ -397,6 +420,111 @@ int main(int argc, char** argv) {
   check(archivedFile.readAll().contains("clean"), QStringLiteral("proof ZIP contents"));
   archivedFile.close();
   archive.close();
+
+  const QString packageSource =
+    QDir(temp.path()).filePath(QStringLiteral("package-source"));
+  const QString packageExecutable =
+    QDir(packageSource).filePath(QStringLiteral("Evil Zone.exe"));
+  const QString packageProof =
+    QDir(packageSource).filePath(QStringLiteral("proof/manifest.json"));
+  const QString hiddenMetadata =
+    QDir(packageSource).filePath(QStringLiteral(".package-metadata"));
+  check(psxstudio::writeBytes(packageExecutable, QByteArray("native-binary"), error), error);
+  check(psxstudio::writeBytes(packageProof, QByteArray("verified-proof"), error), error);
+  check(psxstudio::writeBytes(hiddenMetadata, QByteArray("hidden"), error), error);
+  check(QDir().mkpath(QDir(packageSource).filePath(QStringLiteral("empty"))),
+        QStringLiteral("package ZIP empty-directory fixture"));
+  const QFile::Permissions executablePermissions =
+    QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+    QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+    QFileDevice::ReadOther | QFileDevice::ExeOther;
+  check(QFile::setPermissions(packageExecutable, executablePermissions),
+        QStringLiteral("package ZIP executable permission fixture"));
+#if !defined(Q_OS_WIN)
+  const QString packageLink =
+    QDir(packageSource).filePath(QStringLiteral("runtime-link"));
+  check(QFile::link(packageExecutable, packageLink),
+        QStringLiteral("package ZIP symlink fixture"));
+#endif
+
+  const QString rootContentsZip =
+    QDir(temp.path()).filePath(QStringLiteral("Evil Zone-Windows.zip"));
+  check(psxstudio::createPackageArchive(
+          packageSource, {}, rootContentsZip, error), error);
+  QuaZip rootContentsArchive(rootContentsZip);
+  check(rootContentsArchive.open(QuaZip::mdUnzip),
+        QStringLiteral("root-contents package ZIP opens"));
+  const QStringList rootContentsEntries = rootContentsArchive.getFileNameList();
+  check(rootContentsEntries.contains(QStringLiteral("Evil Zone.exe")) &&
+          rootContentsEntries.contains(QStringLiteral("proof/manifest.json")) &&
+          rootContentsEntries.contains(QStringLiteral("empty/")) &&
+          rootContentsEntries.contains(QStringLiteral(".package-metadata")) &&
+          std::none_of(rootContentsEntries.cbegin(), rootContentsEntries.cend(),
+                       [](const QString& name) {
+                         return name.startsWith(QStringLiteral("package-source/"));
+                       }),
+        QStringLiteral("Windows/Linux package contents sit directly at ZIP root"));
+  check(rootContentsArchive.setCurrentFile(QStringLiteral("Evil Zone.exe")),
+        QStringLiteral("root ZIP executable entry"));
+  QuaZipFileInfo64 executableInfo;
+  check(rootContentsArchive.getCurrentFileInfo(&executableInfo) &&
+          executableInfo.getPermissions().testFlag(QFileDevice::ExeOwner),
+        QStringLiteral("package ZIP preserves executable permissions"));
+#if !defined(Q_OS_WIN)
+  check(rootContentsArchive.setCurrentFile(QStringLiteral("runtime-link")),
+        QStringLiteral("root ZIP symlink entry"));
+  QuaZipFileInfo64 linkInfo;
+  check(rootContentsArchive.getCurrentFileInfo(&linkInfo) && linkInfo.isSymbolicLink(),
+        QStringLiteral("package ZIP preserves symbolic links"));
+#endif
+  rootContentsArchive.close();
+
+  const QString macosZip =
+    QDir(temp.path()).filePath(QStringLiteral("Evil Zone-macOS.zip"));
+  check(psxstudio::createPackageArchive(
+          packageSource, QStringLiteral("Evil Zone (Europe).app"), macosZip, error),
+        error);
+  QuaZip macosArchive(macosZip);
+  check(macosArchive.open(QuaZip::mdUnzip),
+        QStringLiteral("macOS package ZIP opens"));
+  const QStringList macosEntries = macosArchive.getFileNameList();
+  check(macosEntries.contains(QStringLiteral("Evil Zone (Europe).app/")) &&
+          macosEntries.contains(
+            QStringLiteral("Evil Zone (Europe).app/Evil Zone.exe")) &&
+          std::all_of(macosEntries.cbegin(), macosEntries.cend(),
+                      [](const QString& name) {
+                        return name.startsWith(QStringLiteral("Evil Zone (Europe).app/"));
+                      }),
+        QStringLiteral("macOS .app is the sole ZIP-root package"));
+  macosArchive.close();
+#if defined(Q_OS_MACOS)
+  const QString extractedMacosZip =
+    QDir(temp.path()).filePath(QStringLiteral("extracted-macos-zip"));
+  QProcess ditto;
+  ditto.start(QStringLiteral("/usr/bin/ditto"),
+              { QStringLiteral("-x"), QStringLiteral("-k"), macosZip,
+                extractedMacosZip });
+  check(ditto.waitForStarted(3000) && ditto.waitForFinished(10000) &&
+          ditto.exitStatus() == QProcess::NormalExit && ditto.exitCode() == 0,
+        QStringLiteral("macOS package ZIP extracts with Apple ditto"));
+  const QString extractedExecutable = QDir(extractedMacosZip).filePath(
+    QStringLiteral("Evil Zone (Europe).app/Evil Zone.exe"));
+  check(QFileInfo(extractedExecutable).isExecutable(),
+        QStringLiteral("Apple ZIP extraction retains app executable permissions"));
+  const QString extractedLink = QDir(extractedMacosZip).filePath(
+    QStringLiteral("Evil Zone (Europe).app/runtime-link"));
+  check(QFileInfo(extractedLink).isSymLink() &&
+          QFileInfo(extractedLink).canonicalFilePath() ==
+            QFileInfo(extractedExecutable).canonicalFilePath(),
+        QStringLiteral("Apple ZIP extraction retains app symbolic links"));
+#endif
+
+  const QString cancelledZip =
+    QDir(temp.path()).filePath(QStringLiteral("cancelled.zip"));
+  check(!psxstudio::createPackageArchive(
+          packageSource, {}, cancelledZip, error, []() { return true; }) &&
+          !QFileInfo::exists(cancelledZip),
+        QStringLiteral("cancelled package ZIP is not delivered"));
 
   if (failures == 0) {
     qInfo() << "PSXRecomp Studio core tests passed";

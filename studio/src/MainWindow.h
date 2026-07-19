@@ -104,6 +104,7 @@ private:
   QLineEdit* iconEdit_{ nullptr };
   QLineEdit* titleEdit_{ nullptr };
   QLineEdit* outputEdit_{ nullptr };
+  QCheckBox* exportAsZip_{ nullptr };
   QLineEdit* certificateEdit_{ nullptr };
   QLineEdit* certificatePasswordEdit_{ nullptr };
   QCheckBox* signingEnabled_{ nullptr };

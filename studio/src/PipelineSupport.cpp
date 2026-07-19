@@ -2,6 +2,7 @@
 
 #include "quazip.h"
 #include "quazipfile.h"
+#include "quazipfileinfo.h"
 #include "quazipnewinfo.h"
 
 #include <QCryptographicHash>
@@ -9,6 +10,7 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QImage>
 #include <QImageReader>
 #include <QJsonDocument>
@@ -17,6 +19,8 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QSvgRenderer>
+
+#include <algorithm>
 
 namespace psxstudio {
 
@@ -203,6 +207,33 @@ QString cleanBundleName(const QString& title) {
   }
   name = name.trimmed();
   return name.left(80);
+}
+
+QString exportOutputName(const PipelineRequest& request) {
+  const QString bundleName = cleanBundleName(request.windowTitle);
+  if (request.exportAsZip) {
+    switch (request.targetPlatform) {
+      case TargetPlatform::MacOS:
+        return bundleName + QStringLiteral("-macOS.zip");
+      case TargetPlatform::Windows:
+        return bundleName + QStringLiteral("-Windows.zip");
+      case TargetPlatform::Linux:
+        return bundleName + QStringLiteral("-Linux.zip");
+      case TargetPlatform::All:
+        return {};
+    }
+  }
+  switch (request.targetPlatform) {
+    case TargetPlatform::MacOS:
+      return bundleName + QStringLiteral(".app");
+    case TargetPlatform::Windows:
+      return bundleName + QStringLiteral("-Windows");
+    case TargetPlatform::Linux:
+      return bundleName + QStringLiteral("-Linux");
+    case TargetPlatform::All:
+      return {};
+  }
+  return {};
 }
 
 QString createMacosInspectionAlias(const QString& sourcePath,
@@ -469,6 +500,296 @@ bool createPngIcon(const QString& sourceIcon,
   QDir().mkpath(QFileInfo(outputPath).absolutePath());
   if (!image.save(outputPath, "PNG")) {
     error = QStringLiteral("Could not encode the selected icon as a Linux PNG file.");
+    return false;
+  }
+  return true;
+}
+
+namespace {
+
+struct PackageArchiveExpectation {
+  bool directory{ false };
+  bool symbolicLink{ false };
+  quint64 size{ 0 };
+  QFile::Permissions permissions;
+  QByteArray sha256;
+};
+
+constexpr qsizetype kArchiveBufferSize = 1024 * 1024;
+
+QFile::Permissions portableArchivePermissions(QFile::Permissions permissions) {
+  constexpr QFile::Permissions portableMask =
+    QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+    QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ExeGroup |
+    QFileDevice::ReadOther | QFileDevice::WriteOther | QFileDevice::ExeOther;
+  return permissions & portableMask;
+}
+
+bool archiveCancelled(const std::function<bool()>& cancellationRequested) {
+  return cancellationRequested && cancellationRequested();
+}
+
+} // namespace
+
+bool createPackageArchive(
+    const QString& sourceDirectory,
+    const QString& rootDirectoryName,
+    const QString& outputPath,
+    QString& error,
+    const std::function<bool()>& cancellationRequested) {
+  error.clear();
+  const QFileInfo sourceInfo(sourceDirectory);
+  if (!sourceInfo.isDir()) {
+    error = QStringLiteral("Cannot archive a missing package directory: %1")
+              .arg(sourceDirectory);
+    return false;
+  }
+  if (rootDirectoryName == QStringLiteral(".") ||
+      rootDirectoryName == QStringLiteral("..") ||
+      rootDirectoryName.contains('/') || rootDirectoryName.contains('\\')) {
+    error = QStringLiteral("The ZIP root directory name is invalid: %1")
+              .arg(rootDirectoryName);
+    return false;
+  }
+
+  QString normalizedSource = QDir::cleanPath(sourceInfo.absoluteFilePath());
+  QString normalizedOutput = QDir::cleanPath(QFileInfo(outputPath).absoluteFilePath());
+#if defined(Q_OS_WIN)
+  normalizedSource = normalizedSource.toCaseFolded();
+  normalizedOutput = normalizedOutput.toCaseFolded();
+#endif
+  if (normalizedOutput.startsWith(normalizedSource + QLatin1Char('/'))) {
+    error = QStringLiteral("The package ZIP cannot be created inside the package being archived.");
+    return false;
+  }
+  if (!QDir().mkpath(QFileInfo(outputPath).absolutePath())) {
+    error = QStringLiteral("Could not create the package ZIP output directory.");
+    return false;
+  }
+  if ((QFileInfo::exists(outputPath) || QFileInfo(outputPath).isSymLink()) &&
+      !QFile::remove(outputPath)) {
+    error = QStringLiteral("Could not replace the package ZIP: %1").arg(outputPath);
+    return false;
+  }
+
+  QStringList sourcePaths;
+  QDirIterator iterator(
+    sourceDirectory,
+    QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
+    QDirIterator::Subdirectories);
+  while (iterator.hasNext()) sourcePaths.append(iterator.next());
+  const QDir sourceRoot(sourceDirectory);
+  std::sort(sourcePaths.begin(), sourcePaths.end(), [&](const QString& left,
+                                                        const QString& right) {
+    return sourceRoot.relativeFilePath(left) < sourceRoot.relativeFilePath(right);
+  });
+
+  QuaZip archive(outputPath);
+  archive.setZip64Enabled(true);
+  if (!archive.open(QuaZip::mdCreate)) {
+    error = QStringLiteral("Could not create package ZIP %1.").arg(outputPath);
+    return false;
+  }
+
+  QHash<QString, PackageArchiveExpectation> expected;
+  auto addEntry = [&](const QString& sourcePath, QString archiveName) -> bool {
+    if (archiveCancelled(cancellationRequested)) {
+      error = QStringLiteral("ZIP export was cancelled.");
+      return false;
+    }
+    const QFileInfo info(sourcePath);
+    const bool symbolicLink = info.isSymLink();
+    const bool directory = !symbolicLink && info.isDir();
+    if (!directory && !symbolicLink && !info.isFile()) {
+      error = QStringLiteral("The package contains an unsupported filesystem entry: %1")
+                .arg(sourcePath);
+      return false;
+    }
+    archiveName = QDir::fromNativeSeparators(archiveName);
+    if (directory && !archiveName.endsWith('/')) archiveName.append('/');
+    if (archiveName.isEmpty() || archiveName.startsWith('/') ||
+        archiveName == QStringLiteral("../") || archiveName.startsWith(QStringLiteral("../")) ||
+        archiveName.contains(QStringLiteral("/../")) || expected.contains(archiveName)) {
+      error = QStringLiteral("The package produced an invalid or duplicate ZIP entry: %1")
+                .arg(archiveName);
+      return false;
+    }
+
+    QuaZipNewInfo zipInfo(archiveName, sourcePath);
+    QuaZipFile output(&archive);
+    if (!output.open(QIODevice::WriteOnly, zipInfo, nullptr, 0,
+                     directory ? 0 : Z_DEFLATED,
+                     directory ? 0 : Z_DEFAULT_COMPRESSION)) {
+      error = QStringLiteral("Could not create ZIP entry %1.").arg(archiveName);
+      return false;
+    }
+
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    quint64 bytesWritten = 0;
+    bool writeSucceeded = true;
+    if (symbolicLink) {
+      const QString target = info.symLinkTarget();
+      if (target.isEmpty()) {
+        error = QStringLiteral("Could not resolve package symlink %1.").arg(sourcePath);
+        writeSucceeded = false;
+      } else {
+        const QByteArray data = QFile::encodeName(info.dir().relativeFilePath(target));
+        hash.addData(data);
+        bytesWritten = static_cast<quint64>(data.size());
+        writeSucceeded = output.write(data) == data.size();
+      }
+    } else if (!directory) {
+      QFile input(sourcePath);
+      if (!input.open(QIODevice::ReadOnly)) {
+        error = QStringLiteral("Could not read package file %1: %2")
+                  .arg(sourcePath, input.errorString());
+        writeSucceeded = false;
+      }
+      while (writeSucceeded && input.isOpen() && !input.atEnd()) {
+        if (archiveCancelled(cancellationRequested)) {
+          error = QStringLiteral("ZIP export was cancelled.");
+          writeSucceeded = false;
+          break;
+        }
+        const QByteArray data = input.read(kArchiveBufferSize);
+        if (data.isEmpty()) {
+          if (input.atEnd()) break;
+          error = QStringLiteral("Could not completely read package file %1: %2")
+                    .arg(sourcePath, input.errorString());
+          writeSucceeded = false;
+          break;
+        }
+        hash.addData(data);
+        bytesWritten += static_cast<quint64>(data.size());
+        if (output.write(data) != data.size()) {
+          error = QStringLiteral("Could not completely write ZIP entry %1.")
+                    .arg(archiveName);
+          writeSucceeded = false;
+        }
+      }
+    }
+    output.close();
+    if (!writeSucceeded || output.getZipError() != UNZ_OK) {
+      if (error.isEmpty()) {
+        error = QStringLiteral("QuaZip could not finalize ZIP entry %1.").arg(archiveName);
+      }
+      return false;
+    }
+    expected.insert(archiveName, {
+      directory,
+      symbolicLink,
+      bytesWritten,
+      portableArchivePermissions(info.permissions()),
+      directory ? QByteArray() : hash.result(),
+    });
+    return true;
+  };
+
+  if (!rootDirectoryName.isEmpty() &&
+      !addEntry(sourceDirectory, rootDirectoryName + QLatin1Char('/'))) {
+    archive.close();
+    QFile::remove(outputPath);
+    return false;
+  }
+  for (const QString& sourcePath : sourcePaths) {
+    QString archiveName = QDir::fromNativeSeparators(
+      sourceRoot.relativeFilePath(sourcePath));
+    if (!rootDirectoryName.isEmpty()) {
+      archiveName.prepend(rootDirectoryName + QLatin1Char('/'));
+    }
+    if (!addEntry(sourcePath, archiveName)) {
+      archive.close();
+      QFile::remove(outputPath);
+      return false;
+    }
+  }
+  archive.close();
+  if (archive.getZipError() != UNZ_OK) {
+    error = QStringLiteral("QuaZip reported error %1 while closing package ZIP %2.")
+              .arg(archive.getZipError()).arg(outputPath);
+    QFile::remove(outputPath);
+    return false;
+  }
+
+  QuaZip verification(outputPath);
+  if (!verification.open(QuaZip::mdUnzip)) {
+    error = QStringLiteral("The package ZIP could not be reopened for verification: %1")
+              .arg(outputPath);
+    QFile::remove(outputPath);
+    return false;
+  }
+  QSet<QString> observed;
+  QString verificationError;
+  bool hasEntry = verification.goToFirstFile();
+  while (hasEntry) {
+    if (archiveCancelled(cancellationRequested)) {
+      verificationError = QStringLiteral("ZIP export was cancelled.");
+      break;
+    }
+    QuaZipFileInfo64 info;
+    if (!verification.getCurrentFileInfo(&info)) {
+      verificationError = QStringLiteral("Could not read package ZIP entry metadata.");
+      break;
+    }
+    const auto expectationIt = expected.constFind(info.name);
+    if (expectationIt == expected.cend() || observed.contains(info.name)) {
+      verificationError = QStringLiteral("The package ZIP contains an unexpected or duplicate entry: %1")
+                            .arg(info.name);
+      break;
+    }
+    const auto& expectation = expectationIt.value();
+    const bool directory = info.name.endsWith('/');
+    if (directory != expectation.directory ||
+        info.isSymbolicLink() != expectation.symbolicLink ||
+        info.uncompressedSize != expectation.size ||
+        portableArchivePermissions(info.getPermissions()) != expectation.permissions) {
+      verificationError = QStringLiteral("The package ZIP metadata does not match its source: %1")
+                            .arg(info.name);
+      break;
+    }
+    if (!directory) {
+      QuaZipFile input(&verification);
+      if (!input.open(QIODevice::ReadOnly)) {
+        verificationError = QStringLiteral("Could not read package ZIP entry %1.")
+                              .arg(info.name);
+        break;
+      }
+      QCryptographicHash hash(QCryptographicHash::Sha256);
+      quint64 bytesRead = 0;
+      while (!input.atEnd()) {
+        if (archiveCancelled(cancellationRequested)) {
+          verificationError = QStringLiteral("ZIP export was cancelled.");
+          break;
+        }
+        const QByteArray data = input.read(kArchiveBufferSize);
+        if (data.isEmpty()) {
+          if (input.atEnd()) break;
+          verificationError = QStringLiteral("Package ZIP entry %1 failed CRC verification.")
+                                .arg(info.name);
+          break;
+        }
+        hash.addData(data);
+        bytesRead += static_cast<quint64>(data.size());
+      }
+      input.close();
+      if (verificationError.isEmpty() &&
+          (input.getZipError() != UNZ_OK || bytesRead != expectation.size ||
+           hash.result() != expectation.sha256)) {
+        verificationError = QStringLiteral("Package ZIP entry %1 does not match its source bytes.")
+                              .arg(info.name);
+      }
+      if (!verificationError.isEmpty()) break;
+    }
+    observed.insert(info.name);
+    hasEntry = verification.goToNextFile();
+  }
+  verification.close();
+  if (verificationError.isEmpty() && observed.size() != expected.size()) {
+    verificationError = QStringLiteral("The package ZIP is missing one or more source entries.");
+  }
+  if (!verificationError.isEmpty()) {
+    error = verificationError;
+    QFile::remove(outputPath);
     return false;
   }
   return true;

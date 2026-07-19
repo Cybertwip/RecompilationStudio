@@ -50,6 +50,12 @@ On Windows and Linux, Batch exports every listed game for the native host
 platform. On macOS, an individual platform does the same for that target, while
 **All** exports each listed game for macOS, Windows, and Linux.
 
+**Export as zip** is enabled by default and creates one archive per game and
+platform. A macOS archive contains `Game Name.app` at ZIP root. Windows and
+Linux archives contain the package contents directly at ZIP root, so the native
+executable is not hidden inside an extra package-directory layer. Disable the
+option to retain the unpacked `.app`, `-Windows`, and `-Linux` outputs.
+
 ## Host tools
 
 Every export requires CMake, Python 3, Ghidra 11.3.2, and OpenJDK 21. Non-Windows
@@ -142,8 +148,12 @@ game apps; those use the PSXRecomp SDL runtime.
     non-Apple/self-issued code-signing identities. It never imports the identity
     into a Keychain. Run strict Apple `codesign` verification before and after
     delivery.
-12. Copy the verified `.app`, `-Windows`, or `-Linux` package into the selected
-    output directory and verify the delivered copy again.
+12. By default, stream the verified package into a ZIP64 archive, preserving
+    executable permissions, empty directories, hidden files, and symbolic
+    links. Reopen every entry, verify its CRC and SHA-256 against the source,
+    then atomically publish the archive. If ZIP export is disabled, copy the
+    verified `.app`, `-Windows`, or `-Linux` package into the selected output
+    directory and verify the delivered copy again.
 
 A direct JAL into bytes classified as static data is emitted only as a
 runtime-installed target. The bytes remain absent from native C and the runtime
@@ -151,6 +161,8 @@ requires dirty-RAM evidence before its interpreter can execute them. Canonical
 A0/B0/C0 BIOS call thunks are recognized separately and remain native code.
 
 ## Generated app layout
+
+Default macOS output (`Game Name-macOS.zip`) has one root package:
 
 ```text
 Game Name.app/
@@ -166,36 +178,36 @@ Game Name.app/
       disc/<CUE and referenced BIN files, or standalone BIN>
 ```
 
-Windows exports use:
+Default Windows output (`Game Name-Windows.zip`) places these entries directly
+at ZIP root:
 
 ```text
-Game Name-Windows/
-  Game Name.exe
-  game.toml
-  PSXRecomp-Proof.zip
-  bios/SCPH1001.BIN
-  game/<serial boot EXE>
-  disc/<CUE and referenced BIN files, or standalone BIN>
-  seeds/ghidra_funcs.txt
+Game Name.exe
+game.toml
+PSXRecomp-Proof.zip
+bios/SCPH1001.BIN
+game/<serial boot EXE>
+disc/<CUE and referenced BIN files, or standalone BIN>
+seeds/ghidra_funcs.txt
 ```
 
-Linux exports use:
+Default Linux output (`Game Name-Linux.zip`) likewise places package contents
+directly at ZIP root:
 
 ```text
-Game Name-Linux/
-  Game Name
-  libSDL2-2.0.so.0
-  gamecontrollerdb.txt
-  AppIcon.png
-  game.toml
-  PSXRecomp-Proof.zip
-  licenses/SDL2.txt
-  licenses/pysdl2-dll.txt
-  licenses/SDL_GameControllerDB.txt
-  bios/SCPH1001.BIN
-  game/<serial boot EXE>
-  disc/<CUE and referenced BIN files, or standalone BIN>
-  seeds/ghidra_funcs.txt
+Game Name
+libSDL2-2.0.so.0
+gamecontrollerdb.txt
+AppIcon.png
+game.toml
+PSXRecomp-Proof.zip
+licenses/SDL2.txt
+licenses/pysdl2-dll.txt
+licenses/SDL_GameControllerDB.txt
+bios/SCPH1001.BIN
+game/<serial boot EXE>
+disc/<CUE and referenced BIN files, or standalone BIN>
+seeds/ghidra_funcs.txt
 ```
 
 ### macOS wired Xbox/PDP controller export

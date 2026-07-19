@@ -1089,6 +1089,81 @@ void PipelineWorker::run(PipelineRequest request) {
       return;
     }
   }
+  auto removeExportEntry = [](const QString& path) -> bool {
+    const QFileInfo info(path);
+    if (!info.exists() && !info.isSymLink()) return true;
+    if (info.isDir() && !info.isSymLink()) return QDir(path).removeRecursively();
+    return QFile::remove(path);
+  };
+  auto publishPackageZip = [&](const QString& sourceDirectory,
+                               const QString& rootDirectoryName,
+                               const QString& outputArchive) -> bool {
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString outputFileName = QFileInfo(outputArchive).fileName();
+    const QString stagingArchive = QDir(request.outputDirectory).filePath(
+      QStringLiteral(".%1.psxrecomp-new-%2").arg(outputFileName, token));
+    const QString backupArchive = QDir(request.outputDirectory).filePath(
+      QStringLiteral(".%1.psxrecomp-old-%2").arg(outputFileName, token));
+    const QString failedArchive = outputArchive + QStringLiteral(".failed-") + token;
+    removeExportEntry(stagingArchive);
+    removeExportEntry(backupArchive);
+    removeExportEntry(failedArchive);
+    emit logLine(QStringLiteral("Creating verified package ZIP: %1")
+                   .arg(outputArchive));
+    if (!createPackageArchive(
+          sourceDirectory, rootDirectoryName, stagingArchive, error,
+          [this]() { return cancellationRequested(); })) {
+      removeExportEntry(stagingArchive);
+      return false;
+    }
+    const QString stagingHash = sha256File(stagingArchive, error);
+    if (stagingHash.isEmpty()) {
+      removeExportEntry(stagingArchive);
+      return false;
+    }
+
+    const QFileInfo outputInfo(outputArchive);
+    const bool hadExistingOutput = outputInfo.exists() || outputInfo.isSymLink();
+    if (hadExistingOutput && !request.overwriteOutput) {
+      removeExportEntry(stagingArchive);
+      error = QStringLiteral("The ZIP output already exists and overwrite was not approved: %1")
+                .arg(outputArchive);
+      return false;
+    }
+    if (hadExistingOutput && !QDir().rename(outputArchive, backupArchive)) {
+      removeExportEntry(stagingArchive);
+      error = QStringLiteral("Could not preserve the existing ZIP before replacement: %1")
+                .arg(outputArchive);
+      return false;
+    }
+    if (!QDir().rename(stagingArchive, outputArchive)) {
+      if (hadExistingOutput) QDir().rename(backupArchive, outputArchive);
+      removeExportEntry(stagingArchive);
+      error = QStringLiteral("Could not move the verified ZIP into its final output path: %1")
+                .arg(outputArchive);
+      return false;
+    }
+    const QString deliveredHash = sha256File(outputArchive, error);
+    if (deliveredHash.isEmpty() || deliveredHash != stagingHash) {
+      const bool quarantined = QDir().rename(outputArchive, failedArchive);
+      const bool restored = !hadExistingOutput ||
+        QDir().rename(backupArchive, outputArchive);
+      error = QStringLiteral(
+        "The delivered ZIP changed during publication.%1%2")
+        .arg(quarantined
+               ? QStringLiteral(" Failed output: %1.").arg(failedArchive)
+               : QStringLiteral(" The failed output could not be quarantined."),
+             restored
+               ? QString()
+               : QStringLiteral(" The previous output could not be restored."));
+      return false;
+    }
+    if (hadExistingOutput && !removeExportEntry(backupArchive)) {
+      emit logLine(QStringLiteral("Warning: previous ZIP backup remains at %1")
+                     .arg(backupArchive));
+    }
+    return true;
+  };
   if (!writeText(QDir(projectDir).filePath(QStringLiteral(".gitignore")),
                  QStringLiteral("# Temporary PSXRecomp Studio project\n*\n"), error)) {
     fail(error, workspace);
@@ -2093,6 +2168,31 @@ void PipelineWorker::run(PipelineRequest request) {
       return;
     }
 
+    if (request.exportAsZip) {
+      const QString outputArchive = QDir(request.outputDirectory).filePath(
+        exportOutputName(request));
+      if (!publishPackageZip(deliveryPackage, {}, outputArchive)) {
+        QDir(deliveryPackage).removeRecursively();
+        if (cancellationRequested()) {
+          QDir(workspace).removeRecursively();
+          emit cancelled();
+        } else {
+          fail(error.isEmpty() ? QStringLiteral("The Windows ZIP could not be delivered.")
+                               : error,
+               workspace);
+        }
+        return;
+      }
+      if (!QDir(deliveryPackage).removeRecursively()) {
+        emit logLine(QStringLiteral("Warning: Windows ZIP staging directory remains at %1")
+                       .arg(deliveryPackage));
+      }
+      emit logLine(QStringLiteral("Windows ZIP created: %1").arg(outputArchive));
+      QDir(workspace).removeRecursively();
+      emit completed(outputArchive);
+      return;
+    }
+
     const bool hadExistingOutput = QFileInfo::exists(outputPackage);
     if (hadExistingOutput && !request.overwriteOutput) {
       QDir(deliveryPackage).removeRecursively();
@@ -2351,6 +2451,31 @@ void PipelineWorker::run(PipelineRequest request) {
       QDir(deliveryPackage).removeRecursively();
       fail(QStringLiteral("A verified Linux executable or input dependency changed while staging the package for delivery."),
            workspace);
+      return;
+    }
+
+    if (request.exportAsZip) {
+      const QString outputArchive = QDir(request.outputDirectory).filePath(
+        exportOutputName(request));
+      if (!publishPackageZip(deliveryPackage, {}, outputArchive)) {
+        QDir(deliveryPackage).removeRecursively();
+        if (cancellationRequested()) {
+          QDir(workspace).removeRecursively();
+          emit cancelled();
+        } else {
+          fail(error.isEmpty() ? QStringLiteral("The Linux ZIP could not be delivered.")
+                               : error,
+               workspace);
+        }
+        return;
+      }
+      if (!QDir(deliveryPackage).removeRecursively()) {
+        emit logLine(QStringLiteral("Warning: Linux ZIP staging directory remains at %1")
+                       .arg(deliveryPackage));
+      }
+      emit logLine(QStringLiteral("Linux ZIP created: %1").arg(outputArchive));
+      QDir(workspace).removeRecursively();
+      emit completed(outputArchive);
       return;
     }
 
@@ -2680,6 +2805,30 @@ void PipelineWorker::run(PipelineRequest request) {
            ? QStringLiteral("The signed app could not be staged and verified in the output directory.")
            : QStringLiteral("The unsigned app could not be staged and hash-verified in the output directory."),
          workspace);
+    return;
+  }
+
+  if (request.exportAsZip) {
+    const QString outputArchive = QDir(request.outputDirectory).filePath(
+      exportOutputName(request));
+    if (!publishPackageZip(
+          deliveryApp, bundleName + QStringLiteral(".app"), outputArchive)) {
+      if (cancellationRequested()) {
+        QDir(deliveryApp).removeRecursively();
+        QDir(workspace).removeRecursively();
+        emit cancelled();
+      } else {
+        removeTree(deliveryApp, false);
+        fail(error.isEmpty() ? QStringLiteral("The macOS ZIP could not be delivered.")
+                             : error,
+             workspace);
+      }
+      return;
+    }
+    removeTree(deliveryApp, false);
+    emit logLine(QStringLiteral("macOS ZIP created: %1").arg(outputArchive));
+    QDir(workspace).removeRecursively();
+    emit completed(outputArchive);
     return;
   }
 

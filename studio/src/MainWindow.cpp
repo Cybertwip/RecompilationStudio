@@ -279,6 +279,11 @@ MainWindow::MainWindow(QWidget* parent)
 
   outputEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("Output directory"),
                            QStringLiteral("Destination for the signed .app"), SLOT(chooseOutputDirectory()));
+  exportAsZip_ = new QCheckBox(QStringLiteral("Export as zip"), inputCard_);
+  exportAsZip_->setChecked(true);
+  exportAsZip_->setToolTip(
+    QStringLiteral("Create one ZIP per export. macOS keeps the .app at ZIP root; Windows and Linux place package contents at ZIP root."));
+  inputLayout->addWidget(exportAsZip_);
   inputLayout->addStretch(1);
 
   toolsCard_ = makeCard(QStringLiteral("toolsCard"), formsContainer_);
@@ -440,6 +445,7 @@ MainWindow::MainWindow(QWidget* parent)
   connect(biosPatchEnabled_, &QCheckBox::toggled, this, &MainWindow::updateBiosPatchControls);
   connect(skipBiosBoot_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
   connect(macosGipGamepad_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
+  connect(exportAsZip_, &QCheckBox::toggled, this, &MainWindow::updatePlatformControls);
   connect(themeManager_, &oclero::qlementine::ThemeManager::currentThemeChanged,
           this, [this]() {
             QSettings().setValue(QStringLiteral("app/theme"), themeManager_->currentTheme());
@@ -636,6 +642,7 @@ void MainWindow::loadSettings() {
   skipBiosBoot_->setChecked(settings.value(QStringLiteral("runtime/skip_bios_boot"), false).toBool());
   macosGipGamepad_->setChecked(
     settings.value(QStringLiteral("runtime/macos_gip_gamepad"), true).toBool());
+  exportAsZip_->setChecked(settings.value(QStringLiteral("export/as_zip"), true).toBool());
 
   if (batchCheck_->isChecked() && QFileInfo(batchDirectoryEdit_->text()).isDir()) {
     populateBatchDirectory(batchDirectoryEdit_->text(), false);
@@ -662,6 +669,7 @@ void MainWindow::saveSettings() const {
   settings.setValue(QStringLiteral("runtime/skip_bios_boot"), skipBiosBoot_->isChecked());
   settings.remove(QStringLiteral("runtime/pad_mode"));
   settings.setValue(QStringLiteral("runtime/macos_gip_gamepad"), macosGipGamepad_->isChecked());
+  settings.setValue(QStringLiteral("export/as_zip"), exportAsZip_->isChecked());
 }
 
 void MainWindow::chooseDisc() {
@@ -1023,6 +1031,7 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   request.biosRemoveStockPsGlyph = biosRemovePsGlyph_->isChecked();
   request.skipBiosBoot = skipBiosBoot_->isChecked();
   request.macosGipGamepad = macosGipGamepad_->isChecked();
+  request.exportAsZip = exportAsZip_->isChecked();
   request.overwriteOutput = overwrite;
   return request;
 }
@@ -1062,22 +1071,7 @@ QList<PipelineRequest> MainWindow::requestsFromUi(bool overwrite) const {
 }
 
 QString MainWindow::outputPathForRequest(const PipelineRequest& request) const {
-  const QString bundleName = cleanBundleName(request.windowTitle);
-  QString outputName;
-  switch (request.targetPlatform) {
-    case TargetPlatform::Windows:
-      outputName = bundleName + QStringLiteral("-Windows");
-      break;
-    case TargetPlatform::Linux:
-      outputName = bundleName + QStringLiteral("-Linux");
-      break;
-    case TargetPlatform::MacOS:
-      outputName = bundleName + QStringLiteral(".app");
-      break;
-    case TargetPlatform::All:
-      return {};
-  }
-  return QDir(request.outputDirectory).filePath(outputName);
+  return QDir(request.outputDirectory).filePath(exportOutputName(request));
 }
 
 void MainWindow::startBuild() {
@@ -1275,6 +1269,7 @@ void MainWindow::setBusy(bool busy) {
   platformCombo_->setEnabled(!busy);
   skipBiosBoot_->setEnabled(!busy);
   macosGipGamepad_->setEnabled(!busy);
+  exportAsZip_->setEnabled(!busy);
   biosMuteAudio_->setEnabled(!busy && biosPatchEnabled_->isChecked());
   biosRemovePsGlyph_->setEnabled(!busy && biosPatchEnabled_->isChecked());
   if (!busy) {
@@ -1291,6 +1286,7 @@ void MainWindow::updatePlatformControls() {
                              selectedPlatform == TargetPlatform::All;
   const bool busy = cancelButton_ && cancelButton_->isEnabled();
   const bool signingRequested = includesMacos && signingEnabled_->isChecked();
+  const bool zip = exportAsZip_->isChecked();
   signingEnabled_->setVisible(includesMacos);
   signingEnabled_->setEnabled(includesMacos && !busy);
   certificateEdit_->parentWidget()->setEnabled(signingRequested && !busy);
@@ -1310,19 +1306,29 @@ void MainWindow::updatePlatformControls() {
     signingNote_->setText(signingRequested
       ? QStringLiteral("macOS uses one-pass direct PFX signing with no Keychain import. Windows and Linux are unsigned.")
       : QStringLiteral("macOS signing is optional; all three platform packages will be verified before delivery."));
-    outputEdit_->setPlaceholderText(QStringLiteral("Destination for macOS, Windows, and Linux packages"));
-    buildButton_->setText(batchCheck_->isChecked()
-      ? QStringLiteral("Batch Export All Platforms") : QStringLiteral("Export All Platforms"));
+    outputEdit_->setPlaceholderText(zip
+      ? QStringLiteral("Destination for per-game macOS, Windows, and Linux ZIPs")
+      : QStringLiteral("Destination for macOS, Windows, and Linux packages"));
+    buildButton_->setText(zip
+      ? (batchCheck_->isChecked() ? QStringLiteral("Batch Export All Platform ZIPs")
+                                  : QStringLiteral("Export All Platform ZIPs"))
+      : (batchCheck_->isChecked() ? QStringLiteral("Batch Export All Platforms")
+                                  : QStringLiteral("Export All Platforms")));
   } else if (selectedPlatform == TargetPlatform::MacOS) {
     signingNote_->setText(signingRequested
       ? QStringLiteral("The PFX is read directly by rcodesign. No identity is imported into any Keychain.")
       : QStringLiteral("Signing is optional. The unsigned app is hash-verified before and after delivery."));
-    outputEdit_->setPlaceholderText(QStringLiteral("Destination for the macOS .app"));
-    buildButton_->setText(batchCheck_->isChecked()
-      ? (signingRequested ? QStringLiteral("Batch Build Signed Apps")
-                          : QStringLiteral("Batch Build macOS Apps"))
-      : (signingRequested ? QStringLiteral("Build Signed .app")
-                          : QStringLiteral("Build macOS App")));
+    outputEdit_->setPlaceholderText(zip
+      ? QStringLiteral("Destination for the macOS ZIP")
+      : QStringLiteral("Destination for the macOS .app"));
+    buildButton_->setText(zip
+      ? (batchCheck_->isChecked() ? QStringLiteral("Batch Export macOS ZIPs")
+                                  : QStringLiteral("Export macOS ZIP"))
+      : (batchCheck_->isChecked()
+           ? (signingRequested ? QStringLiteral("Batch Build Signed Apps")
+                               : QStringLiteral("Batch Build macOS Apps"))
+           : (signingRequested ? QStringLiteral("Build Signed .app")
+                               : QStringLiteral("Build macOS App"))));
   } else if (selectedPlatform == TargetPlatform::Windows) {
 #if defined(Q_OS_WIN)
     signingNote_->setText(QStringLiteral(
@@ -1331,9 +1337,14 @@ void MainWindow::updatePlatformControls() {
     signingNote_->setText(QStringLiteral(
       "Windows exports use the installed x86_64-w64-mingw32 MinGW toolchain and are delivered unsigned."));
 #endif
-    outputEdit_->setPlaceholderText(QStringLiteral("Destination for the Windows app folder"));
-    buildButton_->setText(batchCheck_->isChecked()
-      ? QStringLiteral("Batch Build Windows Apps") : QStringLiteral("Build Windows App"));
+    outputEdit_->setPlaceholderText(zip
+      ? QStringLiteral("Destination for the Windows ZIP")
+      : QStringLiteral("Destination for the Windows app folder"));
+    buildButton_->setText(zip
+      ? (batchCheck_->isChecked() ? QStringLiteral("Batch Export Windows ZIPs")
+                                  : QStringLiteral("Export Windows ZIP"))
+      : (batchCheck_->isChecked() ? QStringLiteral("Batch Build Windows Apps")
+                                  : QStringLiteral("Build Windows App")));
   } else {
 #if defined(Q_OS_LINUX)
     signingNote_->setText(QStringLiteral(
@@ -1342,9 +1353,14 @@ void MainWindow::updatePlatformControls() {
     signingNote_->setText(QStringLiteral(
       "Linux exports use the installed x86_64-unknown-linux-gnu toolchain, bundle SDL2, and are delivered unsigned."));
 #endif
-    outputEdit_->setPlaceholderText(QStringLiteral("Destination for the Linux app folder"));
-    buildButton_->setText(batchCheck_->isChecked()
-      ? QStringLiteral("Batch Build Linux Apps") : QStringLiteral("Build Linux App"));
+    outputEdit_->setPlaceholderText(zip
+      ? QStringLiteral("Destination for the Linux ZIP")
+      : QStringLiteral("Destination for the Linux app folder"));
+    buildButton_->setText(zip
+      ? (batchCheck_->isChecked() ? QStringLiteral("Batch Export Linux ZIPs")
+                                  : QStringLiteral("Export Linux ZIP"))
+      : (batchCheck_->isChecked() ? QStringLiteral("Batch Build Linux Apps")
+                                  : QStringLiteral("Build Linux App")));
   }
   updateBuildButton();
 }

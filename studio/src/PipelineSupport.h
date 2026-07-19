@@ -1,11 +1,15 @@
 #pragma once
 
+#include "PipelineTypes.h"
+
 #include <QByteArray>
 #include <QJsonObject>
 #include <QList>
 #include <QPair>
 #include <QString>
 #include <QSet>
+
+#include <functional>
 
 namespace psxstudio {
 
@@ -22,6 +26,8 @@ QString sanitizedBundleIdentifier(const QString& serial, const QString& title);
  * shell- and filesystem-hostile characters (notably apostrophes) that
  * break CMake/Ninja /bin/sh -c rules on macOS paths. */
 QString cleanBundleName(const QString& title);
+/* Final file/directory name selected for one concrete platform export. */
+QString exportOutputName(const PipelineRequest& request);
 /* Create a parenthesis-free symlink name for Apple binary-inspection tools.
  * otool-classic interprets a trailing `(name)` in a Mach-O path as archive
  * member syntax, even when the path is passed as one process argument. */
@@ -58,6 +64,15 @@ bool copyDirectoryTree(const QString& sourceDirectory,
 bool createProofArchive(const QString& proofDirectory,
                         const QString& outputPath,
                         QString& error);
+/* Stream and verify a package ZIP. An empty rootDirectoryName places the
+ * source directory's contents at ZIP root; a non-empty name places that
+ * directory itself at ZIP root under the supplied name. */
+bool createPackageArchive(
+  const QString& sourceDirectory,
+  const QString& rootDirectoryName,
+  const QString& outputPath,
+  QString& error,
+  const std::function<bool()>& cancellationRequested = {});
 QList<QPair<quint32, quint32>> parseCodeRanges(const QString& path, QString& error);
 QSet<quint32> parseFunctionEntries(const QString& path, QString& error);
 bool addressInRanges(quint32 address, const QList<QPair<quint32, quint32>>& ranges);

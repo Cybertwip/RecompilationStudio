@@ -14,6 +14,7 @@ if(APPLE AND (NOT CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VER
 endif()
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Core5Compat Gui Widgets Svg Network)
+include(CTest)
 
 add_subdirectory(../recompiler/lib/fmt ${CMAKE_CURRENT_BINARY_DIR}/fmt EXCLUDE_FROM_ALL)
 if(NOT MSVC)
@@ -37,6 +38,7 @@ set(QUAZIP_BZIP2 OFF CACHE BOOL "" FORCE)
 # shipping a zlib DLL on Windows).  Also disable its install rules.
 set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(ZLIB_BUILD_STATIC ON  CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(ZLIB_INSTALL      OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(3rdparty/zlib)
@@ -158,7 +160,6 @@ qt_add_executable(PSXBiosBrandingPatch
 target_include_directories(PSXBiosBrandingPatch PRIVATE src)
 target_link_libraries(PSXBiosBrandingPatch PRIVATE Qt6::Core Qt6::Gui)
 
-include(CTest)
 if(BUILD_TESTING)
   qt_add_executable(PSXRecompStudioTests
     tests/CoreTests.cpp
@@ -196,6 +197,10 @@ if(BUILD_TESTING)
     target_compile_definitions(PSXBiosBrandingPatcherTests PRIVATE
       PSX_BRANDING_TEST_BIOS="${PSX_BRANDING_TEST_BIOS}")
     add_test(NAME PSXBiosBrandingPatcherTests COMMAND PSXBiosBrandingPatcherTests)
+    if(UNIX AND NOT APPLE)
+      set_tests_properties(PSXBiosBrandingPatcherTests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
   endif()
 endif()
 

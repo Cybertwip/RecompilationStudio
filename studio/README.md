@@ -66,8 +66,10 @@ loads a checksum-pinned SDL GameController mapping database, and routes Player
 **Controller pad type** (Hybrid / Analog / D-Pad) is chosen in Studio and baked
 into the packaged `game.toml` with `lock_mode = true`, so the in-game settings
 menu does not expose pad-type switching for that title.
-The resulting package targets glibc 2.28 or newer and is verified to have no
-non-system shared-library dependency outside the bundled SDL2 runtime.
+The resulting package records its actual minimum glibc requirement from the
+versioned symbols observed in the delivered executable and bundled SDL2 runtime;
+it does not declare or enforce a fixed glibc baseline. The package is also
+verified to have no non-system shared-library dependency outside bundled SDL2.
 
 Qt is bundled into the distributed Studio app. Qt is not linked into generated
 game apps; those use the PSXRecomp SDL runtime.
@@ -96,8 +98,9 @@ game apps; those use the PSXRecomp SDL runtime.
     selects the installed MinGW-w64 toolchain, embeds a Windows icon, statically
     links SDL2, and rejects non-system runtime DLL imports. The Linux path
     selects the installed `x86_64-unknown-linux-gnu` toolchain, bundles SDL2,
-    verifies the controller database, and rejects unexpected ELF dependencies
-    or glibc requirements above 2.28.
+    verifies the controller database, rejects unexpected ELF dependencies, and
+    records the delivered binaries' observed glibc requirement without imposing
+    a fixed compatibility baseline.
 11. For macOS, import the normalized PFX into an isolated temporary keychain,
     sign every nested Mach-O, and sign the app with Hardened Runtime, a secure
     timestamp, and the narrow `disable-library-validation` entitlement required

@@ -528,6 +528,11 @@ function(psxrecomp_add_runtime_target target)
         FMT_HEADER_ONLY=1
         $<$<CXX_COMPILER_ID:MSVC>:SDL_MAIN_HANDLED>
     )
+    if(MSVC)
+        # windows.h defines function-like min/max macros unless NOMINMAX is set;
+        # those macros corrupt qualified calls such as std::max(...).
+        target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
 
     if(PSXRT_ORACLE)
         target_compile_definitions(${target} PRIVATE PSX_ORACLE_BUILD=1)

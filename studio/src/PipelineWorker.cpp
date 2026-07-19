@@ -439,7 +439,7 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("target_compile_definitions(psx-runtime PRIVATE PSX_EXPECTED_BIOS_CRC32=0x%1u)\n")
              .arg(expectedBiosCrc, 8, 16, QLatin1Char('0'));
   cmake += QStringLiteral("if(MSVC)\n");
-  cmake += QStringLiteral("  target_compile_options(psx-runtime PRIVATE $<$<CONFIG:Release>:/O2> $<$<CONFIG:Release>:/Ob3>)\n");
+  cmake += QStringLiteral("  target_compile_options(psx-runtime PRIVATE $<$<CONFIG:Release>:/O2> $<$<CONFIG:Release>:/Ot>)\n");
   cmake += QStringLiteral("else()\n");
   cmake += QStringLiteral("  target_compile_options(psx-runtime PRIVATE $<$<CONFIG:Release>:-O3>)\n");
   cmake += QStringLiteral("endif()\n");
@@ -1102,7 +1102,15 @@ void PipelineWorker::run(PipelineRequest request) {
                  : QStringLiteral("Boot mode: real recompiled BIOS intro"));
 
   nextStage(QStringLiteral("Prepare reproducible workspace"));
-  QTemporaryDir temporary(QDir::tempPath() + QStringLiteral("/psxrecomp-studio-XXXXXX"));
+  const QString workspaceRoot =
+    QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
+      .filePath(QStringLiteral("org.psxrecomp.studio/workspaces"));
+  if (!QDir().mkpath(workspaceRoot)) {
+    fail(QStringLiteral("Could not create the build workspace root."), {});
+    return;
+  }
+  QTemporaryDir temporary(QDir(workspaceRoot).filePath(
+    QStringLiteral("psxrecomp-studio-XXXXXX")));
   temporary.setAutoRemove(false);
   if (!temporary.isValid()) {
     fail(QStringLiteral("Could not create the temporary build workspace."), {});
@@ -1956,7 +1964,7 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("compiler"), compilerVersion },
     { QStringLiteral("build_configuration"), QStringLiteral("Release") },
     { QStringLiteral("optimization"), nativeWindowsTarget
-        ? QStringLiteral("MSVC /O2 /Ob3 (favor speed)")
+        ? QStringLiteral("MSVC /O2 /Ot (favor speed)")
         : QStringLiteral("GCC/Clang -O3 (favor speed)") },
     { QStringLiteral("linux_sysroot"), linuxTarget ? linuxSysroot : QString() },
     { QStringLiteral("sdl2_source"), sdl2Source },
@@ -2053,7 +2061,7 @@ void PipelineWorker::run(PipelineRequest request) {
       { QStringLiteral("compiler"), compilerVersion },
       { QStringLiteral("build_configuration"), QStringLiteral("Release") },
       { QStringLiteral("optimization"), nativeWindowsTarget
-          ? QStringLiteral("/O2 /Ob3") : QStringLiteral("-O3") },
+          ? QStringLiteral("/O2 /Ot") : QStringLiteral("-O3") },
       { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
       { QStringLiteral("executable_sha256"), stagedExeHash },
       { QStringLiteral("subsystem"), QStringLiteral("Windows GUI") },

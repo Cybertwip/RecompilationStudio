@@ -55,6 +55,9 @@ platform. A macOS archive contains `Game Name.app` at ZIP root. Windows and
 Linux archives contain the package contents directly at ZIP root, so the native
 executable is not hidden inside an extra package-directory layer. Disable the
 option to retain the unpacked `.app`, `-Windows`, and `-Linux` outputs.
+Every archive also contains a root `game.manifest.json` with `name` set to the
+edited game title and `executable` set to the root `.app`, `.exe`, or Linux
+executable name.
 
 ## Host tools
 
@@ -165,6 +168,7 @@ A0/B0/C0 BIOS call thunks are recognized separately and remain native code.
 Default macOS output (`Game Name-macOS.zip`) has one root package:
 
 ```text
+game.manifest.json
 Game Name.app/
   Contents/
     MacOS/Game Name
@@ -182,6 +186,7 @@ Default Windows output (`Game Name-Windows.zip`) places these entries directly
 at ZIP root:
 
 ```text
+game.manifest.json
 Game Name.exe
 game.toml
 PSXRecomp-Proof.zip
@@ -195,6 +200,7 @@ Default Linux output (`Game Name-Linux.zip`) likewise places package contents
 directly at ZIP root:
 
 ```text
+game.manifest.json
 Game Name
 libSDL2-2.0.so.0
 gamecontrollerdb.txt

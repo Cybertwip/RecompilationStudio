@@ -236,6 +236,28 @@ QString exportOutputName(const PipelineRequest& request) {
   return {};
 }
 
+QJsonObject gameManifestForRequest(const PipelineRequest& request) {
+  const QString bundleName = cleanBundleName(request.windowTitle);
+  QString executable;
+  switch (request.targetPlatform) {
+    case TargetPlatform::MacOS:
+      executable = bundleName + QStringLiteral(".app");
+      break;
+    case TargetPlatform::Windows:
+      executable = bundleName + QStringLiteral(".exe");
+      break;
+    case TargetPlatform::Linux:
+      executable = bundleName;
+      break;
+    case TargetPlatform::All:
+      break;
+  }
+  return {
+    { QStringLiteral("executable"), executable },
+    { QStringLiteral("name"), request.windowTitle },
+  };
+}
+
 QString createMacosInspectionAlias(const QString& sourcePath,
                                    const QString& aliasDirectory,
                                    QString& error) {
@@ -536,6 +558,7 @@ bool createPackageArchive(
     const QString& rootDirectoryName,
     const QString& outputPath,
     QString& error,
+    const QMap<QString, QByteArray>& rootFiles,
     const std::function<bool()>& cancellationRequested) {
   error.clear();
   const QFileInfo sourceInfo(sourceDirectory);
@@ -684,12 +707,59 @@ bool createPackageArchive(
     });
     return true;
   };
+  auto addRootFile = [&](QString archiveName, const QByteArray& data) -> bool {
+    if (archiveCancelled(cancellationRequested)) {
+      error = QStringLiteral("ZIP export was cancelled.");
+      return false;
+    }
+    archiveName = QDir::fromNativeSeparators(archiveName);
+    if (archiveName.isEmpty() || archiveName.startsWith('/') ||
+        archiveName.contains('/') || archiveName == QStringLiteral(".") ||
+        archiveName == QStringLiteral("..") || expected.contains(archiveName)) {
+      error = QStringLiteral("The package produced an invalid or duplicate ZIP root file: %1")
+                .arg(archiveName);
+      return false;
+    }
+    QuaZipNewInfo zipInfo(archiveName);
+    const QFile::Permissions permissions =
+      QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+      QFileDevice::ReadGroup | QFileDevice::ReadOther;
+    zipInfo.setPermissions(permissions);
+    QuaZipFile output(&archive);
+    if (!output.open(QIODevice::WriteOnly, zipInfo) ||
+        output.write(data) != data.size()) {
+      output.close();
+      error = QStringLiteral("Could not create ZIP root file %1.").arg(archiveName);
+      return false;
+    }
+    output.close();
+    if (output.getZipError() != UNZ_OK) {
+      error = QStringLiteral("QuaZip could not finalize ZIP root file %1.")
+                .arg(archiveName);
+      return false;
+    }
+    expected.insert(archiveName, {
+      false,
+      false,
+      static_cast<quint64>(data.size()),
+      portableArchivePermissions(permissions),
+      QCryptographicHash::hash(data, QCryptographicHash::Sha256),
+    });
+    return true;
+  };
 
   if (!rootDirectoryName.isEmpty() &&
       !addEntry(sourceDirectory, rootDirectoryName + QLatin1Char('/'))) {
     archive.close();
     QFile::remove(outputPath);
     return false;
+  }
+  for (auto rootFile = rootFiles.cbegin(); rootFile != rootFiles.cend(); ++rootFile) {
+    if (!addRootFile(rootFile.key(), rootFile.value())) {
+      archive.close();
+      QFile::remove(outputPath);
+      return false;
+    }
   }
   for (const QString& sourcePath : sourcePaths) {
     QString archiveName = QDir::fromNativeSeparators(

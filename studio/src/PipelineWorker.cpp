@@ -1110,8 +1110,12 @@ void PipelineWorker::run(PipelineRequest request) {
     removeExportEntry(failedArchive);
     emit logLine(QStringLiteral("Creating verified package ZIP: %1")
                    .arg(outputArchive));
+    const QMap<QString, QByteArray> rootFiles{
+      { QStringLiteral("game.manifest.json"),
+        QJsonDocument(gameManifestForRequest(request)).toJson(QJsonDocument::Indented) },
+    };
     if (!createPackageArchive(
-          sourceDirectory, rootDirectoryName, stagingArchive, error,
+          sourceDirectory, rootDirectoryName, stagingArchive, error, rootFiles,
           [this]() { return cancellationRequested(); })) {
       removeExportEntry(stagingArchive);
       return false;

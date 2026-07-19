@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QFile>
 #include <QImage>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
 #include <QTemporaryDir>
@@ -303,14 +304,30 @@ int main(int argc, char** argv) {
   check(psxstudio::exportOutputName(gipRequest) ==
           QStringLiteral("Evil Zone (Europe)-macOS.zip"),
         QStringLiteral("macOS ZIP output name"));
+  const QJsonObject macosGameManifest =
+    psxstudio::gameManifestForRequest(gipRequest);
+  check(macosGameManifest.size() == 2 &&
+          macosGameManifest.value(QStringLiteral("executable")).toString() ==
+            QStringLiteral("Evil Zone (Europe).app") &&
+          macosGameManifest.value(QStringLiteral("name")).toString() ==
+            QStringLiteral("Evil Zone (Europe)"),
+        QStringLiteral("macOS game manifest names the root app"));
   gipRequest.targetPlatform = psxstudio::TargetPlatform::Windows;
   check(psxstudio::exportOutputName(gipRequest) ==
           QStringLiteral("Evil Zone (Europe)-Windows.zip"),
         QStringLiteral("Windows ZIP output name"));
+  check(psxstudio::gameManifestForRequest(gipRequest)
+          .value(QStringLiteral("executable")).toString() ==
+            QStringLiteral("Evil Zone (Europe).exe"),
+        QStringLiteral("Windows game manifest names the root executable"));
   gipRequest.targetPlatform = psxstudio::TargetPlatform::Linux;
   check(psxstudio::exportOutputName(gipRequest) ==
           QStringLiteral("Evil Zone (Europe)-Linux.zip"),
         QStringLiteral("Linux ZIP output name"));
+  check(psxstudio::gameManifestForRequest(gipRequest)
+          .value(QStringLiteral("executable")).toString() ==
+            QStringLiteral("Evil Zone (Europe)"),
+        QStringLiteral("Linux game manifest names the root executable"));
   gipRequest.exportAsZip = false;
   check(psxstudio::exportOutputName(gipRequest) ==
           QStringLiteral("Evil Zone (Europe)-Linux"),
@@ -424,7 +441,7 @@ int main(int argc, char** argv) {
   const QString packageSource =
     QDir(temp.path()).filePath(QStringLiteral("package-source"));
   const QString packageExecutable =
-    QDir(packageSource).filePath(QStringLiteral("Evil Zone.exe"));
+    QDir(packageSource).filePath(QStringLiteral("Evil Zone (Europe).exe"));
   const QString packageProof =
     QDir(packageSource).filePath(QStringLiteral("proof/manifest.json"));
   const QString hiddenMetadata =
@@ -449,13 +466,22 @@ int main(int argc, char** argv) {
 
   const QString rootContentsZip =
     QDir(temp.path()).filePath(QStringLiteral("Evil Zone-Windows.zip"));
+  psxstudio::PipelineRequest manifestRequest;
+  manifestRequest.windowTitle = QStringLiteral("Evil Zone (Europe)");
+  manifestRequest.targetPlatform = psxstudio::TargetPlatform::Windows;
+  const QMap<QString, QByteArray> windowsRootFiles{
+    { QStringLiteral("game.manifest.json"),
+      QJsonDocument(psxstudio::gameManifestForRequest(manifestRequest))
+        .toJson(QJsonDocument::Indented) },
+  };
   check(psxstudio::createPackageArchive(
-          packageSource, {}, rootContentsZip, error), error);
+          packageSource, {}, rootContentsZip, error, windowsRootFiles), error);
   QuaZip rootContentsArchive(rootContentsZip);
   check(rootContentsArchive.open(QuaZip::mdUnzip),
         QStringLiteral("root-contents package ZIP opens"));
   const QStringList rootContentsEntries = rootContentsArchive.getFileNameList();
-  check(rootContentsEntries.contains(QStringLiteral("Evil Zone.exe")) &&
+  check(rootContentsEntries.contains(QStringLiteral("Evil Zone (Europe).exe")) &&
+          rootContentsEntries.contains(QStringLiteral("game.manifest.json")) &&
           rootContentsEntries.contains(QStringLiteral("proof/manifest.json")) &&
           rootContentsEntries.contains(QStringLiteral("empty/")) &&
           rootContentsEntries.contains(QStringLiteral(".package-metadata")) &&
@@ -464,7 +490,21 @@ int main(int argc, char** argv) {
                          return name.startsWith(QStringLiteral("package-source/"));
                        }),
         QStringLiteral("Windows/Linux package contents sit directly at ZIP root"));
-  check(rootContentsArchive.setCurrentFile(QStringLiteral("Evil Zone.exe")),
+  check(rootContentsArchive.setCurrentFile(QStringLiteral("game.manifest.json")),
+        QStringLiteral("root ZIP game manifest entry"));
+  QuaZipFile gameManifestFile(&rootContentsArchive);
+  check(gameManifestFile.open(QIODevice::ReadOnly),
+        QStringLiteral("root ZIP game manifest opens"));
+  const QJsonObject archivedGameManifest =
+    QJsonDocument::fromJson(gameManifestFile.readAll()).object();
+  gameManifestFile.close();
+  check(archivedGameManifest.size() == 2 &&
+          archivedGameManifest.value(QStringLiteral("executable")).toString() ==
+            QStringLiteral("Evil Zone (Europe).exe") &&
+          archivedGameManifest.value(QStringLiteral("name")).toString() ==
+            QStringLiteral("Evil Zone (Europe)"),
+        QStringLiteral("root ZIP game manifest contents"));
+  check(rootContentsArchive.setCurrentFile(QStringLiteral("Evil Zone (Europe).exe")),
         QStringLiteral("root ZIP executable entry"));
   QuaZipFileInfo64 executableInfo;
   check(rootContentsArchive.getCurrentFileInfo(&executableInfo) &&
@@ -481,21 +521,30 @@ int main(int argc, char** argv) {
 
   const QString macosZip =
     QDir(temp.path()).filePath(QStringLiteral("Evil Zone-macOS.zip"));
+  manifestRequest.targetPlatform = psxstudio::TargetPlatform::MacOS;
+  const QMap<QString, QByteArray> macosRootFiles{
+    { QStringLiteral("game.manifest.json"),
+      QJsonDocument(psxstudio::gameManifestForRequest(manifestRequest))
+        .toJson(QJsonDocument::Indented) },
+  };
   check(psxstudio::createPackageArchive(
-          packageSource, QStringLiteral("Evil Zone (Europe).app"), macosZip, error),
+          packageSource, QStringLiteral("Evil Zone (Europe).app"), macosZip, error,
+          macosRootFiles),
         error);
   QuaZip macosArchive(macosZip);
   check(macosArchive.open(QuaZip::mdUnzip),
         QStringLiteral("macOS package ZIP opens"));
   const QStringList macosEntries = macosArchive.getFileNameList();
   check(macosEntries.contains(QStringLiteral("Evil Zone (Europe).app/")) &&
+          macosEntries.contains(QStringLiteral("game.manifest.json")) &&
           macosEntries.contains(
-            QStringLiteral("Evil Zone (Europe).app/Evil Zone.exe")) &&
+            QStringLiteral("Evil Zone (Europe).app/Evil Zone (Europe).exe")) &&
           std::all_of(macosEntries.cbegin(), macosEntries.cend(),
                       [](const QString& name) {
-                        return name.startsWith(QStringLiteral("Evil Zone (Europe).app/"));
+                        return name == QStringLiteral("game.manifest.json") ||
+                          name.startsWith(QStringLiteral("Evil Zone (Europe).app/"));
                       }),
-        QStringLiteral("macOS .app is the sole ZIP-root package"));
+        QStringLiteral("macOS ZIP root contains only its game manifest and .app"));
   macosArchive.close();
 #if defined(Q_OS_MACOS)
   const QString extractedMacosZip =
@@ -508,7 +557,7 @@ int main(int argc, char** argv) {
           ditto.exitStatus() == QProcess::NormalExit && ditto.exitCode() == 0,
         QStringLiteral("macOS package ZIP extracts with Apple ditto"));
   const QString extractedExecutable = QDir(extractedMacosZip).filePath(
-    QStringLiteral("Evil Zone (Europe).app/Evil Zone.exe"));
+    QStringLiteral("Evil Zone (Europe).app/Evil Zone (Europe).exe"));
   check(QFileInfo(extractedExecutable).isExecutable(),
         QStringLiteral("Apple ZIP extraction retains app executable permissions"));
   const QString extractedLink = QDir(extractedMacosZip).filePath(
@@ -522,7 +571,7 @@ int main(int argc, char** argv) {
   const QString cancelledZip =
     QDir(temp.path()).filePath(QStringLiteral("cancelled.zip"));
   check(!psxstudio::createPackageArchive(
-          packageSource, {}, cancelledZip, error, []() { return true; }) &&
+          packageSource, {}, cancelledZip, error, {}, []() { return true; }) &&
           !QFileInfo::exists(cancelledZip),
         QStringLiteral("cancelled package ZIP is not delivered"));
 

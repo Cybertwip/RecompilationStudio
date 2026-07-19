@@ -60,6 +60,16 @@ QLabel* makeSectionTitle(const QString& text, QWidget* parent) {
   return label;
 }
 
+void configureReadOnlyComboBox(QComboBox* comboBox) {
+  /* A parent card stylesheet causes Qt's stylesheet proxy to skip
+   * CE_ComboBoxLabel with Qlementine on Windows. The editable paint path
+   * renders its foreground through a QLineEdit instead, while read-only mode
+   * keeps the control restricted to its predefined choices. */
+  comboBox->setEditable(true);
+  comboBox->setInsertPolicy(QComboBox::NoInsert);
+  comboBox->lineEdit()->setReadOnly(true);
+}
+
 bool verifyOutputDirectoryAccess(const QString& path, QString& error) {
   const QFileInfo directoryInfo(path);
   if (!directoryInfo.exists() || !directoryInfo.isDir()) {
@@ -180,6 +190,7 @@ MainWindow::MainWindow(QWidget* parent)
   platformCombo_->addItem(targetPlatformDisplayName(hostPlatform),
                           targetPlatformKey(hostPlatform));
 #endif
+  configureReadOnlyComboBox(platformCombo_);
   platformCombo_->setCurrentIndex(0);
   platformLayout->addWidget(platformLabel);
   platformLayout->addWidget(platformCombo_, 1);
@@ -212,6 +223,7 @@ MainWindow::MainWindow(QWidget* parent)
                          QStringLiteral("analog"));
   padModeCombo_->addItem(QStringLiteral("D-Pad (digital)"),
                          QStringLiteral("digital"));
+  configureReadOnlyComboBox(padModeCombo_);
   padModeCombo_->setCurrentIndex(0);
   padModeCombo_->setToolTip(
     QStringLiteral("Fixed pad type baked into the packaged game. The in-game "

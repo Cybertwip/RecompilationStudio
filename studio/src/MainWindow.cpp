@@ -627,6 +627,15 @@ void MainWindow::applyTheme() {
   statusCard_->setStyleSheet(cardStyle.arg(QStringLiteral("statusCard"),
                                             theme.backgroundColorMain2.name(QColor::HexArgb),
                                             theme.borderColor.name(QColor::HexArgb)));
+  for (const QString& objectName : { QStringLiteral("ciAuthCard"),
+                                     QStringLiteral("ciBuildersCard"),
+                                     QStringLiteral("ciJobsCard") }) {
+    if (auto* frame = findChild<QFrame*>(objectName)) {
+      frame->setStyleSheet(cardStyle.arg(objectName,
+                                         theme.backgroundColorMain2.name(QColor::HexArgb),
+                                         theme.borderColor.name(QColor::HexArgb)));
+    }
+  }
   logView_->setStyleSheet(QStringLiteral(
     "QPlainTextEdit { background-color: %1; border: 1px solid %2; border-radius: 7px; padding: 7px; }")
     .arg(theme.backgroundColorWorkspace.name(QColor::HexArgb),

@@ -8,6 +8,8 @@
 #include <QApplication>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QFileInfo>
+#include <QTabWidget>
 
 int main(int argc, char* argv[]) {
   QGuiApplication::setApplicationName(QStringLiteral("PSXRecompStudio"));
@@ -33,6 +35,22 @@ int main(int argc, char* argv[]) {
 
   psxstudio::MainWindow window;
   window.show();
+
+  const QStringList arguments = QGuiApplication::arguments();
+  const int screenshotIndex = arguments.indexOf(QStringLiteral("--screenshot"));
+  if (screenshotIndex >= 0 && screenshotIndex + 1 < arguments.size()) {
+    if (arguments.contains(QStringLiteral("--ci-tab"))) {
+      if (auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("studioTabs"))) {
+        tabs->setCurrentIndex(tabs->count() - 1);
+      }
+    }
+    app.processEvents();
+    window.repaint();
+    app.processEvents();
+    const QString path = QFileInfo(arguments.at(screenshotIndex + 1)).absoluteFilePath();
+    return window.grab().save(path) ? 0 : 2;
+  }
+
   QObject::connect(&instanceManager,
                    &oclero::QtAppInstanceManager::secondaryInstanceMessageReceived,
                    &window,

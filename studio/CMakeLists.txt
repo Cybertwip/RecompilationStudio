@@ -71,6 +71,8 @@ add_subdirectory(3rdparty/oclero/qtappinstancemanager)
 set(STUDIO_CORE_SOURCES
   src/BiosBrandingPatcher.cpp
   src/BiosBrandingPatcher.h
+  src/CiPanel.cpp
+  src/CiPanel.h
   src/CueSheet.cpp
   src/CueSheet.h
   src/DiscCatalog.cpp
@@ -82,6 +84,8 @@ set(STUDIO_CORE_SOURCES
   src/PipelineTypes.h
   src/PipelineWorker.cpp
   src/PipelineWorker.h
+  src/SteganosClient.cpp
+  src/SteganosClient.h
   ../runtime/src/iso_reader.cpp
   ../recompiler/src/ps1_exe_parser.cpp
 )
@@ -124,6 +128,7 @@ target_link_libraries(PSXRecompStudio PRIVATE
 target_compile_definitions(PSXRecompStudio PRIVATE
   PSXRECOMP_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
   PSX_STUDIO_VERSION="${PROJECT_VERSION}"
+  PSX_CI_ROUTER_DEFAULT_URL="https://cybertwip.com:4343"
 )
 
 set_target_properties(PSXRecompStudio PROPERTIES
@@ -176,6 +181,8 @@ if(BUILD_TESTING)
     src/PipelineSupport.cpp
     src/PipelineSupport.h
     src/PipelineTypes.h
+    src/PipelineWorker.cpp
+    src/PipelineWorker.h
     ../runtime/src/iso_reader.cpp
     ../recompiler/src/ps1_exe_parser.cpp
   )
@@ -190,7 +197,7 @@ if(BUILD_TESTING)
     ../recompiler/include
   )
   target_link_libraries(PSXRecompStudioTests PRIVATE
-    Qt6::Core Qt6::Core5Compat Qt6::Gui Qt6::Svg QuaZip fmt
+    Qt6::Core Qt6::Core5Compat Qt6::Gui Qt6::Widgets Qt6::Svg Qt6::Network QuaZip fmt
   )
   add_test(NAME PSXRecompStudioTests COMMAND PSXRecompStudioTests)
 

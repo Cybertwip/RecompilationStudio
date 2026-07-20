@@ -9,6 +9,7 @@
 #include <QUrl>
 #include <QWidget>
 
+class QJsonObject;
 class QLabel;
 class QLineEdit;
 class QNetworkAccessManager;

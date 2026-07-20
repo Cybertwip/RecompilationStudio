@@ -305,13 +305,6 @@ QString makeProjectCMake(const PipelineRequest& request,
                          const GameDescription& game,
                          const QString& bundleName,
                          const QString& bundleId,
-                         const QString& platformMetadataPath,
-                         const QString& iconPath,
-                         const QString& dependencyCachePath,
-                         const QString& biosFull,
-                         const QString& biosDispatch,
-                         const QString& gameFull,
-                         const QString& gameDispatch,
                          quint32 expectedBiosCrc) {
   const QString appSupportName = QStringLiteral("PSXRecomp/%1").arg(game.serial.isEmpty()
     ? sanitizedFileStem(request.windowTitle)
@@ -319,53 +312,50 @@ QString makeProjectCMake(const PipelineRequest& request,
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
-  const bool nativeWindowsTarget = windowsTarget &&
-    hostTargetPlatform() == TargetPlatform::Windows;
+  const QString gameStem = game.bootFileName;
   QString cmake;
   cmake += QStringLiteral("cmake_minimum_required(VERSION 3.20)\n");
   cmake += windowsTarget ? QStringLiteral("project(GeneratedPSXApp C CXX RC)\n")
                          : QStringLiteral("project(GeneratedPSXApp C CXX)\n");
   cmake += QStringLiteral("set(CMAKE_C_STANDARD 11)\nset(CMAKE_CXX_STANDARD 17)\n");
+  cmake += QStringLiteral("set(PSXRECOMP_DEPENDENCY_CACHE \"${CMAKE_BINARY_DIR}/dependencies\" CACHE PATH \"Shared dependency cache\")\n");
   if (windowsTarget) {
     cmake += QStringLiteral("include(FetchContent)\n");
     cmake += QStringLiteral("set(FETCHCONTENT_QUIET OFF)\n");
-    cmake += QStringLiteral("set(FETCHCONTENT_BASE_DIR %1 CACHE PATH \"\" FORCE)\n")
-               .arg(cmakeQuoted(dependencyCachePath));
-    if (nativeWindowsTarget) {
-      cmake += QStringLiteral("FetchContent_Declare(SDL2Source\n");
-      cmake += QStringLiteral("  URL %1\n")
-                 .arg(cmakeQuoted(QString::fromLatin1(kSdl2SourceUrl)));
-      cmake += QStringLiteral("  URL_HASH SHA256=%1\n")
-                 .arg(QString::fromLatin1(kSdl2SourceSha256));
-      cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
-      cmake += QStringLiteral("set(SDL_SHARED OFF CACHE BOOL \"\" FORCE)\n");
-      cmake += QStringLiteral("set(SDL_STATIC ON CACHE BOOL \"\" FORCE)\n");
-      cmake += QStringLiteral("set(SDL_TEST OFF CACHE BOOL \"\" FORCE)\n");
-      cmake += QStringLiteral("set(SDL2_DISABLE_INSTALL ON CACHE BOOL \"\" FORCE)\n");
-      cmake += QStringLiteral("set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded$<$<CONFIG:Debug>:Debug>\")\n");
-      cmake += QStringLiteral("FetchContent_MakeAvailable(SDL2Source)\n");
-      cmake += QStringLiteral("set(SDL2_INCLUDE_DIRS \"${sdl2source_SOURCE_DIR}/include\")\n");
-      cmake += QStringLiteral("set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
-    } else {
-      cmake += QStringLiteral("FetchContent_Declare(SDL2Mingw\n");
-      cmake += QStringLiteral("  URL \"https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz\"\n");
-      cmake += QStringLiteral("  URL_HASH SHA256=83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2\n");
-      cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
-      cmake += QStringLiteral("FetchContent_GetProperties(SDL2Mingw)\n");
-      cmake += QStringLiteral("if(NOT sdl2mingw_POPULATED)\n");
-      cmake += QStringLiteral("  FetchContent_Populate(SDL2Mingw)\nendif()\n");
-      cmake += QStringLiteral("set(_PSX_SDL2_ROOT \"${sdl2mingw_SOURCE_DIR}/x86_64-w64-mingw32\")\n");
-      cmake += QStringLiteral("find_package(SDL2 CONFIG REQUIRED PATHS \"${_PSX_SDL2_ROOT}/lib/cmake/SDL2\" NO_DEFAULT_PATH)\n");
-      cmake += QStringLiteral("set(SDL2_INCLUDE_DIRS \"${_PSX_SDL2_ROOT}/include;${_PSX_SDL2_ROOT}/include/SDL2\")\n");
-      cmake += QStringLiteral("set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
-      cmake += QStringLiteral("set(SDL2_STATIC_LDFLAGS ${SDL2_LIBRARIES})\n");
-      cmake += QStringLiteral("set(PSX_STATIC_RUNTIME ON CACHE BOOL \"\" FORCE)\n");
-    }
+    cmake += QStringLiteral("set(FETCHCONTENT_BASE_DIR \"${PSXRECOMP_DEPENDENCY_CACHE}\" CACHE PATH \"\" FORCE)\n");
+    cmake += QStringLiteral("if(MSVC)\n");
+    cmake += QStringLiteral("  FetchContent_Declare(SDL2Source\n");
+    cmake += QStringLiteral("    URL %1\n")
+               .arg(cmakeQuoted(QString::fromLatin1(kSdl2SourceUrl)));
+    cmake += QStringLiteral("    URL_HASH SHA256=%1\n")
+               .arg(QString::fromLatin1(kSdl2SourceSha256));
+    cmake += QStringLiteral("    DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n  )\n");
+    cmake += QStringLiteral("  set(SDL_SHARED OFF CACHE BOOL \"\" FORCE)\n");
+    cmake += QStringLiteral("  set(SDL_STATIC ON CACHE BOOL \"\" FORCE)\n");
+    cmake += QStringLiteral("  set(SDL_TEST OFF CACHE BOOL \"\" FORCE)\n");
+    cmake += QStringLiteral("  set(SDL2_DISABLE_INSTALL ON CACHE BOOL \"\" FORCE)\n");
+    cmake += QStringLiteral("  set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded$<$<CONFIG:Debug>:Debug>\")\n");
+    cmake += QStringLiteral("  FetchContent_MakeAvailable(SDL2Source)\n");
+    cmake += QStringLiteral("  set(SDL2_INCLUDE_DIRS \"${sdl2source_SOURCE_DIR}/include\")\n");
+    cmake += QStringLiteral("  set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
+    cmake += QStringLiteral("else()\n");
+    cmake += QStringLiteral("  FetchContent_Declare(SDL2Mingw\n");
+    cmake += QStringLiteral("    URL \"https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz\"\n");
+    cmake += QStringLiteral("    URL_HASH SHA256=83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2\n");
+    cmake += QStringLiteral("    DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n  )\n");
+    cmake += QStringLiteral("  FetchContent_GetProperties(SDL2Mingw)\n");
+    cmake += QStringLiteral("  if(NOT sdl2mingw_POPULATED)\n    FetchContent_Populate(SDL2Mingw)\n  endif()\n");
+    cmake += QStringLiteral("  set(_PSX_SDL2_ROOT \"${sdl2mingw_SOURCE_DIR}/x86_64-w64-mingw32\")\n");
+    cmake += QStringLiteral("  find_package(SDL2 CONFIG REQUIRED PATHS \"${_PSX_SDL2_ROOT}/lib/cmake/SDL2\" NO_DEFAULT_PATH)\n");
+    cmake += QStringLiteral("  set(SDL2_INCLUDE_DIRS \"${_PSX_SDL2_ROOT}/include;${_PSX_SDL2_ROOT}/include/SDL2\")\n");
+    cmake += QStringLiteral("  set(SDL2_LIBRARIES SDL2::SDL2main SDL2::SDL2-static)\n");
+    cmake += QStringLiteral("  set(SDL2_STATIC_LDFLAGS ${SDL2_LIBRARIES})\n");
+    cmake += QStringLiteral("  set(PSX_STATIC_RUNTIME ON CACHE BOOL \"\" FORCE)\n");
+    cmake += QStringLiteral("endif()\n");
   } else if (linuxTarget) {
     cmake += QStringLiteral("include(FetchContent)\n");
     cmake += QStringLiteral("set(FETCHCONTENT_QUIET OFF)\n");
-    cmake += QStringLiteral("set(FETCHCONTENT_BASE_DIR %1 CACHE PATH \"\" FORCE)\n")
-               .arg(cmakeQuoted(dependencyCachePath));
+    cmake += QStringLiteral("set(FETCHCONTENT_BASE_DIR \"${PSXRECOMP_DEPENDENCY_CACHE}\" CACHE PATH \"\" FORCE)\n");
     cmake += QStringLiteral("FetchContent_Declare(SDL2Source\n");
     cmake += QStringLiteral("  URL %1\n")
                .arg(cmakeQuoted(QString::fromLatin1(kSdl2SourceUrl)));
@@ -373,8 +363,7 @@ QString makeProjectCMake(const PipelineRequest& request,
                .arg(QString::fromLatin1(kSdl2SourceSha256));
     cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
     cmake += QStringLiteral("FetchContent_GetProperties(SDL2Source)\n");
-    cmake += QStringLiteral("if(NOT sdl2source_POPULATED)\n");
-    cmake += QStringLiteral("  FetchContent_Populate(SDL2Source)\nendif()\n");
+    cmake += QStringLiteral("if(NOT sdl2source_POPULATED)\n  FetchContent_Populate(SDL2Source)\nendif()\n");
     cmake += QStringLiteral("FetchContent_Declare(SDL2Linux\n");
     cmake += QStringLiteral("  URL %1\n")
                .arg(cmakeQuoted(QString::fromLatin1(kLinuxSdl2WheelUrl)));
@@ -383,8 +372,7 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("  DOWNLOAD_NAME \"pysdl2_dll-2.32.10-manylinux_2_28_x86_64.zip\"\n");
     cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
     cmake += QStringLiteral("FetchContent_GetProperties(SDL2Linux)\n");
-    cmake += QStringLiteral("if(NOT sdl2linux_POPULATED)\n");
-    cmake += QStringLiteral("  FetchContent_Populate(SDL2Linux)\nendif()\n");
+    cmake += QStringLiteral("if(NOT sdl2linux_POPULATED)\n  FetchContent_Populate(SDL2Linux)\nendif()\n");
     cmake += QStringLiteral("set(_PSX_SDL2_LIBRARY \"${sdl2linux_SOURCE_DIR}/sdl2dll/dll/libSDL2-2.0.so\")\n");
     cmake += QStringLiteral("if(NOT EXISTS \"${_PSX_SDL2_LIBRARY}\")\n");
     cmake += QStringLiteral("  message(FATAL_ERROR \"The pinned Linux SDL2 archive did not contain libSDL2-2.0.so\")\nendif()\n");
@@ -401,8 +389,7 @@ QString makeProjectCMake(const PipelineRequest& request,
                .arg(QString::fromLatin1(kLinuxControllerDbArchiveSha256));
     cmake += QStringLiteral("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE\n)\n");
     cmake += QStringLiteral("FetchContent_GetProperties(PSXControllerDB)\n");
-    cmake += QStringLiteral("if(NOT psxcontrollerdb_POPULATED)\n");
-    cmake += QStringLiteral("  FetchContent_Populate(PSXControllerDB)\nendif()\n");
+    cmake += QStringLiteral("if(NOT psxcontrollerdb_POPULATED)\n  FetchContent_Populate(PSXControllerDB)\nendif()\n");
     cmake += QStringLiteral("set(_PSX_CONTROLLER_DB \"${psxcontrollerdb_SOURCE_DIR}/gamecontrollerdb.txt\")\n");
     cmake += QStringLiteral("if(NOT EXISTS \"${_PSX_CONTROLLER_DB}\")\n");
     cmake += QStringLiteral("  message(FATAL_ERROR \"The pinned controller database archive is incomplete\")\nendif()\n");
@@ -415,8 +402,7 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("set(CMAKE_MACOSX_RPATH ON)\nset(CMAKE_BUILD_WITH_INSTALL_RPATH ON)\n");
     cmake += QStringLiteral("set(CMAKE_INSTALL_RPATH \"@executable_path/../Frameworks\")\n");
   }
-  cmake += QStringLiteral("set(PSXRECOMP_ROOT %1 CACHE PATH \"\" FORCE)\n")
-             .arg(cmakeQuoted(request.frameworkRoot));
+  cmake += QStringLiteral("set(PSXRECOMP_ROOT \"${CMAKE_CURRENT_SOURCE_DIR}/framework\" CACHE PATH \"\" FORCE)\n");
   cmake += QStringLiteral("set(PSXRECOMP_SKIP_BIOS_STALE_CHECK ON CACHE BOOL \"\" FORCE)\n");
   cmake += QStringLiteral("set(PSX_LAUNCHER OFF CACHE BOOL \"\" FORCE)\n");
   cmake += QStringLiteral("set(PSX_DEBUG_TOOLS OFF CACHE BOOL \"\" FORCE)\n");
@@ -424,10 +410,10 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("include(${PSXRECOMP_ROOT}/runtime/runtime.cmake)\n");
   cmake += QStringLiteral("psxrecomp_add_runtime_target(psx-runtime\n");
   if (macosTarget) cmake += QStringLiteral("  MACOSX_BUNDLE\n");
-  cmake += QStringLiteral("  BIOS_GENERATED_FULL_C %1\n").arg(cmakeQuoted(biosFull));
-  cmake += QStringLiteral("  BIOS_GENERATED_DISPATCH_C %1\n").arg(cmakeQuoted(biosDispatch));
-  cmake += QStringLiteral("  GAME_GENERATED_FULL_C %1\n").arg(cmakeQuoted(gameFull));
-  cmake += QStringLiteral("  GAME_GENERATED_DISPATCH_C %1\n").arg(cmakeQuoted(gameDispatch));
+  cmake += QStringLiteral("  BIOS_GENERATED_FULL_C \"${CMAKE_CURRENT_SOURCE_DIR}/generated/bios/SCPH1001_full.c\"\n");
+  cmake += QStringLiteral("  BIOS_GENERATED_DISPATCH_C \"${CMAKE_CURRENT_SOURCE_DIR}/generated/bios/SCPH1001_dispatch.c\"\n");
+  cmake += QStringLiteral("  GAME_GENERATED_FULL_C \"${CMAKE_CURRENT_SOURCE_DIR}/generated/%1_full.c\"\n").arg(gameStem);
+  cmake += QStringLiteral("  GAME_GENERATED_DISPATCH_C \"${CMAKE_CURRENT_SOURCE_DIR}/generated/%1_dispatch.c\"\n").arg(gameStem);
   cmake += QStringLiteral("  WINDOW_TITLE %1\n").arg(cmakeQuoted(request.windowTitle));
   cmake += QStringLiteral("  EXE_NAME %1\n").arg(cmakeQuoted(bundleName));
   cmake += (windowsTarget || linuxTarget)
@@ -444,12 +430,24 @@ QString makeProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("else()\n");
   cmake += QStringLiteral("  target_compile_options(psx-runtime PRIVATE $<$<CONFIG:Release>:-O3>)\n");
   cmake += QStringLiteral("endif()\n");
+  cmake += QStringLiteral("set(_PSX_PACKAGE_RESOURCES \"${CMAKE_CURRENT_SOURCE_DIR}/package-resources\")\n");
+  cmake += QStringLiteral("set(_PSX_GAME_MANIFEST \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\")\n");
+  cmake += QStringLiteral("set(_PSX_STEGANOS_PACKAGE_DIR \"${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/$<CONFIG>\")\n");
   if (windowsTarget) {
-    cmake += QStringLiteral("target_sources(psx-runtime PRIVATE %1)\n")
-               .arg(cmakeQuoted(platformMetadataPath));
+    cmake += QStringLiteral("target_sources(psx-runtime PRIVATE \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.rc\")\n");
     cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES OUTPUT_NAME %1)\n")
                .arg(cmakeQuoted(bundleName));
     cmake += QStringLiteral("install(TARGETS psx-runtime RUNTIME DESTINATION .)\n");
+    cmake += QStringLiteral("install(DIRECTORY \"${_PSX_PACKAGE_RESOURCES}/\" DESTINATION .)\n");
+    cmake += QStringLiteral("install(FILES \"${_PSX_GAME_MANIFEST}\" DESTINATION .)\n");
+    cmake += QStringLiteral("add_custom_command(TARGET psx-runtime POST_BUILD\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"$<TARGET_FILE:psx-runtime>\" \"${_PSX_STEGANOS_PACKAGE_DIR}/%1.exe\"\n").arg(bundleName);
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_PSX_PACKAGE_RESOURCES}\" \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${PSXRECOMP_ROOT}/runtime/launcher/assets\" \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_GAME_MANIFEST}\" \"${_PSX_STEGANOS_PACKAGE_DIR}/game.manifest.json\"\n");
+    cmake += QStringLiteral("  VERBATIM)\n");
   } else if (linuxTarget) {
     cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES\n");
     cmake += QStringLiteral("  OUTPUT_NAME %1\n").arg(cmakeQuoted(bundleName));
@@ -460,24 +458,47 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("install(TARGETS psx-runtime RUNTIME DESTINATION .)\n");
     cmake += QStringLiteral("install(FILES \"${_PSX_SDL2_LIBRARY}\" DESTINATION . RENAME \"libSDL2-2.0.so.0\")\n");
     cmake += QStringLiteral("install(FILES \"${_PSX_CONTROLLER_DB}\" DESTINATION .)\n");
-    cmake += QStringLiteral("install(FILES %1 DESTINATION .)\n").arg(cmakeQuoted(iconPath));
+    cmake += QStringLiteral("install(FILES \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" DESTINATION .)\n");
     cmake += QStringLiteral("install(FILES \"${sdl2source_SOURCE_DIR}/LICENSE.txt\" DESTINATION licenses RENAME \"SDL2.txt\")\n");
     cmake += QStringLiteral("install(FILES \"${sdl2linux_SOURCE_DIR}/pysdl2_dll-2.32.10.dist-info/licenses/LICENSE\" DESTINATION licenses RENAME \"pysdl2-dll.txt\")\n");
     cmake += QStringLiteral("install(FILES \"${psxcontrollerdb_SOURCE_DIR}/LICENSE\" DESTINATION licenses RENAME \"SDL_GameControllerDB.txt\")\n");
+    cmake += QStringLiteral("install(DIRECTORY \"${_PSX_PACKAGE_RESOURCES}/\" DESTINATION .)\n");
+    cmake += QStringLiteral("install(FILES \"${_PSX_GAME_MANIFEST}\" DESTINATION .)\n");
+    cmake += QStringLiteral("add_custom_command(TARGET psx-runtime POST_BUILD\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_PSX_STEGANOS_PACKAGE_DIR}/licenses\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"$<TARGET_FILE:psx-runtime>\" \"${_PSX_STEGANOS_PACKAGE_DIR}/%1\"\n").arg(bundleName);
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_SDL2_LIBRARY}\" \"${_PSX_STEGANOS_PACKAGE_DIR}/libSDL2-2.0.so.0\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_CONTROLLER_DB}\" \"${_PSX_STEGANOS_PACKAGE_DIR}/gamecontrollerdb.txt\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" \"${_PSX_STEGANOS_PACKAGE_DIR}/AppIcon.png\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_PSX_PACKAGE_RESOURCES}\" \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${PSXRECOMP_ROOT}/runtime/launcher/assets\" \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${sdl2source_SOURCE_DIR}/LICENSE.txt\" \"${_PSX_STEGANOS_PACKAGE_DIR}/licenses/SDL2.txt\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${sdl2linux_SOURCE_DIR}/pysdl2_dll-2.32.10.dist-info/licenses/LICENSE\" \"${_PSX_STEGANOS_PACKAGE_DIR}/licenses/pysdl2-dll.txt\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${psxcontrollerdb_SOURCE_DIR}/LICENSE\" \"${_PSX_STEGANOS_PACKAGE_DIR}/licenses/SDL_GameControllerDB.txt\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_GAME_MANIFEST}\" \"${_PSX_STEGANOS_PACKAGE_DIR}/game.manifest.json\"\n");
+    cmake += QStringLiteral("  VERBATIM)\n");
   } else {
-    cmake += QStringLiteral("set_source_files_properties(%1 PROPERTIES MACOSX_PACKAGE_LOCATION \"Resources\")\n")
-               .arg(cmakeQuoted(iconPath));
-    cmake += QStringLiteral("target_sources(psx-runtime PRIVATE %1)\n").arg(cmakeQuoted(iconPath));
+    cmake += QStringLiteral("set_source_files_properties(\"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\" PROPERTIES MACOSX_PACKAGE_LOCATION \"Resources\")\n");
+    cmake += QStringLiteral("target_sources(psx-runtime PRIVATE \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\")\n");
     cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES\n");
     cmake += QStringLiteral("  MACOSX_BUNDLE TRUE\n");
     cmake += QStringLiteral("  OUTPUT_NAME %1\n").arg(cmakeQuoted(bundleName));
-    cmake += QStringLiteral("  MACOSX_BUNDLE_INFO_PLIST %1\n").arg(cmakeQuoted(platformMetadataPath));
+    cmake += QStringLiteral("  MACOSX_BUNDLE_INFO_PLIST \"${CMAKE_CURRENT_SOURCE_DIR}/Info.plist\"\n");
     cmake += QStringLiteral("  MACOSX_BUNDLE_GUI_IDENTIFIER %1\n").arg(cmakeQuoted(bundleId));
     cmake += QStringLiteral("  MACOSX_BUNDLE_BUNDLE_NAME %1\n").arg(cmakeQuoted(bundleName));
     cmake += QStringLiteral("  MACOSX_BUNDLE_ICON_FILE \"AppIcon.icns\"\n");
     cmake += QStringLiteral("  XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED OFF\n");
-    cmake += QStringLiteral("  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY \"\"\n)\n");
+    cmake += QStringLiteral("  XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY \"\")\n");
+    cmake += QStringLiteral("add_custom_command(TARGET psx-runtime POST_BUILD\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_PSX_PACKAGE_RESOURCES}\" \"$<TARGET_BUNDLE_CONTENT_DIR:psx-runtime>/Resources\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_PSX_STEGANOS_PACKAGE_DIR}\"\n");
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"$<TARGET_BUNDLE_DIR:psx-runtime>\" \"${_PSX_STEGANOS_PACKAGE_DIR}/%1.app\"\n").arg(bundleName);
+    cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_GAME_MANIFEST}\" \"${_PSX_STEGANOS_PACKAGE_DIR}/game.manifest.json\"\n");
+    cmake += QStringLiteral("  VERBATIM)\n");
     cmake += QStringLiteral("install(TARGETS psx-runtime BUNDLE DESTINATION .)\n");
+    cmake += QStringLiteral("install(FILES \"${_PSX_GAME_MANIFEST}\" DESTINATION .)\n");
   }
   return cmake;
 }
@@ -602,7 +623,106 @@ QString visualStudio2022Tool(const QString& installation, const QString& executa
   return {};
 }
 
+
+bool copySourceDirectory(const QString& sourceDirectory,
+                         const QString& destinationDirectory,
+                         QString& error) {
+  const QDir sourceRoot(sourceDirectory);
+  if (!sourceRoot.exists() || !QDir().mkpath(destinationDirectory)) {
+    error = QStringLiteral("Could not prepare source replication directory: %1")
+              .arg(destinationDirectory);
+    return false;
+  }
+  QDirIterator iterator(sourceDirectory,
+    QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
+    QDirIterator::Subdirectories);
+  while (iterator.hasNext()) {
+    const QString sourcePath = iterator.next();
+    const QString relative = QDir::fromNativeSeparators(
+      sourceRoot.relativeFilePath(sourcePath));
+    const QStringList components = relative.split('/', Qt::SkipEmptyParts);
+    if (components.contains(QStringLiteral(".git")) ||
+        components.contains(QStringLiteral("build")) ||
+        components.contains(QStringLiteral(".cache")) ||
+        QFileInfo(sourcePath).fileName() == QStringLiteral(".DS_Store")) {
+      continue;
+    }
+    const QString destinationPath = QDir(destinationDirectory).filePath(relative);
+    const QFileInfo info(sourcePath);
+    if (info.isDir()) {
+      if (!QDir().mkpath(destinationPath)) {
+        error = QStringLiteral("Could not create replicated source directory: %1")
+                  .arg(destinationPath);
+        return false;
+      }
+      continue;
+    }
+    if (info.isSymLink()) {
+      const QFileInfo target(info.symLinkTarget());
+      if (target.isDir()) {
+        if (!copySourceDirectory(target.absoluteFilePath(), destinationPath, error)) return false;
+      } else if (!copyFileReplacing(target.absoluteFilePath(), destinationPath, error)) {
+        return false;
+      }
+      continue;
+    }
+    if (!copyFileReplacing(sourcePath, destinationPath, error)) return false;
+    QFile::setPermissions(destinationPath, info.permissions());
+  }
+  return true;
+}
+
+bool replicateFrameworkSources(const QString& frameworkRoot,
+                               const QString& destinationRoot,
+                               QString& error) {
+  const QList<QPair<QString, QString>> directories{
+    { QStringLiteral("runtime/src"), QStringLiteral("runtime/src") },
+    { QStringLiteral("runtime/include"), QStringLiteral("runtime/include") },
+    { QStringLiteral("runtime/launcher"), QStringLiteral("runtime/launcher") },
+    { QStringLiteral("runtime/shaders"), QStringLiteral("runtime/shaders") },
+    { QStringLiteral("recompiler/src"), QStringLiteral("recompiler/src") },
+    { QStringLiteral("recompiler/include"), QStringLiteral("recompiler/include") },
+    { QStringLiteral("recompiler/lib/fmt/include"), QStringLiteral("recompiler/lib/fmt/include") },
+    { QStringLiteral("recompiler/lib/toml11"), QStringLiteral("recompiler/lib/toml11") },
+    { QStringLiteral("lib/sljit"), QStringLiteral("lib/sljit") },
+    { QStringLiteral("lib/RmlUi"), QStringLiteral("lib/RmlUi") },
+    { QStringLiteral("lib/freetype"), QStringLiteral("lib/freetype") },
+  };
+  for (const auto& directory : directories) {
+    const QString source = QDir(frameworkRoot).filePath(directory.first);
+    const QString destination = QDir(destinationRoot).filePath(directory.second);
+    if (!copySourceDirectory(source, destination, error)) return false;
+  }
+  const QStringList files{
+    QStringLiteral("runtime/runtime.cmake"),
+    QStringLiteral("runtime/codegen_hash_sources.cmake"),
+    QStringLiteral("runtime/hash_codegen.cmake"),
+    QStringLiteral("tools/embed_spirv.py"),
+    QStringLiteral("LICENSE"),
+    QStringLiteral("THIRD_PARTY_ATTRIBUTION.md"),
+  };
+  for (const auto& relative : files) {
+    const QString source = QDir(frameworkRoot).filePath(relative);
+    if (!QFileInfo(source).isFile()) {
+      error = QStringLiteral("Required framework source is missing: %1").arg(source);
+      return false;
+    }
+    if (!copyFileReplacing(source, QDir(destinationRoot).filePath(relative), error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 } // namespace
+
+QString generatedProjectCMake(const PipelineRequest& request,
+                              const GameDescription& game,
+                              const QString& bundleName,
+                              const QString& bundleId,
+                              quint32 expectedBiosCrc) {
+  return makeProjectCMake(request, game, bundleName, bundleId, expectedBiosCrc);
+}
 
 PipelineWorker::PipelineWorker(QObject* parent)
 : QObject(parent) {
@@ -665,6 +785,9 @@ bool PipelineWorker::runCommand(const QString& program,
   QString processProgram = program;
   QStringList processArguments = arguments;
 #if defined(Q_OS_WIN)
+  const QString programSuffix = QFileInfo(program).suffix();
+  const bool windowsBatch = programSuffix.compare(QStringLiteral("bat"), Qt::CaseInsensitive) == 0 ||
+                            programSuffix.compare(QStringLiteral("cmd"), Qt::CaseInsensitive) == 0;
   if (windowsBatch) {
     processProgram = environment.value(QStringLiteral("COMSPEC"));
     if (processProgram.isEmpty()) {
@@ -734,21 +857,26 @@ void PipelineWorker::run(PipelineRequest request) {
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
-  const bool nativeWindowsTarget = windowsTarget &&
+  const bool sourceExport = request.exportMode == ExportMode::Source;
+  const bool remoteCiBuild = request.exportMode == ExportMode::Build &&
+                             request.buildBackend == BuildBackend::RemoteCi;
+  const bool localBuild = request.exportMode == ExportMode::Build && !remoteCiBuild;
+  const bool nativeWindowsTarget = localBuild && windowsTarget &&
     hostTargetPlatform() == TargetPlatform::Windows;
-  const bool nativeLinuxTarget = linuxTarget &&
+  const bool nativeLinuxTarget = localBuild && linuxTarget &&
     hostTargetPlatform() == TargetPlatform::Linux;
-  const bool crossWindowsTarget = windowsTarget && !nativeWindowsTarget;
-  const bool crossLinuxTarget = linuxTarget && !nativeLinuxTarget;
+  const bool crossWindowsTarget = localBuild && windowsTarget && !nativeWindowsTarget;
+  const bool crossLinuxTarget = localBuild && linuxTarget && !nativeLinuxTarget;
   const bool directoryPackageTarget = windowsTarget || linuxTarget;
   const bool hasCertificate = !request.certificatePath.trimmed().isEmpty();
   const bool hasCertificatePassword = !request.certificatePassword.isEmpty();
-  const bool signingRequested = macosTarget && hasCertificate && hasCertificatePassword;
+  const bool signingRequested = localBuild && macosTarget &&
+                                hasCertificate && hasCertificatePassword;
   const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
     ? QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg")
     : request.iconPath;
 
-  constexpr int totalStages = 9;
+  const int totalStages = localBuild ? 9 : 6;
   QString signingPasswordPath;
   QString signingIdentityName;
   QString signingIdentitySha1;
@@ -771,9 +899,10 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("The All platform selection must be expanded into concrete exports before the pipeline starts."), {});
     return;
   }
-  if (!targetPlatformSupportedOnHost(request.targetPlatform)) {
-    fail(QStringLiteral("This %1 build of PSXRecomp Studio can only create %1 apps.")
-           .arg(targetPlatformDisplayName(hostTargetPlatform())), {});
+  if (localBuild && !targetPlatformSupportedOnHost(request.targetPlatform)) {
+    fail(QStringLiteral("This %1 host cannot build a local %2 package. Enable CI or export source instead.")
+           .arg(targetPlatformDisplayName(hostTargetPlatform()),
+                targetPlatformDisplayName(request.targetPlatform)), {});
     return;
   }
   QString error;
@@ -827,7 +956,7 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("Select a writable output directory."), {});
     return;
   }
-  if (macosTarget && hasCertificate != hasCertificatePassword) {
+  if (localBuild && macosTarget && hasCertificate != hasCertificatePassword) {
     fail(QStringLiteral("To sign the macOS app, select both a PFX certificate and its password; leave both empty for an unsigned export."), {});
     return;
   }
@@ -858,15 +987,17 @@ void PipelineWorker::run(PipelineRequest request) {
     ? QString() : QDir(javaHome).filePath(QStringLiteral("bin/java"));
 #endif
   const QString git = findExecutable(QStringLiteral("git"));
-  const QString pkgConfig = macosTarget ? findExecutable(QStringLiteral("pkg-config")) : QString();
-  const QString nm = macosTarget ? QStringLiteral("/usr/bin/nm") : QString();
+  const QString pkgConfig = localBuild && macosTarget
+    ? findExecutable(QStringLiteral("pkg-config")) : QString();
+  const QString nm = localBuild && macosTarget ? QStringLiteral("/usr/bin/nm") : QString();
   const QString rcodesign = signingRequested ? findRcodesign() : QString();
   const QString hostClang = hostTargetPlatform() == TargetPlatform::MacOS
     ? QStringLiteral("/usr/bin/clang") : QString();
   const QString hostClangxx = hostTargetPlatform() == TargetPlatform::MacOS
     ? QStringLiteral("/usr/bin/clang++") : QString();
-  const QString visualStudio = nativeWindowsTarget ? visualStudio2022Installation() : QString();
-  const QString msvcCl = nativeWindowsTarget
+  const QString visualStudio = hostTargetPlatform() == TargetPlatform::Windows
+    ? visualStudio2022Installation() : QString();
+  const QString msvcCl = hostTargetPlatform() == TargetPlatform::Windows
     ? visualStudio2022Tool(visualStudio, QStringLiteral("cl.exe")) : QString();
   const QString msvcDumpbin = nativeWindowsTarget
     ? visualStudio2022Tool(visualStudio, QStringLiteral("dumpbin.exe")) : QString();
@@ -884,22 +1015,26 @@ void PipelineWorker::run(PipelineRequest request) {
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-strip")) : QString();
   const QString mingwObjdump = crossWindowsTarget
     ? findExecutable(QStringLiteral("x86_64-w64-mingw32-objdump")) : QString();
-  const QString linuxGcc = linuxTarget
+  const QString hostLinuxGcc = hostTargetPlatform() == TargetPlatform::Linux
+    ? findExecutable(QStringLiteral("gcc")) : QString();
+  const QString hostLinuxGxx = hostTargetPlatform() == TargetPlatform::Linux
+    ? findExecutable(QStringLiteral("g++")) : QString();
+  const QString linuxGcc = localBuild && linuxTarget
     ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-gcc")
                                       : QStringLiteral("gcc")) : QString();
-  const QString linuxGxx = linuxTarget
+  const QString linuxGxx = localBuild && linuxTarget
     ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-g++")
                                       : QStringLiteral("g++")) : QString();
-  const QString linuxAr = linuxTarget
+  const QString linuxAr = localBuild && linuxTarget
     ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-ar")
                                       : QStringLiteral("ar")) : QString();
-  const QString linuxRanlib = linuxTarget
+  const QString linuxRanlib = localBuild && linuxTarget
     ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-ranlib")
                                       : QStringLiteral("ranlib")) : QString();
-  const QString linuxStrip = linuxTarget
+  const QString linuxStrip = localBuild && linuxTarget
     ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-strip")
                                       : QStringLiteral("strip")) : QString();
-  const QString linuxReadelf = linuxTarget
+  const QString linuxReadelf = localBuild && linuxTarget
     ? findExecutable(crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu-readelf")
                                       : QStringLiteral("readelf")) : QString();
   QString linuxSysroot;
@@ -921,9 +1056,13 @@ void PipelineWorker::run(PipelineRequest request) {
   if (hostTargetPlatform() == TargetPlatform::MacOS) {
     requiredTools.append({ QStringLiteral("Apple Clang C compiler"), hostClang });
     requiredTools.append({ QStringLiteral("Apple Clang C++ compiler"), hostClangxx });
+  } else if (hostTargetPlatform() == TargetPlatform::Windows) {
+    requiredTools.append({ QStringLiteral("Visual Studio 2022 MSVC compiler (cl.exe)"), msvcCl });
+  } else {
+    requiredTools.append({ QStringLiteral("GCC C compiler"), hostLinuxGcc });
+    requiredTools.append({ QStringLiteral("GCC C++ compiler"), hostLinuxGxx });
   }
   if (nativeWindowsTarget) {
-    requiredTools.append({ QStringLiteral("Visual Studio 2022 MSVC compiler (cl.exe)"), msvcCl });
     requiredTools.append({ QStringLiteral("Visual Studio 2022 PE inspector (dumpbin.exe)"), msvcDumpbin });
   } else if (crossWindowsTarget) {
     requiredTools.append({ QStringLiteral("MinGW x86_64 C compiler"), mingwGcc });
@@ -934,7 +1073,7 @@ void PipelineWorker::run(PipelineRequest request) {
     requiredTools.append({ QStringLiteral("MinGW strip"), mingwStrip });
     requiredTools.append({ QStringLiteral("MinGW objdump"), mingwObjdump });
   }
-  if (linuxTarget) {
+  if (localBuild && linuxTarget) {
     requiredTools.append({ nativeLinuxTarget ? QStringLiteral("GCC C compiler")
                                              : QStringLiteral("Linux cross C compiler"), linuxGcc });
     requiredTools.append({ nativeLinuxTarget ? QStringLiteral("GCC C++ compiler")
@@ -945,12 +1084,14 @@ void PipelineWorker::run(PipelineRequest request) {
     requiredTools.append({ QStringLiteral("GNU readelf"), linuxReadelf });
   }
   if (macosTarget) {
-    requiredTools.append({ QStringLiteral("pkg-config"), pkgConfig });
     requiredTools.append({ QStringLiteral("iconutil"), QStringLiteral("/usr/bin/iconutil") });
-    requiredTools.append({ QStringLiteral("ditto"), QStringLiteral("/usr/bin/ditto") });
-    requiredTools.append({ QStringLiteral("otool"), QStringLiteral("/usr/bin/otool") });
-    requiredTools.append({ QStringLiteral("nm"), nm });
-    requiredTools.append({ QStringLiteral("install_name_tool"), QStringLiteral("/usr/bin/install_name_tool") });
+    if (localBuild) {
+      requiredTools.append({ QStringLiteral("pkg-config"), pkgConfig });
+      requiredTools.append({ QStringLiteral("ditto"), QStringLiteral("/usr/bin/ditto") });
+      requiredTools.append({ QStringLiteral("otool"), QStringLiteral("/usr/bin/otool") });
+      requiredTools.append({ QStringLiteral("nm"), nm });
+      requiredTools.append({ QStringLiteral("install_name_tool"), QStringLiteral("/usr/bin/install_name_tool") });
+    }
   }
   if (signingRequested) {
     requiredTools.append({ QStringLiteral("rcodesign (direct PFX signer)"), rcodesign });
@@ -984,7 +1125,7 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     emit logLine(QStringLiteral("Direct PFX signer: %1").arg(signerVersionText));
   }
-  if (linuxTarget) {
+  if (localBuild && linuxTarget) {
     const QString compilerTarget =
       versionText(linuxGcc, { QStringLiteral("-dumpmachine") }).trimmed();
     linuxSysroot = versionText(linuxGcc, { QStringLiteral("-print-sysroot") }).trimmed();
@@ -1010,14 +1151,14 @@ void PipelineWorker::run(PipelineRequest request) {
   } else if (crossWindowsTarget) {
     emit logLine(QStringLiteral("MinGW C compiler: %1").arg(mingwGcc));
     emit logLine(QStringLiteral("MinGW C++ compiler: %1").arg(mingwGxx));
-  } else if (linuxTarget) {
+  } else if (localBuild && linuxTarget) {
     emit logLine(QStringLiteral("Linux C compiler: %1").arg(linuxGcc));
     emit logLine(QStringLiteral("Linux C++ compiler: %1").arg(linuxGxx));
     emit logLine(QStringLiteral("Linux sysroot: %1").arg(linuxSysroot));
   }
   QString libusbVersion;
   QString libusbStaticArchive;
-  if (macosTarget && request.macosGipGamepad) {
+  if (localBuild && macosTarget && request.macosGipGamepad) {
     QByteArray versionOutput;
     QByteArray libdirOutput;
     if (!runCommand(pkgConfig,
@@ -1043,7 +1184,7 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     emit logLine(QStringLiteral("macOS wired Xbox/PDP input: enabled (libusb %1, static archive %2)")
                    .arg(libusbVersion, libusbStaticArchive));
-  } else if (macosTarget) {
+  } else if (localBuild && macosTarget) {
     emit logLine(QStringLiteral("macOS wired Xbox/PDP input: disabled by export settings"));
   }
 
@@ -1110,12 +1251,8 @@ void PipelineWorker::run(PipelineRequest request) {
     removeExportEntry(failedArchive);
     emit logLine(QStringLiteral("Creating verified package ZIP: %1")
                    .arg(outputArchive));
-    const QMap<QString, QByteArray> rootFiles{
-      { QStringLiteral("game.manifest.json"),
-        QJsonDocument(gameManifestForRequest(request)).toJson(QJsonDocument::Indented) },
-    };
     if (!createPackageArchive(
-          sourceDirectory, rootDirectoryName, stagingArchive, error, rootFiles,
+          sourceDirectory, rootDirectoryName, stagingArchive, error, {},
           [this]() { return cancellationRequested(); })) {
       removeExportEntry(stagingArchive);
       return false;
@@ -1169,7 +1306,8 @@ void PipelineWorker::run(PipelineRequest request) {
     return true;
   };
   if (!writeText(QDir(projectDir).filePath(QStringLiteral(".gitignore")),
-                 QStringLiteral("# Temporary PSXRecomp Studio project\n*\n"), error)) {
+                 QStringLiteral("# Generated PSXRecomp source repository\n"
+                                "/build*/\n/.cache/\n/local-*.cmake\n.DS_Store\n"), error)) {
     fail(error, workspace);
     return;
   }
@@ -1220,6 +1358,10 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     emit logLine(QStringLiteral("Direct PFX signing identity: %1").arg(signingIdentityName));
     emit logLine(QStringLiteral("The certificate remains file-backed; no Keychain import will occur."));
+  } else if (!localBuild) {
+    emit logLine(sourceExport
+      ? QStringLiteral("Export mode: portable source repository; no package signing is performed.")
+      : QStringLiteral("Build backend: authenticated CI worker; the generated source repository contains no signing secret."));
   } else if (macosTarget) {
     emit logLine(QStringLiteral("macOS package signing: not requested; the app will be delivered unsigned."));
   } else if (windowsTarget) {
@@ -1457,8 +1599,8 @@ void PipelineWorker::run(PipelineRequest request) {
       recompilerConfigureArguments << QStringLiteral("-DCMAKE_C_COMPILER=%1").arg(hostClang)
                                    << QStringLiteral("-DCMAKE_CXX_COMPILER=%1").arg(hostClangxx);
     } else {
-      recompilerConfigureArguments << QStringLiteral("-DCMAKE_C_COMPILER=%1").arg(linuxGcc)
-                                   << QStringLiteral("-DCMAKE_CXX_COMPILER=%1").arg(linuxGxx);
+      recompilerConfigureArguments << QStringLiteral("-DCMAKE_C_COMPILER=%1").arg(hostLinuxGcc)
+                                   << QStringLiteral("-DCMAKE_CXX_COMPILER=%1").arg(hostLinuxGxx);
     }
   }
   QStringList recompilerBuildArguments{
@@ -1698,14 +1840,6 @@ void PipelineWorker::run(PipelineRequest request) {
     ? QDir(projectDir).filePath(QStringLiteral("AppIcon.rc"))
     : macosTarget ? QDir(projectDir).filePath(QStringLiteral("Info.plist"))
                   : QString();
-  const QString dependencyCachePath = QDir(
-    QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
-      .filePath(QStringLiteral("dependencies"));
-  if (directoryPackageTarget && !QDir().mkpath(dependencyCachePath)) {
-    fail(QStringLiteral("Could not create the Studio dependency cache: %1")
-           .arg(dependencyCachePath), workspace);
-    return;
-  }
   if (windowsTarget) {
     if (!createIco(iconSourcePath, iconPath, error) ||
         !writeText(platformMetadataPath, makeWindowsResource(iconPath), error)) {
@@ -1733,17 +1867,235 @@ void PipelineWorker::run(PipelineRequest request) {
       return;
     }
   }
+
+  const QString sourceProofDir = QDir(projectDir).filePath(QStringLiteral("proof"));
+  const QString packageResourcesDir =
+    QDir(projectDir).filePath(QStringLiteral("package-resources"));
+  const QString packagedBiosDir = QDir(packageResourcesDir).filePath(QStringLiteral("bios"));
+  const QString packagedGameDir = QDir(packageResourcesDir).filePath(QStringLiteral("game"));
+  const QString packagedDiscDir = QDir(packageResourcesDir).filePath(QStringLiteral("disc"));
+  const QString packagedSeedsDir = QDir(packageResourcesDir).filePath(QStringLiteral("seeds"));
+  for (const auto& path : { sourceProofDir, packageResourcesDir, packagedBiosDir,
+                            packagedGameDir, packagedDiscDir, packagedSeedsDir }) {
+    if (!QDir().mkpath(path)) {
+      fail(QStringLiteral("Could not create generated project directory %1.").arg(path), workspace);
+      return;
+    }
+  }
+  if (!copyFileReplacing(seedsPath,
+                         QDir(proofDir).filePath(QStringLiteral("ghidra_funcs.txt")), error) ||
+      !copyDirectoryTree(proofDir, sourceProofDir, error) ||
+      !copyFileReplacing(biosPath,
+                         QDir(packagedBiosDir).filePath(QStringLiteral("SCPH1001.BIN")), error) ||
+      !copyFileReplacing(exePath,
+                         QDir(packagedGameDir).filePath(game.bootFileName), error) ||
+      !copyFileReplacing(seedsPath,
+                         QDir(packagedSeedsDir).filePath(QStringLiteral("ghidra_funcs.txt")), error)) {
+    fail(error, workspace);
+    return;
+  }
+  for (const auto& file : disc.files) {
+    if (cancellationRequested()) {
+      QDir(workspace).removeRecursively();
+      emit cancelled();
+      return;
+    }
+    emit logLine(QStringLiteral("Replicating %1 into the generated source repository")
+                   .arg(file.packagedName));
+    if (!copyFileReplacing(file.sourcePath,
+                           QDir(packagedDiscDir).filePath(file.packagedName), error)) {
+      fail(error, workspace);
+      return;
+    }
+  }
+  const QString sourcePackagedDiscName = QFileInfo(disc.cuePath).fileName();
+  if (!disc.rewrittenCue.isEmpty() &&
+      !writeText(QDir(packagedDiscDir).filePath(sourcePackagedDiscName),
+                 disc.rewrittenCue, error)) {
+    fail(error, workspace);
+    return;
+  }
+  const QString sourceFinalToml = makeGameToml(
+    request, game,
+    QStringLiteral("game/%1").arg(game.bootFileName),
+    QStringLiteral("disc/%1").arg(sourcePackagedDiscName),
+    QStringLiteral("seeds/ghidra_funcs.txt"),
+    QStringLiteral("generated"));
+  if (!writeText(QDir(packageResourcesDir).filePath(QStringLiteral("game.toml")),
+                 sourceFinalToml, error) ||
+      !createProofArchive(sourceProofDir,
+                          QDir(packageResourcesDir).filePath(
+                            QStringLiteral("PSXRecomp-Proof.zip")), error) ||
+      !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
+                 gameManifestForRequest(request), error)) {
+    fail(error, workspace);
+    return;
+  }
+
+  emit logLine(QStringLiteral("Replicating portable runtime and build sources."));
+  if (!replicateFrameworkSources(
+        request.frameworkRoot,
+        QDir(projectDir).filePath(QStringLiteral("framework")), error)) {
+    fail(error, workspace);
+    return;
+  }
   const QString cmakeListsPath = QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt"));
   if (!writeText(cmakeListsPath,
-                 makeProjectCMake(request, game, bundleName, bundleId, platformMetadataPath,
-                                  iconPath, dependencyCachePath,
-                                  biosFull, biosDispatch, gameFull, gameDispatch,
-                                  effectiveBiosCrc),
+                 generatedProjectCMake(request, game, bundleName, bundleId,
+                                       effectiveBiosCrc),
                  error)) {
     fail(error, workspace);
     return;
   }
-  const QString mingwToolchainPath = QDir(projectDir).filePath(QStringLiteral("mingw-toolchain.cmake"));
+
+  QByteArray commitOutput;
+  if (!runCommand(git,
+                  { QStringLiteral("init"), QStringLiteral("--initial-branch=main") },
+                  projectDir, QStringLiteral("git init --initial-branch=main"), 60000) ||
+      !runCommand(git,
+                  { QStringLiteral("config"), QStringLiteral("user.name"),
+                    QStringLiteral("PSXRecomp Studio") },
+                  projectDir, QStringLiteral("git config user.name <studio>"), 30000) ||
+      !runCommand(git,
+                  { QStringLiteral("config"), QStringLiteral("user.email"),
+                    QStringLiteral("studio@psxrecomp.local") },
+                  projectDir, QStringLiteral("git config user.email <studio>"), 30000) ||
+      !runCommand(git,
+                  { QStringLiteral("config"), QStringLiteral("core.compression"),
+                    QStringLiteral("1") },
+                  projectDir, QStringLiteral("git config core.compression 1"), 30000) ||
+      !runCommand(git, { QStringLiteral("add"), QStringLiteral("-A") },
+                  projectDir, QStringLiteral("git add -A"), 2 * 60 * 60 * 1000) ||
+      !runCommand(git,
+                  { QStringLiteral("commit"), QStringLiteral("-m"),
+                    QStringLiteral("Generate %1 %2 source")
+                      .arg(request.windowTitle,
+                           targetPlatformDisplayName(request.targetPlatform)) },
+                  projectDir, QStringLiteral("git commit -m <generated source>"),
+                  2 * 60 * 60 * 1000) ||
+      !runCommand(git, { QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
+                  projectDir, QStringLiteral("git rev-parse HEAD"), 30000,
+                  &commitOutput)) {
+    if (cancellationRequested()) {
+      QDir(workspace).removeRecursively();
+      emit cancelled();
+    } else {
+      fail(QStringLiteral("The generated source repository could not be initialized and committed."),
+           workspace);
+    }
+    return;
+  }
+  const QString sourceCommit = QString::fromUtf8(commitOutput).trimmed().section('\n', -1);
+  if (sourceCommit.isEmpty()) {
+    fail(QStringLiteral("Git did not report the generated source commit."), workspace);
+    return;
+  }
+  emit logLine(QStringLiteral("Generated source repository commit: %1")
+                 .arg(sourceCommit));
+
+  if (sourceExport) {
+    nextStage(QStringLiteral("Deliver source repository"));
+    const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
+    if (request.exportAsZip) {
+      const QString sourceRootName = QFileInfo(output).completeBaseName();
+      if (!publishPackageZip(projectDir, sourceRootName, output)) {
+        if (cancellationRequested()) {
+          QDir(workspace).removeRecursively();
+          emit cancelled();
+        } else {
+          fail(error.isEmpty() ? QStringLiteral("The source repository ZIP could not be delivered.")
+                               : error,
+               workspace);
+        }
+        return;
+      }
+    } else {
+      const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+      const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
+      const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
+      removeExportEntry(staging);
+      removeExportEntry(backup);
+      if (!copyDirectoryTree(projectDir, staging, error)) {
+        removeExportEntry(staging);
+        fail(error, workspace);
+        return;
+      }
+      QByteArray deliveredCommit;
+      if (!runCommand(git, { QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
+                      staging, QStringLiteral("git rev-parse HEAD <delivered source>"),
+                      30000, &deliveredCommit) ||
+          QString::fromUtf8(deliveredCommit).trimmed().section('\n', -1) != sourceCommit) {
+        removeExportEntry(staging);
+        fail(QStringLiteral("The delivered source repository did not preserve its Git commit."),
+             workspace);
+        return;
+      }
+      const bool hadExisting = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
+      if (hadExisting && !request.overwriteOutput) {
+        removeExportEntry(staging);
+        fail(QStringLiteral("The source output already exists and overwrite was not approved: %1")
+               .arg(output), workspace);
+        return;
+      }
+      if (hadExisting && !QDir().rename(output, backup)) {
+        removeExportEntry(staging);
+        fail(QStringLiteral("Could not preserve the previous source repository before replacement."),
+             workspace);
+        return;
+      }
+      if (!QDir().rename(staging, output)) {
+        if (hadExisting) QDir().rename(backup, output);
+        removeExportEntry(staging);
+        fail(QStringLiteral("Could not publish the generated source repository."), workspace);
+        return;
+      }
+      if (hadExisting && !removeExportEntry(backup)) {
+        emit logLine(QStringLiteral("Warning: previous source backup remains at %1").arg(backup));
+      }
+    }
+    emit logLine(QStringLiteral("Source repository created: %1").arg(output));
+    QDir(workspace).removeRecursively();
+    emit completed(output);
+    return;
+  }
+
+  if (remoteCiBuild) {
+    nextStage(QStringLiteral("Stage source repository for CI"));
+    const QString ciRoot = QDir(
+      QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
+        .filePath(QStringLiteral("org.psxrecomp.studio/psxrecomp-ci-sources"));
+    if (!QDir().mkpath(ciRoot)) {
+      fail(QStringLiteral("Could not create the local CI source-repository cache."), workspace);
+      return;
+    }
+    const QString ciRepository = QDir(ciRoot).filePath(
+      QStringLiteral("%1-%2-%3")
+        .arg(sanitizedFileStem(request.windowTitle),
+             targetPlatformKey(request.targetPlatform),
+             QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    if (!QDir().rename(projectDir, ciRepository) &&
+        (!copyDirectoryTree(projectDir, ciRepository, error) ||
+         !QDir(projectDir).removeRecursively())) {
+      fail(error.isEmpty()
+             ? QStringLiteral("Could not preserve the generated Git repository for CI upload.")
+             : error,
+           workspace);
+      return;
+    }
+    QDir(workspace).removeRecursively();
+    emit ciSourcePrepared(request, ciRepository, sourceCommit);
+    return;
+  }
+
+  const QString dependencyCachePath = QDir(
+    QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+      .filePath(QStringLiteral("dependencies"));
+  if (directoryPackageTarget && !QDir().mkpath(dependencyCachePath)) {
+    fail(QStringLiteral("Could not create the Studio dependency cache: %1")
+           .arg(dependencyCachePath), workspace);
+    return;
+  }
+  const QString mingwToolchainPath = QDir(workspace).filePath(QStringLiteral("local-mingw-toolchain.cmake"));
   if (crossWindowsTarget &&
       !writeText(mingwToolchainPath,
                  makeMingwToolchain(mingwGcc, mingwGxx, mingwWindres,
@@ -1751,7 +2103,7 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(error, workspace);
     return;
   }
-  const QString linuxToolchainPath = QDir(projectDir).filePath(QStringLiteral("linux-toolchain.cmake"));
+  const QString linuxToolchainPath = QDir(workspace).filePath(QStringLiteral("local-linux-toolchain.cmake"));
   if (crossLinuxTarget &&
       !writeText(linuxToolchainPath,
                  makeLinuxToolchain(linuxGcc, linuxGxx, linuxAr,
@@ -1776,7 +2128,9 @@ void PipelineWorker::run(PipelineRequest request) {
                        << QStringLiteral("-DCMAKE_BUILD_TYPE=Release");
   }
   configureArguments << QStringLiteral("-DPSX_LAUNCHER=OFF")
-                     << QStringLiteral("-DPSX_DEBUG_TOOLS=OFF");
+                     << QStringLiteral("-DPSX_DEBUG_TOOLS=OFF")
+                     << QStringLiteral("-DPSXRECOMP_DEPENDENCY_CACHE=%1")
+                          .arg(dependencyCachePath);
   if (crossWindowsTarget) {
     configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(mingwToolchainPath)
                        << QStringLiteral("-DPSX_STATIC_RUNTIME=ON")
@@ -1907,65 +2261,36 @@ void PipelineWorker::run(PipelineRequest request) {
       return;
     }
   }
-  nextStage(QStringLiteral("Embed disc, BIOS, and proof"));
+  nextStage(QStringLiteral("Verify CMake-staged resources"));
   const QString resourcesDir = directoryPackageTarget
     ? stagedApp
     : QDir(stagedApp).filePath(QStringLiteral("Contents/Resources"));
-  const QStringList requiredFrontendAssets{
+  const QStringList requiredResources{
     QStringLiteral("launcher.rml"),
     QStringLiteral("fonts/LatoLatin-Regular.ttf"),
     QStringLiteral("fonts/LatoLatin-Bold.ttf"),
     QStringLiteral("img/logo.png"),
     QStringLiteral("img/caret.png"),
+    QStringLiteral("bios/SCPH1001.BIN"),
+    QStringLiteral("game/%1").arg(game.bootFileName),
+    QStringLiteral("disc/%1").arg(sourcePackagedDiscName),
+    QStringLiteral("seeds/ghidra_funcs.txt"),
+    QStringLiteral("game.toml"),
+    QStringLiteral("PSXRecomp-Proof.zip"),
   };
-  for (const auto& relativePath : requiredFrontendAssets) {
+  for (const auto& relativePath : requiredResources) {
     const QString installedPath = QDir(resourcesDir).filePath(relativePath);
     if (!QFileInfo(installedPath).isFile()) {
-      fail(QStringLiteral("The staged %1 package is missing a settings-menu asset: %2")
+      fail(QStringLiteral("The CMake-staged %1 package is missing a required build resource: %2")
              .arg(targetPlatformDisplayName(request.targetPlatform), relativePath),
            workspace);
       return;
     }
   }
-  const QString packagedBiosDir = QDir(resourcesDir).filePath(QStringLiteral("bios"));
-  const QString packagedGameDir = QDir(resourcesDir).filePath(QStringLiteral("game"));
-  const QString packagedDiscDir = QDir(resourcesDir).filePath(QStringLiteral("disc"));
-  const QString packagedSeedsDir = QDir(resourcesDir).filePath(QStringLiteral("seeds"));
-  for (const auto& path : { resourcesDir, packagedBiosDir, packagedGameDir,
-                            packagedDiscDir, packagedSeedsDir }) {
-    if (!QDir().mkpath(path)) {
-      fail(QStringLiteral("Could not create app resource directory %1.").arg(path), workspace);
-      return;
-    }
-  }
-  if (!copyFileReplacing(biosPath, QDir(packagedBiosDir).filePath(QStringLiteral("SCPH1001.BIN")), error) ||
-      !copyFileReplacing(exePath, QDir(packagedGameDir).filePath(game.bootFileName), error) ||
-      !copyFileReplacing(seedsPath, QDir(packagedSeedsDir).filePath(QStringLiteral("ghidra_funcs.txt")), error) ||
-      !copyFileReplacing(seedsPath, QDir(proofDir).filePath(QStringLiteral("ghidra_funcs.txt")), error)) {
-    fail(error, workspace);
-    return;
-  }
-  for (const auto& file : disc.files) {
-    emit logLine(QStringLiteral("Embedding %1").arg(file.packagedName));
-    if (!copyFileReplacing(file.sourcePath, QDir(packagedDiscDir).filePath(file.packagedName), error)) {
-      fail(error, workspace);
-      return;
-    }
-  }
-  const QString packagedDiscName = QFileInfo(disc.cuePath).fileName();
-  if (!disc.rewrittenCue.isEmpty() &&
-      !writeText(QDir(packagedDiscDir).filePath(packagedDiscName), disc.rewrittenCue, error)) {
-    fail(error, workspace);
-    return;
-  }
-  const QString finalToml = makeGameToml(
-    request, game,
-    QStringLiteral("game/%1").arg(game.bootFileName),
-    QStringLiteral("disc/%1").arg(packagedDiscName),
-    QStringLiteral("seeds/ghidra_funcs.txt"),
-    QStringLiteral("generated"));
-  if (!writeText(QDir(resourcesDir).filePath(QStringLiteral("game.toml")), finalToml, error)) {
-    fail(error, workspace);
+  const QString stagedGameManifest =
+    QDir(stageDir).filePath(QStringLiteral("game.manifest.json"));
+  if (!QFileInfo(stagedGameManifest).isFile()) {
+    fail(QStringLiteral("CMake did not stage game.manifest.json during the build."), workspace);
     return;
   }
 
@@ -2815,8 +3140,20 @@ void PipelineWorker::run(PipelineRequest request) {
   if (request.exportAsZip) {
     const QString outputArchive = QDir(request.outputDirectory).filePath(
       exportOutputName(request));
-    if (!publishPackageZip(
-          deliveryApp, bundleName + QStringLiteral(".app"), outputArchive)) {
+    const QString macZipRoot = QDir(workspace).filePath(QStringLiteral("macos-package-root"));
+    const QString macZipApp = QDir(macZipRoot).filePath(bundleName + QStringLiteral(".app"));
+    QDir(macZipRoot).removeRecursively();
+    if (!QDir().mkpath(macZipRoot) ||
+        !runCommand(QStringLiteral("/usr/bin/ditto"),
+                    { deliveryApp, macZipApp }, workspace,
+                    QStringLiteral("ditto <verified app> <CMake package root>"),
+                    60 * 60 * 1000) ||
+        !copyFileReplacing(stagedGameManifest,
+                           QDir(macZipRoot).filePath(QStringLiteral("game.manifest.json")),
+                           error) ||
+        !verifyPackagedApp(macZipApp, QStringLiteral("<CMake package-root app>")) ||
+        !publishPackageZip(macZipRoot, {}, outputArchive)) {
+      QDir(macZipRoot).removeRecursively();
       if (cancellationRequested()) {
         QDir(deliveryApp).removeRecursively();
         QDir(workspace).removeRecursively();
@@ -2829,6 +3166,7 @@ void PipelineWorker::run(PipelineRequest request) {
       }
       return;
     }
+    QDir(macZipRoot).removeRecursively();
     removeTree(deliveryApp, false);
     emit logLine(QStringLiteral("macOS ZIP created: %1").arg(outputArchive));
     QDir(workspace).removeRecursively();

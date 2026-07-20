@@ -3,6 +3,7 @@
 #include "PipelineSupport.h"
 #include "SteganosClient.h"
 
+#include <QAbstractItemView>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>

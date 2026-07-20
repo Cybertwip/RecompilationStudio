@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "CiPanel.h"
 #include "DiscCatalog.h"
 #include "PipelineSupport.h"
 #include "PipelineWorker.h"
@@ -39,11 +40,14 @@
 #include <QSet>
 #include <QStandardPaths>
 #include <QTemporaryFile>
+#include <QTabWidget>
 #include <QThread>
 #include <QUrl>
+#include <QSysInfo>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 
 namespace psxstudio {
 
@@ -172,7 +176,17 @@ MainWindow::MainWindow(QWidget* parent)
   headerLayout->addWidget(themeButton_, 0, Qt::AlignTop);
   root->addWidget(header);
 
-  formsContainer_ = new QWidget(central);
+  tabs_ = new QTabWidget(central);
+  tabs_->setObjectName(QStringLiteral("studioTabs"));
+  tabs_->setDocumentMode(true);
+  tabs_->setMovable(false);
+  tabs_->setUsesScrollButtons(false);
+  auto* exportPage = new QWidget(tabs_);
+  auto* exportRoot = new QVBoxLayout(exportPage);
+  exportRoot->setContentsMargins(0, 10, 0, 0);
+  exportRoot->setSpacing(14);
+
+  formsContainer_ = new QWidget(exportPage);
   formsLayout_ = new QGridLayout(formsContainer_);
   formsLayout_->setContentsMargins(0, 0, 0, 0);
   formsLayout_->setHorizontalSpacing(14);
@@ -191,22 +205,16 @@ MainWindow::MainWindow(QWidget* parent)
   auto* platformLabel = new QLabel(QStringLiteral("Platform"), platformRow);
   platformLabel->setMinimumWidth(142);
   platformCombo_ = new QComboBox(platformRow);
-#if defined(Q_OS_MACOS)
   platformCombo_->addItem(QStringLiteral("All"), targetPlatformKey(TargetPlatform::All));
   platformCombo_->addItem(QStringLiteral("macOS"), targetPlatformKey(TargetPlatform::MacOS));
   platformCombo_->addItem(QStringLiteral("Windows"), targetPlatformKey(TargetPlatform::Windows));
   platformCombo_->addItem(QStringLiteral("Linux"), targetPlatformKey(TargetPlatform::Linux));
-#else
-  const auto hostPlatform = hostTargetPlatform();
-  platformCombo_->addItem(targetPlatformDisplayName(hostPlatform),
-                          targetPlatformKey(hostPlatform));
-#endif
   configureReadOnlyComboBox(platformCombo_);
   platformCombo_->setCurrentIndex(0);
   platformLayout->addWidget(platformLabel);
   platformLayout->addWidget(platformCombo_, 1);
   inputLayout->addWidget(platformRow);
-  platformRow->setVisible(hostCanSelectTargetPlatform());
+  platformRow->setVisible(true);
 
   batchCheck_ = new QCheckBox(QStringLiteral("Batch"), inputCard_);
   batchCheck_->setToolTip(
@@ -282,8 +290,13 @@ MainWindow::MainWindow(QWidget* parent)
   exportAsZip_ = new QCheckBox(QStringLiteral("Export as zip"), inputCard_);
   exportAsZip_->setChecked(true);
   exportAsZip_->setToolTip(
-    QStringLiteral("Create one ZIP per export. macOS keeps the .app at ZIP root; Windows and Linux place package contents at ZIP root."));
+    QStringLiteral("Create one ZIP per export. Source ZIPs retain their initialized Git repository; build ZIPs contain the verified native package."));
   inputLayout->addWidget(exportAsZip_);
+  useCi_ = new QCheckBox(QStringLiteral("Use CI"), inputCard_);
+  useCi_->setObjectName(QStringLiteral("useCiCheckBox"));
+  useCi_->setToolTip(
+    QStringLiteral("Build mode only. Keep one compatible build local and dispatch remaining platform or queued work to authenticated CI workers."));
+  inputLayout->addWidget(useCi_);
   inputLayout->addStretch(1);
 
   toolsCard_ = makeCard(QStringLiteral("toolsCard"), formsContainer_);
@@ -351,7 +364,7 @@ MainWindow::MainWindow(QWidget* parent)
   brandingOptions->addStretch(1);
   brandingLayout->addLayout(brandingOptions);
 
-  formsScroll_ = new QScrollArea(central);
+  formsScroll_ = new QScrollArea(exportPage);
   formsScroll_->setFrameShape(QFrame::NoFrame);
   formsScroll_->setWidgetResizable(true);
   formsScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -359,9 +372,9 @@ MainWindow::MainWindow(QWidget* parent)
   formsScroll_->setMinimumHeight(250);
   formsScroll_->setMaximumHeight(390);
   formsScroll_->setWidget(formsContainer_);
-  root->addWidget(formsScroll_);
+  exportRoot->addWidget(formsScroll_);
 
-  statusCard_ = makeCard(QStringLiteral("statusCard"), central);
+  statusCard_ = makeCard(QStringLiteral("statusCard"), exportPage);
   auto* statusLayout = new QVBoxLayout(statusCard_);
   statusLayout->setContentsMargins(18, 14, 18, 14);
   statusLayout->setSpacing(9);
@@ -385,23 +398,38 @@ MainWindow::MainWindow(QWidget* parent)
   statusLayout->addLayout(statusHeader);
   statusLayout->addWidget(progressBar_);
   statusLayout->addWidget(logView_, 1);
-  root->addWidget(statusCard_, 1);
+  exportRoot->addWidget(statusCard_, 1);
 
   auto* actions = new QHBoxLayout();
   revealButton_ = new QPushButton(themedIcon(oclero::qlementine::icons::Icons16::File_FolderOpen),
-                                  QStringLiteral("Reveal Output"), central);
+                                  QStringLiteral("Reveal Output"), exportPage);
   revealButton_->setEnabled(false);
-  cancelButton_ = new QPushButton(QStringLiteral("Cancel"), central);
+  cancelButton_ = new QPushButton(QStringLiteral("Cancel"), exportPage);
   cancelButton_->setEnabled(false);
+  exportModeCombo_ = new QComboBox(exportPage);
+  exportModeCombo_->setObjectName(QStringLiteral("exportModeComboBox"));
+  exportModeCombo_->addItem(QStringLiteral("Source"), exportModeKey(ExportMode::Source));
+  exportModeCombo_->addItem(QStringLiteral("Build"), exportModeKey(ExportMode::Build));
+  configureReadOnlyComboBox(exportModeCombo_);
+  exportModeCombo_->setMinimumWidth(116);
+  exportModeCombo_->setToolTip(
+    QStringLiteral("Source exports an initialized, portable Git repository. Build compiles and packages it locally or with CI."));
   buildButton_ = new QPushButton(themedIcon(oclero::qlementine::icons::Icons16::Action_Build),
-                                 QStringLiteral("Build Signed .app"), central);
+                                 QStringLiteral("Export"), exportPage);
+  buildButton_->setObjectName(QStringLiteral("exportButton"));
   buildButton_->setDefault(true);
-  buildButton_->setMinimumWidth(164);
+  buildButton_->setMinimumWidth(132);
   actions->addWidget(revealButton_);
   actions->addStretch(1);
   actions->addWidget(cancelButton_);
+  actions->addWidget(exportModeCombo_);
   actions->addWidget(buildButton_);
-  root->addLayout(actions);
+  exportRoot->addLayout(actions);
+
+  ciPanel_ = new ci::CiPanel(tabs_);
+  tabs_->addTab(exportPage, QStringLiteral("Export"));
+  tabs_->addTab(ciPanel_, QStringLiteral("CI"));
+  root->addWidget(tabs_, 1);
 
   setCentralWidget(central);
   reflowForms();
@@ -425,12 +453,17 @@ MainWindow::MainWindow(QWidget* parent)
     logView_->appendPlainText(line);
   });
   connect(worker_, &PipelineWorker::completed, this, &MainWindow::onCompleted);
+  connect(worker_, &PipelineWorker::ciSourcePrepared,
+          this, &MainWindow::onCiSourcePrepared);
   connect(worker_, &PipelineWorker::failed, this, &MainWindow::onFailed);
   connect(worker_, &PipelineWorker::cancelled, this, [this]() {
+    workerActive_ = false;
     pendingRequests_.clear();
-    stageLabel_->setText(QStringLiteral("Cancelled"));
-    logView_->appendPlainText(QStringLiteral("Build cancelled."));
-    setBusy(false);
+    if (cancelling_) {
+      finishIfIdle();
+      return;
+    }
+    onFailed(QStringLiteral("The export was cancelled unexpectedly."), {});
   });
   workerThread_->start();
 
@@ -446,6 +479,26 @@ MainWindow::MainWindow(QWidget* parent)
   connect(skipBiosBoot_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
   connect(macosGipGamepad_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
   connect(exportAsZip_, &QCheckBox::toggled, this, &MainWindow::updatePlatformControls);
+  connect(exportModeCombo_, &QComboBox::currentIndexChanged,
+          this, &MainWindow::updateExportMode);
+  connect(useCi_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
+  connect(ciPanel_, &ci::CiPanel::authenticationStateChanged,
+          this, &MainWindow::updateBuildButton);
+  connect(ciPanel_, &ci::CiPanel::buildersChanged,
+          this, &MainWindow::updateBuildButton);
+  connect(ciPanel_, &ci::CiPanel::logLine, this, [this](const QString& line) {
+    logView_->appendPlainText(line);
+  });
+  connect(ciPanel_, &ci::CiPanel::buildProgress, this,
+          [this](const QString&, const QString& text) {
+            if (!workerActive_) stageLabel_->setText(QStringLiteral("CI · %1").arg(text));
+          });
+  connect(ciPanel_, &ci::CiPanel::buildCompleted,
+          this, &MainWindow::onCiBuildCompleted);
+  connect(ciPanel_, &ci::CiPanel::buildFailed,
+          this, &MainWindow::onCiBuildFailed);
+  connect(ciPanel_, &ci::CiPanel::buildCancelled,
+          this, &MainWindow::onCiBuildCancelled);
   connect(themeManager_, &oclero::qlementine::ThemeManager::currentThemeChanged,
           this, [this]() {
             QSettings().setValue(QStringLiteral("app/theme"), themeManager_->currentTheme());
@@ -459,6 +512,7 @@ MainWindow::MainWindow(QWidget* parent)
 
   loadSettings();
   updateBatchMode();
+  updateExportMode();
   updatePlatformControls();
   updateBiosPatchControls();
   applyTheme();
@@ -618,10 +672,8 @@ QString MainWindow::detectGhidraHome() const {
 
 void MainWindow::loadSettings() {
   QSettings settings;
-  const QString platformKey = hostCanSelectTargetPlatform()
-    ? settings.value(QStringLiteral("app/platform"),
-                     targetPlatformKey(hostTargetPlatform())).toString()
-    : targetPlatformKey(hostTargetPlatform());
+  const QString platformKey = settings.value(
+    QStringLiteral("app/platform"), targetPlatformKey(hostTargetPlatform())).toString();
   const int platformIndex = platformCombo_->findData(platformKey);
   platformCombo_->setCurrentIndex(platformIndex >= 0 ? platformIndex : 0);
   batchCheck_->setChecked(settings.value(QStringLiteral("batch/enabled"), false).toBool());
@@ -643,6 +695,11 @@ void MainWindow::loadSettings() {
   macosGipGamepad_->setChecked(
     settings.value(QStringLiteral("runtime/macos_gip_gamepad"), true).toBool());
   exportAsZip_->setChecked(settings.value(QStringLiteral("export/as_zip"), true).toBool());
+  const QString exportMode = settings.value(
+    QStringLiteral("export/mode"), exportModeKey(ExportMode::Build)).toString();
+  const int exportModeIndex = exportModeCombo_->findData(exportMode);
+  exportModeCombo_->setCurrentIndex(exportModeIndex >= 0 ? exportModeIndex : 1);
+  useCi_->setChecked(settings.value(QStringLiteral("export/use_ci"), false).toBool());
 
   if (batchCheck_->isChecked() && QFileInfo(batchDirectoryEdit_->text()).isDir()) {
     populateBatchDirectory(batchDirectoryEdit_->text(), false);
@@ -670,6 +727,8 @@ void MainWindow::saveSettings() const {
   settings.remove(QStringLiteral("runtime/pad_mode"));
   settings.setValue(QStringLiteral("runtime/macos_gip_gamepad"), macosGipGamepad_->isChecked());
   settings.setValue(QStringLiteral("export/as_zip"), exportAsZip_->isChecked());
+  settings.setValue(QStringLiteral("export/mode"), exportModeCombo_->currentData().toString());
+  settings.setValue(QStringLiteral("export/use_ci"), useCi_->isChecked());
 }
 
 void MainWindow::chooseDisc() {
@@ -948,6 +1007,13 @@ void MainWindow::updateBatchMode() {
   reflowForms(true);
 }
 
+void MainWindow::updateExportMode() {
+  const bool buildMode = exportModeFromKey(exportModeCombo_->currentData().toString()) ==
+                         ExportMode::Build;
+  useCi_->setEnabled(buildMode && !cancelButton_->isEnabled());
+  updatePlatformControls();
+}
+
 void MainWindow::chooseBios() {
   const auto path = QFileDialog::getOpenFileName(
     this, QStringLiteral("Select SCPH1001.BIN"), QFileInfo(biosEdit_->text()).absolutePath(),
@@ -1012,13 +1078,16 @@ void MainWindow::chooseGhidraHome() {
 PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   PipelineRequest request;
   request.targetPlatform = targetPlatformFromKey(platformCombo_->currentData().toString());
+  request.exportMode = exportModeFromKey(exportModeCombo_->currentData().toString());
+  request.buildBackend = BuildBackend::Local;
+  request.useCi = request.exportMode == ExportMode::Build && useCi_->isChecked();
   request.cuePath = discEdit_->text();
   request.selectedBinPaths = selectedBins_;
   request.biosPath = biosEdit_->text();
   request.iconPath = iconEdit_->text();
   request.windowTitle = titleEdit_->text();
   request.outputDirectory = outputEdit_->text();
-  if (signingEnabled_->isChecked()) {
+  if (request.exportMode == ExportMode::Build && signingEnabled_->isChecked()) {
     request.certificatePath = certificateEdit_->text();
     request.certificatePassword = certificatePasswordEdit_->text();
   }
@@ -1074,6 +1143,70 @@ QString MainWindow::outputPathForRequest(const PipelineRequest& request) const {
   return QDir(request.outputDirectory).filePath(exportOutputName(request));
 }
 
+void MainWindow::planBuildBackends(QList<PipelineRequest>& requests) {
+  for (auto& request : requests) {
+    request.buildBackend = BuildBackend::Local;
+    request.ciBuilderId.clear();
+    request.ciBuilderName.clear();
+    request.ciBuilderEndpoint.clear();
+    request.ciArchitecture.clear();
+  }
+  if (requests.isEmpty() || requests.constFirst().exportMode != ExportMode::Build ||
+      !requests.constFirst().useCi || !ciPanel_ || !ciPanel_->canScheduleBuilds()) {
+    return;
+  }
+
+  int reservedLocal = -1;
+  for (int index = 0; index < requests.size(); ++index) {
+    if (requests.at(index).targetPlatform == hostTargetPlatform() &&
+        targetPlatformSupportedOnHost(requests.at(index).targetPlatform)) {
+      reservedLocal = index;
+      break;
+    }
+  }
+  if (reservedLocal < 0) {
+    for (int index = 0; index < requests.size(); ++index) {
+      if (targetPlatformSupportedOnHost(requests.at(index).targetPlatform)) {
+        reservedLocal = index;
+        break;
+      }
+    }
+  }
+
+  const QString hostArchitecture = QSysInfo::currentCpuArchitecture();
+  for (int index = 0; index < requests.size(); ++index) {
+    auto& request = requests[index];
+    const bool requiresLocalSigning = request.targetPlatform == TargetPlatform::MacOS &&
+                                      !request.certificatePath.isEmpty();
+    if (index == reservedLocal || requiresLocalSigning) continue;
+    const QString preferredArchitecture =
+      request.targetPlatform == TargetPlatform::Windows ||
+      request.targetPlatform == TargetPlatform::Linux
+        ? QStringLiteral("x86_64")
+        : request.targetPlatform == hostTargetPlatform()
+            ? hostArchitecture : QString();
+    const auto builder = ciPanel_->chooseBuilder(request.targetPlatform,
+                                                  preferredArchitecture);
+    if (!builder.isValid() ||
+        ((request.targetPlatform == TargetPlatform::Windows ||
+          request.targetPlatform == TargetPlatform::Linux) &&
+         builder.architecture != QStringLiteral("x86_64"))) {
+      continue;
+    }
+    request.buildBackend = BuildBackend::RemoteCi;
+    request.ciBuilderId = builder.id;
+    request.ciBuilderName = builder.name;
+    request.ciBuilderEndpoint = builder.endpoint.toString(QUrl::FullyEncoded);
+    request.ciArchitecture = builder.architecture;
+  }
+
+  std::stable_sort(requests.begin(), requests.end(), [](const PipelineRequest& left,
+                                                        const PipelineRequest& right) {
+    return left.buildBackend == BuildBackend::RemoteCi &&
+           right.buildBackend != BuildBackend::RemoteCi;
+  });
+}
+
 void MainWindow::startBuild() {
   QString accessError;
   if (!verifyOutputDirectoryAccess(outputEdit_->text(), accessError)) {
@@ -1091,6 +1224,28 @@ void MainWindow::startBuild() {
                          QStringLiteral("Add at least one game to the batch list."));
     return;
   }
+  if (requests.constFirst().useCi && !requests.constFirst().exportAsZip) {
+    QMessageBox::warning(this, QStringLiteral("CI builds are ZIP artifacts"),
+      QStringLiteral("Enable Export as zip before using CI. Steganos builders return verified ZIP artifacts."));
+    return;
+  }
+
+  planBuildBackends(requests);
+  QStringList unavailableTargets;
+  for (const auto& request : requests) {
+    if (request.exportMode == ExportMode::Build &&
+        request.buildBackend == BuildBackend::Local &&
+        !targetPlatformSupportedOnHost(request.targetPlatform)) {
+      unavailableTargets.append(targetPlatformDisplayName(request.targetPlatform));
+    }
+  }
+  unavailableTargets.removeDuplicates();
+  if (!unavailableTargets.isEmpty()) {
+    QMessageBox::warning(this, QStringLiteral("CI builder unavailable"),
+      QStringLiteral("This host cannot build %1 locally, and no matching authenticated CI worker is available.")
+        .arg(unavailableTargets.join(QStringLiteral(", "))));
+    return;
+  }
 
   QSet<QString> uniqueOutputs;
   QStringList duplicateOutputs;
@@ -1098,14 +1253,9 @@ void MainWindow::startBuild() {
   for (const auto& request : requests) {
     const QString outputPath = outputPathForRequest(request);
     const QString folded = QDir::cleanPath(outputPath).toCaseFolded();
-    if (uniqueOutputs.contains(folded)) {
-      duplicateOutputs.append(outputPath);
-    } else {
-      uniqueOutputs.insert(folded);
-    }
-    if (QFileInfo::exists(outputPath)) {
-      existingOutputs.append(outputPath);
-    }
+    if (uniqueOutputs.contains(folded)) duplicateOutputs.append(outputPath);
+    else uniqueOutputs.insert(folded);
+    if (QFileInfo::exists(outputPath)) existingOutputs.append(outputPath);
   }
   duplicateOutputs.removeDuplicates();
   if (!duplicateOutputs.isEmpty()) {
@@ -1120,41 +1270,60 @@ void MainWindow::startBuild() {
   if (!existingOutputs.isEmpty()) {
     const auto answer = QMessageBox::question(
       this, QStringLiteral("Replace existing outputs?"),
-      QStringLiteral("%1 queued output%2 already exist%3. Replace %4 with the new build%5?")
+      QStringLiteral("%1 queued output%2 already exist%3. Replace %4 with the new export%5?")
         .arg(existingOutputs.size())
         .arg(existingOutputs.size() == 1 ? QString() : QStringLiteral("s"))
         .arg(existingOutputs.size() == 1 ? QStringLiteral("s") : QString())
         .arg(existingOutputs.size() == 1 ? QStringLiteral("it") : QStringLiteral("them"))
         .arg(existingOutputs.size() == 1 ? QString() : QStringLiteral("s")),
       QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (answer != QMessageBox::Yes) {
-      return;
-    }
+    if (answer != QMessageBox::Yes) return;
     overwrite = true;
   }
-
-  for (auto& request : requests) {
-    request.overwriteOutput = overwrite;
-  }
+  for (auto& request : requests) request.overwriteOutput = overwrite;
 
   saveSettings();
   pendingRequests_ = requests;
   completedOutputs_.clear();
+  activeCiJobs_.clear();
   totalRequestCount_ = pendingRequests_.size();
   activeRequestIndex_ = 0;
   outputAppPath_.clear();
+  workerActive_ = false;
+  exportFailed_ = false;
+  cancelling_ = false;
   revealButton_->setEnabled(false);
   logView_->clear();
+
+  int ciCount = 0;
+  for (const auto& request : std::as_const(pendingRequests_)) {
+    if (request.buildBackend == BuildBackend::RemoteCi) ++ciCount;
+    logView_->appendPlainText(QStringLiteral("Plan · %1 · %2 · %3")
+      .arg(request.windowTitle,
+           targetPlatformDisplayName(request.targetPlatform),
+           request.buildBackend == BuildBackend::RemoteCi
+             ? QStringLiteral("CI: %1/%2").arg(request.ciBuilderName, request.ciArchitecture)
+             : request.exportMode == ExportMode::Source
+                 ? QStringLiteral("local source export")
+                 : QStringLiteral("local build")));
+  }
+  if (ciCount > 0) {
+    logView_->appendPlainText(QStringLiteral("%1 build%2 will be prepared for CI; one compatible slot remains local.")
+      .arg(ciCount).arg(ciCount == 1 ? QString() : QStringLiteral("s")));
+  }
   setBusy(true);
   startNextRequest();
 }
 
 void MainWindow::startNextRequest() {
+  if (workerActive_) return;
   if (pendingRequests_.isEmpty()) {
+    finishIfIdle();
     return;
   }
   activeRequest_ = pendingRequests_.takeFirst();
   ++activeRequestIndex_;
+  workerActive_ = true;
   if (totalRequestCount_ > 1) {
     logView_->appendPlainText(
       QStringLiteral("\n##### Export %1 of %2 — %3 (%4) #####")
@@ -1166,12 +1335,14 @@ void MainWindow::startNextRequest() {
 }
 
 void MainWindow::cancelBuild() {
-  if (worker_) {
-    pendingRequests_.clear();
-    worker_->requestCancel();
-    cancelButton_->setEnabled(false);
-    stageLabel_->setText(QStringLiteral("Cancelling…"));
-  }
+  if (cancelling_) return;
+  cancelling_ = true;
+  pendingRequests_.clear();
+  cancelButton_->setEnabled(false);
+  stageLabel_->setText(QStringLiteral("Cancelling local and CI work…"));
+  if (workerActive_ && worker_) worker_->requestCancel();
+  if (ciPanel_) ciPanel_->cancelAll();
+  finishIfIdle();
 }
 
 void MainWindow::revealOutput() {
@@ -1198,21 +1369,94 @@ void MainWindow::revealOutput() {
 }
 
 void MainWindow::onCompleted(const QString& appPath) {
-  completedOutputs_.append(appPath);
-  if (!pendingRequests_.isEmpty()) {
-    startNextRequest();
+  workerActive_ = false;
+  if (exportFailed_ || cancelling_) {
+    finishIfIdle();
     return;
   }
+  completedOutputs_.append(appPath);
+  startNextRequest();
+}
 
+void MainWindow::onCiSourcePrepared(PipelineRequest request,
+                                    const QString& repositoryPath,
+                                    const QString& commit) {
+  workerActive_ = false;
+  if (exportFailed_ || cancelling_) {
+    QDir(repositoryPath).removeRecursively();
+    finishIfIdle();
+    return;
+  }
+  ci::BuilderInfo builder;
+  builder.id = request.ciBuilderId;
+  builder.name = request.ciBuilderName;
+  builder.endpoint = QUrl(request.ciBuilderEndpoint);
+  builder.platform = targetPlatformKey(request.targetPlatform);
+  builder.architecture = request.ciArchitecture;
+  builder.online = true;
+  const QString jobId = ciPanel_->queueBuild(
+    request, builder, repositoryPath, commit, outputPathForRequest(request));
+  if (jobId.isEmpty()) {
+    QDir(repositoryPath).removeRecursively();
+    onFailed(QStringLiteral("The generated source repository could not be queued with the selected CI builder."),
+             repositoryPath);
+    return;
+  }
+  activeCiJobs_.insert(jobId);
+  startNextRequest();
+}
+
+void MainWindow::onCiBuildCompleted(const QString& jobId, const QString& outputPath) {
+  if (!activeCiJobs_.remove(jobId) || exportFailed_) return;
+  completedOutputs_.append(outputPath);
+  finishIfIdle();
+}
+
+void MainWindow::onCiBuildFailed(const QString& jobId,
+                                 const QString& message,
+                                 const QString& reportPath) {
+  if (!activeCiJobs_.remove(jobId) || exportFailed_ || cancelling_) return;
+  QString detail = message;
+  if (!reportPath.isEmpty()) {
+    detail += QStringLiteral("\n\nCI report: %1").arg(reportPath);
+  }
+  onFailed(detail, {});
+}
+
+void MainWindow::onCiBuildCancelled(const QString& jobId) {
+  activeCiJobs_.remove(jobId);
+  finishIfIdle();
+}
+
+void MainWindow::finishIfIdle() {
+  if (workerActive_ || !pendingRequests_.isEmpty() || !activeCiJobs_.isEmpty()) return;
+  if (cancelling_) {
+    progressBar_->setRange(0, 100);
+    progressBar_->setValue(0);
+    stageLabel_->setText(QStringLiteral("Cancelled"));
+    logView_->appendPlainText(QStringLiteral("Export cancelled."));
+    cancelling_ = false;
+    setBusy(false);
+    return;
+  }
+  if (!exportFailed_) finishSuccessfulExport();
+}
+
+void MainWindow::finishSuccessfulExport() {
   outputAppPath_ = completedOutputs_.size() == 1
     ? completedOutputs_.constFirst() : outputEdit_->text();
   progressBar_->setRange(0, 100);
   progressBar_->setValue(100);
+  const bool sourceMode = exportModeFromKey(exportModeCombo_->currentData().toString()) ==
+                          ExportMode::Source;
+  const QString noun = sourceMode ? QStringLiteral("source repository")
+                                  : QStringLiteral("package");
   stageLabel_->setText(completedOutputs_.size() == 1
-    ? QStringLiteral("Complete — package verified")
-    : QStringLiteral("Complete — %1 packages verified").arg(completedOutputs_.size()));
-  revealButton_->setEnabled(true);
+    ? QStringLiteral("Complete — %1 verified").arg(noun)
+    : QStringLiteral("Complete — %1 exports verified").arg(completedOutputs_.size()));
+  revealButton_->setEnabled(!completedOutputs_.isEmpty());
   setBusy(false);
+
   QStringList displayedOutputs = completedOutputs_;
   if (displayedOutputs.size() > 12) {
     const int omitted = displayedOutputs.size() - 12;
@@ -1221,31 +1465,38 @@ void MainWindow::onCompleted(const QString& appPath) {
                               .arg(omitted).arg(outputEdit_->text()));
   }
   QMessageBox::information(
-    this, completedOutputs_.size() == 1 ? QStringLiteral("App created")
+    this, completedOutputs_.size() == 1 ? QStringLiteral("Export complete")
                                         : QStringLiteral("Batch export complete"),
-    QStringLiteral("%1 package%2 created and verified:\n\n%3")
+    QStringLiteral("%1 %2%3 created and verified:\n\n%4")
       .arg(completedOutputs_.size())
-      .arg(completedOutputs_.size() == 1 ? QStringLiteral(" was") : QStringLiteral("s were"))
+      .arg(noun)
+      .arg(completedOutputs_.size() == 1 ? QString() : QStringLiteral("s"))
       .arg(displayedOutputs.join(QStringLiteral("\n"))));
 }
 
 void MainWindow::onFailed(const QString& message, const QString& workspacePath) {
+  if (exportFailed_) return;
+  exportFailed_ = true;
+  workerActive_ = false;
   pendingRequests_.clear();
+  if (worker_) worker_->requestCancel();
+  if (ciPanel_) ciPanel_->cancelAll();
+  activeCiJobs_.clear();
   progressBar_->setRange(0, 100);
   progressBar_->setValue(0);
-  stageLabel_->setText(QStringLiteral("Build failed"));
+  stageLabel_->setText(QStringLiteral("Export failed"));
   setBusy(false);
   QString detail = message;
   if (!workspacePath.isEmpty()) {
     detail += QStringLiteral("\n\nProof and intermediate artifacts were retained at:\n%1").arg(workspacePath);
   }
   if (!completedOutputs_.isEmpty()) {
-    detail += QStringLiteral("\n\n%1 earlier package%2 completed before this failure:\n%3")
+    detail += QStringLiteral("\n\n%1 earlier export%2 completed before this failure:\n%3")
       .arg(completedOutputs_.size())
       .arg(completedOutputs_.size() == 1 ? QString() : QStringLiteral("s"))
       .arg(completedOutputs_.join(QStringLiteral("\n")));
   }
-  QMessageBox::critical(this, QStringLiteral("Build failed"), detail);
+  QMessageBox::critical(this, QStringLiteral("Export failed"), detail);
 }
 
 void MainWindow::setBusy(bool busy) {
@@ -1270,6 +1521,9 @@ void MainWindow::setBusy(bool busy) {
   skipBiosBoot_->setEnabled(!busy);
   macosGipGamepad_->setEnabled(!busy);
   exportAsZip_->setEnabled(!busy);
+  exportModeCombo_->setEnabled(!busy);
+  useCi_->setEnabled(!busy &&
+    exportModeFromKey(exportModeCombo_->currentData().toString()) == ExportMode::Build);
   biosMuteAudio_->setEnabled(!busy && biosPatchEnabled_->isChecked());
   biosRemovePsGlyph_->setEnabled(!busy && biosPatchEnabled_->isChecked());
   if (!busy) {
@@ -1282,85 +1536,61 @@ void MainWindow::setBusy(bool busy) {
 void MainWindow::updatePlatformControls() {
   const auto selectedPlatform =
     targetPlatformFromKey(platformCombo_->currentData().toString());
+  const ExportMode exportMode =
+    exportModeFromKey(exportModeCombo_->currentData().toString());
+  const bool buildMode = exportMode == ExportMode::Build;
   const bool includesMacos = selectedPlatform == TargetPlatform::MacOS ||
                              selectedPlatform == TargetPlatform::All;
   const bool busy = cancelButton_ && cancelButton_->isEnabled();
-  const bool signingRequested = includesMacos && signingEnabled_->isChecked();
+  const bool signingRequested = buildMode && includesMacos &&
+                                signingEnabled_->isChecked();
   const bool zip = exportAsZip_->isChecked();
-  signingEnabled_->setVisible(includesMacos);
-  signingEnabled_->setEnabled(includesMacos && !busy);
-  certificateEdit_->parentWidget()->setEnabled(signingRequested && !busy);
-  certificatePasswordEdit_->parentWidget()->setEnabled(signingRequested && !busy);
+
+  signingEnabled_->setVisible(buildMode && includesMacos);
+  signingEnabled_->setEnabled(buildMode && includesMacos && !busy);
   certificateEdit_->parentWidget()->setVisible(signingRequested);
   certificatePasswordEdit_->parentWidget()->setVisible(signingRequested);
+  certificateEdit_->parentWidget()->setEnabled(signingRequested && !busy);
+  certificatePasswordEdit_->parentWidget()->setEnabled(signingRequested && !busy);
   macosGipGamepad_->setVisible(includesMacos);
   macosGipGamepad_->setEnabled(includesMacos && !busy);
-  const QString unsignedNote = selectedPlatform == TargetPlatform::Windows
-    ? QStringLiteral("Windows exports are currently delivered unsigned")
-    : QStringLiteral("Linux exports are currently delivered unsigned");
-  certificateEdit_->setToolTip(includesMacos
-    ? QStringLiteral("Optional PKCS#12 identity read directly by rcodesign")
-    : unsignedNote);
-  certificatePasswordEdit_->setToolTip(certificateEdit_->toolTip());
-  if (selectedPlatform == TargetPlatform::All) {
+  useCi_->setEnabled(buildMode && !busy);
+  exportAsZip_->setText(exportMode == ExportMode::Source
+    ? QStringLiteral("Export source as zip") : QStringLiteral("Export as zip"));
+
+  if (!buildMode) {
+    signingNote_->setText(QStringLiteral(
+      "Source export creates a portable, initialized Git repository with generated C, "
+      "runtime sources, package resources, CMake build rules, and proof artifacts. CI is not used."));
+    outputEdit_->setPlaceholderText(zip
+      ? QStringLiteral("Destination for source repository ZIPs")
+      : QStringLiteral("Destination for source Git repositories"));
+  } else if (selectedPlatform == TargetPlatform::All) {
     signingNote_->setText(signingRequested
-      ? QStringLiteral("macOS uses one-pass direct PFX signing with no Keychain import. Windows and Linux are unsigned.")
-      : QStringLiteral("macOS signing is optional; all three platform packages will be verified before delivery."));
+      ? QStringLiteral("Signed macOS builds stay local. Unsigned Windows/Linux work can be dispatched to CI in parallel.")
+      : QStringLiteral("Local and authenticated CI builders can co-operate on the three platform packages."));
     outputEdit_->setPlaceholderText(zip
       ? QStringLiteral("Destination for per-game macOS, Windows, and Linux ZIPs")
       : QStringLiteral("Destination for macOS, Windows, and Linux packages"));
-    buildButton_->setText(zip
-      ? (batchCheck_->isChecked() ? QStringLiteral("Batch Export All Platform ZIPs")
-                                  : QStringLiteral("Export All Platform ZIPs"))
-      : (batchCheck_->isChecked() ? QStringLiteral("Batch Export All Platforms")
-                                  : QStringLiteral("Export All Platforms")));
   } else if (selectedPlatform == TargetPlatform::MacOS) {
     signingNote_->setText(signingRequested
-      ? QStringLiteral("The PFX is read directly by rcodesign. No identity is imported into any Keychain.")
-      : QStringLiteral("Signing is optional. The unsigned app is hash-verified before and after delivery."));
+      ? QStringLiteral("The PFX is read directly by rcodesign. Signed macOS builds are kept on this host.")
+      : QStringLiteral("Signing is optional. Additional batch builds can use an authenticated macOS CI worker."));
     outputEdit_->setPlaceholderText(zip
       ? QStringLiteral("Destination for the macOS ZIP")
       : QStringLiteral("Destination for the macOS .app"));
-    buildButton_->setText(zip
-      ? (batchCheck_->isChecked() ? QStringLiteral("Batch Export macOS ZIPs")
-                                  : QStringLiteral("Export macOS ZIP"))
-      : (batchCheck_->isChecked()
-           ? (signingRequested ? QStringLiteral("Batch Build Signed Apps")
-                               : QStringLiteral("Batch Build macOS Apps"))
-           : (signingRequested ? QStringLiteral("Build Signed .app")
-                               : QStringLiteral("Build macOS App"))));
   } else if (selectedPlatform == TargetPlatform::Windows) {
-#if defined(Q_OS_WIN)
     signingNote_->setText(QStringLiteral(
-      "Windows exports use the native Visual Studio 2022 MSVC x64 toolchain and are delivered unsigned."));
-#else
-    signingNote_->setText(QStringLiteral(
-      "Windows exports use the installed x86_64-w64-mingw32 MinGW toolchain and are delivered unsigned."));
-#endif
+      "Windows builds use the local native/cross toolchain or an authenticated Windows CI worker."));
     outputEdit_->setPlaceholderText(zip
       ? QStringLiteral("Destination for the Windows ZIP")
       : QStringLiteral("Destination for the Windows app folder"));
-    buildButton_->setText(zip
-      ? (batchCheck_->isChecked() ? QStringLiteral("Batch Export Windows ZIPs")
-                                  : QStringLiteral("Export Windows ZIP"))
-      : (batchCheck_->isChecked() ? QStringLiteral("Batch Build Windows Apps")
-                                  : QStringLiteral("Build Windows App")));
   } else {
-#if defined(Q_OS_LINUX)
     signingNote_->setText(QStringLiteral(
-      "Linux exports use the native GCC toolchain, bundle SDL2, and are delivered unsigned."));
-#else
-    signingNote_->setText(QStringLiteral(
-      "Linux exports use the installed x86_64-unknown-linux-gnu toolchain, bundle SDL2, and are delivered unsigned."));
-#endif
+      "Linux builds use the local native/cross toolchain or an authenticated Linux CI worker."));
     outputEdit_->setPlaceholderText(zip
       ? QStringLiteral("Destination for the Linux ZIP")
       : QStringLiteral("Destination for the Linux app folder"));
-    buildButton_->setText(zip
-      ? (batchCheck_->isChecked() ? QStringLiteral("Batch Export Linux ZIPs")
-                                  : QStringLiteral("Export Linux ZIP"))
-      : (batchCheck_->isChecked() ? QStringLiteral("Batch Build Linux Apps")
-                                  : QStringLiteral("Build Linux App")));
   }
   updateBuildButton();
 }
@@ -1369,12 +1599,15 @@ void MainWindow::updateBuildButton() {
   if (cancelButton_->isEnabled()) {
     return;
   }
+  const ExportMode exportMode =
+    exportModeFromKey(exportModeCombo_->currentData().toString());
+  const bool buildMode = exportMode == ExportMode::Build;
   const bool brandingReady = !biosPatchEnabled_->isChecked() ||
     (!biosInitialSplashEdit_->text().isEmpty() && !biosHandoffImageEdit_->text().isEmpty());
   const auto selectedPlatform = targetPlatformFromKey(platformCombo_->currentData().toString());
   const bool includesMacos = selectedPlatform == TargetPlatform::MacOS ||
                              selectedPlatform == TargetPlatform::All;
-  const bool signingReady = !includesMacos || !signingEnabled_->isChecked() ||
+  const bool signingReady = !buildMode || !includesMacos || !signingEnabled_->isChecked() ||
     (!certificateEdit_->text().isEmpty() && !certificatePasswordEdit_->text().isEmpty());
   bool gameReady = !discEdit_->text().isEmpty() && !titleEdit_->text().trimmed().isEmpty();
   if (batchCheck_->isChecked()) {
@@ -1383,10 +1616,20 @@ void MainWindow::updateBuildButton() {
         return !entry.title.trimmed().isEmpty();
       });
   }
+  const bool ciReady = !buildMode || !useCi_->isChecked() ||
+                       (ciPanel_ && ciPanel_->canScheduleBuilds());
+  const auto selectedTargets = concreteTargetPlatforms(selectedPlatform);
+  const bool localPlatformReady = !buildMode || useCi_->isChecked() ||
+    std::all_of(selectedTargets.cbegin(), selectedTargets.cend(),
+                [](TargetPlatform platform) {
+                  return targetPlatformSupportedOnHost(platform);
+                });
   const bool ready = gameReady && !biosEdit_->text().isEmpty() &&
                      !outputEdit_->text().isEmpty() && !ghidraEdit_->text().isEmpty() &&
-                     signingReady && brandingReady;
+                     signingReady && brandingReady && ciReady && localPlatformReady;
+  buildButton_->setText(QStringLiteral("Export"));
   buildButton_->setEnabled(ready);
 }
+
 
 } // namespace psxstudio

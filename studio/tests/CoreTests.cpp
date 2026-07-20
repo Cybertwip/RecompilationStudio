@@ -299,6 +299,12 @@ int main(int argc, char** argv) {
   check(gipRequest.exportAsZip &&
           gipRequest.toJson().value(QStringLiteral("export_as_zip")).toBool(),
         QStringLiteral("ZIP export defaults enabled and is serialized"));
+  check(gipRequest.exportMode == psxstudio::ExportMode::Build &&
+          psxstudio::exportModeFromKey(QStringLiteral("SOURCE")) ==
+            psxstudio::ExportMode::Source &&
+          gipRequest.toJson().value(QStringLiteral("export_mode")).toString() ==
+            QStringLiteral("build"),
+        QStringLiteral("Source/Build export mode defaults and serialization"));
   gipRequest.windowTitle = QStringLiteral("Evil Zone (Europe)");
   gipRequest.targetPlatform = psxstudio::TargetPlatform::MacOS;
   check(psxstudio::exportOutputName(gipRequest) ==
@@ -340,7 +346,15 @@ int main(int argc, char** argv) {
   check(psxstudio::exportOutputName(gipRequest) ==
           QStringLiteral("Evil Zone (Europe)-Linux"),
         QStringLiteral("unpacked export output name remains available"));
+  gipRequest.exportMode = psxstudio::ExportMode::Source;
+  check(psxstudio::exportOutputName(gipRequest) ==
+          QStringLiteral("Evil Zone (Europe)-Linux-Source"),
+        QStringLiteral("unpacked source repository output name"));
   gipRequest.exportAsZip = true;
+  check(psxstudio::exportOutputName(gipRequest) ==
+          QStringLiteral("Evil Zone (Europe)-Linux-Source.zip"),
+        QStringLiteral("source repository ZIP output name"));
+  gipRequest.exportMode = psxstudio::ExportMode::Build;
   gipRequest.targetPlatform = psxstudio::hostTargetPlatform();
   check(gipRequest.targetPlatform == psxstudio::hostTargetPlatform() &&
           gipRequest.toJson().value(QStringLiteral("platform")).toString() ==
@@ -388,6 +402,81 @@ int main(int argc, char** argv) {
           gipRequest.toJson().value(QStringLiteral("platform")).toString() ==
             QStringLiteral("linux"),
         QStringLiteral("Linux platform selection round-trips through the request"));
+
+
+  psxstudio::GameDescription generatedGame;
+  generatedGame.bootFileName = QStringLiteral("SLUS_000.00");
+  generatedGame.serial = QStringLiteral("SLUS-00000");
+  generatedGame.textSize = 0x1000;
+  psxstudio::PipelineRequest generatedRequest;
+  generatedRequest.windowTitle = QStringLiteral("Portable Test Game");
+  generatedRequest.macosGipGamepad = false;
+  generatedRequest.frameworkRoot = QStringLiteral("/host-only/framework-root");
+  for (const auto platform : { psxstudio::TargetPlatform::MacOS,
+                               psxstudio::TargetPlatform::Windows,
+                               psxstudio::TargetPlatform::Linux }) {
+    generatedRequest.targetPlatform = platform;
+    const QString generatedCmake = psxstudio::generatedProjectCMake(
+      generatedRequest, generatedGame, QStringLiteral("Portable Test Game"),
+      QStringLiteral("org.psxrecomp.generated.test"), 0x12345678u);
+    check(generatedCmake.contains(QStringLiteral(
+            "${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/$<CONFIG>")) &&
+          generatedCmake.contains(QStringLiteral(
+            "${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json")) &&
+          generatedCmake.contains(QStringLiteral(
+            "copy_if_different \"${_PSX_GAME_MANIFEST}\"")) &&
+          generatedCmake.contains(QStringLiteral(
+            "${CMAKE_CURRENT_SOURCE_DIR}/framework")) &&
+          !generatedCmake.contains(generatedRequest.frameworkRoot),
+          QStringLiteral("generated CMake is portable and stages the game manifest during the target build"));
+    if (platform == psxstudio::TargetPlatform::Linux) {
+      check(generatedCmake.contains(QStringLiteral(
+              "INTERFACE_INCLUDE_DIRECTORIES \"${sdl2source_SOURCE_DIR}/include\")\nset(SDL2_INCLUDE_DIRS")),
+            QStringLiteral("generated Linux CMake closes imported SDL target properties"));
+    }
+  }
+
+#if defined(Q_OS_MACOS)
+  generatedRequest.targetPlatform = psxstudio::TargetPlatform::MacOS;
+  const QString macProject = QDir(temp.path()).filePath(QStringLiteral("generated-cmake-project"));
+  const QString macBuild = QDir(temp.path()).filePath(QStringLiteral("generated-cmake-build"));
+  check(QDir().mkpath(QDir(macProject).filePath(QStringLiteral("framework/runtime"))) &&
+          QDir().mkpath(QDir(macProject).filePath(QStringLiteral("package-resources"))),
+        QStringLiteral("generated CMake fixture directories"));
+  const QString runtimeStub = QStringLiteral(
+    "function(psxrecomp_add_runtime_target target)\n"
+    "  cmake_parse_arguments(PSXRT \"MACOSX_BUNDLE\" \"\" \"\" ${ARGN})\n"
+    "  file(WRITE \"${CMAKE_CURRENT_BINARY_DIR}/dummy.c\" \"int main(void){return 0;}\\n\")\n"
+    "  add_executable(${target} ${CMAKE_CURRENT_BINARY_DIR}/dummy.c)\n"
+    "  if(PSXRT_MACOSX_BUNDLE)\n"
+    "    set_target_properties(${target} PROPERTIES MACOSX_BUNDLE TRUE)\n"
+    "  endif()\n"
+    "endfunction()\n");
+  check(psxstudio::writeText(
+          QDir(macProject).filePath(QStringLiteral("framework/runtime/runtime.cmake")),
+          runtimeStub, error), error);
+  check(psxstudio::writeText(
+          QDir(macProject).filePath(QStringLiteral("CMakeLists.txt")),
+          psxstudio::generatedProjectCMake(
+            generatedRequest, generatedGame, QStringLiteral("Portable Test Game"),
+            QStringLiteral("org.psxrecomp.generated.test"), 0x12345678u), error), error);
+  check(psxstudio::writeBytes(
+          QDir(macProject).filePath(QStringLiteral("AppIcon.icns")), QByteArray("icon"), error) &&
+        psxstudio::writeText(
+          QDir(macProject).filePath(QStringLiteral("Info.plist")), QStringLiteral("<plist/>"), error) &&
+        psxstudio::writeText(
+          QDir(macProject).filePath(QStringLiteral("game.manifest.json")), QStringLiteral("{}"), error), error);
+  QProcess generatedConfigure;
+  generatedConfigure.start(QStringLiteral("cmake"),
+    { QStringLiteral("-S"), macProject, QStringLiteral("-B"), macBuild,
+      QStringLiteral("-G"), QStringLiteral("Ninja") });
+  check(generatedConfigure.waitForStarted(5000) &&
+          generatedConfigure.waitForFinished(30000) &&
+          generatedConfigure.exitStatus() == QProcess::NormalExit &&
+          generatedConfigure.exitCode() == 0,
+        QStringLiteral("generated macOS CMake configures with its build-time package pipeline: %1")
+          .arg(QString::fromUtf8(generatedConfigure.readAllStandardError())));
+#endif
 
   const QString sourceTree = QDir(temp.path()).filePath(QStringLiteral("source-tree"));
   const QString copiedTree = QDir(temp.path()).filePath(QStringLiteral("copied-tree"));

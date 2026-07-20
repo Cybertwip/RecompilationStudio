@@ -26,6 +26,9 @@ signals:
   void stageChanged(const QString& name, int index, int total);
   void logLine(const QString& line);
   void completed(const QString& appPath);
+  void ciSourcePrepared(psxstudio::PipelineRequest request,
+                        const QString& repositoryPath,
+                        const QString& commit);
   void failed(const QString& message, const QString& workspacePath);
   void cancelled();
 

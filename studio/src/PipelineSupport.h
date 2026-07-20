@@ -82,5 +82,11 @@ QSet<quint32> parseFunctionEntries(const QString& path, QString& error);
 bool addressInRanges(quint32 address, const QList<QPair<quint32, quint32>>& ranges);
 QString findExecutable(const QString& name);
 QString ghidraAnalyzeHeadlessPath(const QString& ghidraHome);
+/* Portable generated app CMake used by source exports, local builds, and CI. */
+QString generatedProjectCMake(const PipelineRequest& request,
+                              const GameDescription& game,
+                              const QString& bundleName,
+                              const QString& bundleId,
+                              quint32 expectedBiosCrc);
 
 } // namespace psxstudio

@@ -3,6 +3,9 @@
 #include "PipelineSupport.h"
 #include "SteganosClient.h"
 
+#include "quazip.h"
+#include "quazipfile.h"
+
 #include <QAbstractItemView>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -117,6 +120,54 @@ QString safeFilePart(QString value) {
   }
   value = value.trimmed();
   return value.isEmpty() ? QStringLiteral("builder") : value;
+}
+
+bool verifyDownloadedArtifact(const QString& archivePath,
+                              const PipelineRequest& request,
+                              QString& error) {
+  QuaZip archive(archivePath);
+  if (!archive.open(QuaZip::mdUnzip)) {
+    error = QStringLiteral("The CI artifact is not a readable ZIP archive.");
+    return false;
+  }
+  const QStringList entries = archive.getFileNameList();
+  const int manifestCount = entries.count(QStringLiteral("game.manifest.json"));
+  if (manifestCount != 1 || !archive.setCurrentFile(QStringLiteral("game.manifest.json"))) {
+    archive.close();
+    error = QStringLiteral("The CI artifact must contain exactly one root game.manifest.json.");
+    return false;
+  }
+  QuaZipFile manifestFile(&archive);
+  if (!manifestFile.open(QIODevice::ReadOnly)) {
+    archive.close();
+    error = QStringLiteral("The CI artifact game.manifest.json could not be read.");
+    return false;
+  }
+  const auto observed = QJsonDocument::fromJson(manifestFile.readAll()).object();
+  manifestFile.close();
+  const auto expected = gameManifestForRequest(request);
+  if (observed.value(QStringLiteral("executable")) != expected.value(QStringLiteral("executable")) ||
+      observed.value(QStringLiteral("name")) != expected.value(QStringLiteral("name")) ||
+      observed.value(QStringLiteral("platform")) != expected.value(QStringLiteral("platform"))) {
+    archive.close();
+    error = QStringLiteral("The CI artifact game.manifest.json does not match the requested export.");
+    return false;
+  }
+  const QString executable = observed.value(QStringLiteral("executable")).toString();
+  bool executableFound = entries.contains(executable);
+  if (request.targetPlatform == TargetPlatform::MacOS) {
+    const QString prefix = executable + QLatin1Char('/');
+    executableFound = std::any_of(entries.cbegin(), entries.cend(),
+                                  [&](const QString& entry) {
+                                    return entry.startsWith(prefix);
+                                  });
+  }
+  archive.close();
+  if (!executableFound) {
+    error = QStringLiteral("The executable declared by the CI game manifest is missing from the artifact.");
+    return false;
+  }
+  return true;
 }
 
 } // namespace
@@ -696,6 +747,13 @@ void CiPanel::prepareBundle(const QSharedPointer<Job>& job) {
       updateJobTable(job);
     }
   });
+  connect(process, &QProcess::errorOccurred, this,
+          [this, job, process](QProcess::ProcessError) {
+            if (!job->terminal && process->state() == QProcess::NotRunning) {
+              finishFailure(job, QStringLiteral("Git bundle process failed to start: %1")
+                                   .arg(process->errorString()));
+            }
+          });
   connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
           [this, job, process, temporaryRef](int exitCode, QProcess::ExitStatus status) {
             QString ignored;
@@ -910,6 +968,12 @@ void CiPanel::downloadArtifact(const QSharedPointer<Job>& job) {
       return;
     }
     reply->deleteLater();
+    QString verificationError;
+    if (!verifyDownloadedArtifact(job->outputPath, job->request, verificationError)) {
+      QFile::remove(job->outputPath);
+      finishFailure(job, verificationError);
+      return;
+    }
     finishSuccess(job);
   });
 }

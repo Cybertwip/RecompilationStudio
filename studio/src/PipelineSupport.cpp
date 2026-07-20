@@ -211,6 +211,13 @@ QString cleanBundleName(const QString& title) {
 
 QString exportOutputName(const PipelineRequest& request) {
   const QString bundleName = cleanBundleName(request.windowTitle);
+  const QString platformName = request.targetPlatform == TargetPlatform::MacOS
+    ? QStringLiteral("macOS") : targetPlatformDisplayName(request.targetPlatform);
+  if (request.exportMode == ExportMode::Source) {
+    const QString sourceName = QStringLiteral("%1-%2-Source")
+      .arg(bundleName, platformName);
+    return request.exportAsZip ? sourceName + QStringLiteral(".zip") : sourceName;
+  }
   if (request.exportAsZip) {
     switch (request.targetPlatform) {
       case TargetPlatform::MacOS:
@@ -394,20 +401,32 @@ bool copyDirectoryTree(const QString& sourceDirectory,
   }
 
   QDirIterator entries(sourceDirectory,
-                       QDir::AllEntries | QDir::NoDotAndDotDot,
+                       QDir::AllEntries | QDir::Hidden | QDir::System |
+                         QDir::NoDotAndDotDot,
                        QDirIterator::Subdirectories);
   while (entries.hasNext()) {
     const QString sourcePath = entries.next();
     const QString relativePath = source.relativeFilePath(sourcePath);
     const QString destinationPath = QDir(destinationDirectory).filePath(relativePath);
     const QFileInfo info(sourcePath);
-    if (info.isDir()) {
+    if (info.isSymLink()) {
+      if (QFileInfo::exists(destinationPath) || QFileInfo(destinationPath).isSymLink()) {
+        QFile::remove(destinationPath);
+      }
+      if (!QDir().mkpath(QFileInfo(destinationPath).absolutePath()) ||
+          !QFile::link(info.symLinkTarget(), destinationPath)) {
+        error = QStringLiteral("Could not replicate symbolic link: %1").arg(relativePath);
+        return false;
+      }
+    } else if (info.isDir()) {
       if (!QDir().mkpath(destinationPath)) {
         error = QStringLiteral("Could not create directory: %1").arg(destinationPath);
         return false;
       }
     } else if (!copyFileReplacing(sourcePath, destinationPath, error)) {
       return false;
+    } else {
+      QFile::setPermissions(destinationPath, info.permissions());
     }
   }
   return true;

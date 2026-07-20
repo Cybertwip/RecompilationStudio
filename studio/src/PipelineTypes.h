@@ -15,6 +15,37 @@ enum class TargetPlatform {
   Linux,
 };
 
+enum class ExportMode {
+  Source,
+  Build,
+};
+
+enum class BuildBackend {
+  Local,
+  RemoteCi,
+};
+
+
+inline QString exportModeKey(ExportMode mode) {
+  return mode == ExportMode::Source ? QStringLiteral("source")
+                                    : QStringLiteral("build");
+}
+
+inline QString exportModeDisplayName(ExportMode mode) {
+  return mode == ExportMode::Source ? QStringLiteral("Source")
+                                    : QStringLiteral("Build");
+}
+
+inline ExportMode exportModeFromKey(const QString& key) {
+  return key.compare(QStringLiteral("source"), Qt::CaseInsensitive) == 0
+    ? ExportMode::Source : ExportMode::Build;
+}
+
+inline QString buildBackendKey(BuildBackend backend) {
+  return backend == BuildBackend::RemoteCi ? QStringLiteral("ci")
+                                            : QStringLiteral("local");
+}
+
 inline TargetPlatform hostTargetPlatform() {
 #if defined(Q_OS_WIN)
   return TargetPlatform::Windows;
@@ -90,6 +121,8 @@ inline TargetPlatform targetPlatformFromKey(const QString& key) {
 
 struct PipelineRequest {
   TargetPlatform targetPlatform{ hostTargetPlatform() };
+  ExportMode exportMode{ ExportMode::Build };
+  BuildBackend buildBackend{ BuildBackend::Local };
   QString cuePath;
   QStringList selectedBinPaths;
   QString biosPath;
@@ -108,6 +141,11 @@ struct PipelineRequest {
   bool skipBiosBoot{ false };
   bool macosGipGamepad{ true };
   bool exportAsZip{ true };
+  bool useCi{ false };
+  QString ciBuilderId;
+  QString ciBuilderName;
+  QString ciBuilderEndpoint;
+  QString ciArchitecture;
   bool overwriteOutput{ false };
 
   QJsonObject toJson(bool includeSecret = false) const {
@@ -117,6 +155,8 @@ struct PipelineRequest {
     }
     QJsonObject object{
       { QStringLiteral("platform"), targetPlatformKey(targetPlatform) },
+      { QStringLiteral("export_mode"), exportModeKey(exportMode) },
+      { QStringLiteral("build_backend"), buildBackendKey(buildBackend) },
       { QStringLiteral("cue_path"), cuePath },
       { QStringLiteral("bin_paths"), bins },
       { QStringLiteral("bios_path"), biosPath },
@@ -134,6 +174,10 @@ struct PipelineRequest {
       { QStringLiteral("skip_bios_boot"), skipBiosBoot },
       { QStringLiteral("macos_gip_gamepad"), macosGipGamepad },
       { QStringLiteral("export_as_zip"), exportAsZip },
+      { QStringLiteral("use_ci"), useCi },
+      { QStringLiteral("ci_builder_id"), ciBuilderId },
+      { QStringLiteral("ci_builder_name"), ciBuilderName },
+      { QStringLiteral("ci_architecture"), ciArchitecture },
       { QStringLiteral("overwrite_output"), overwriteOutput },
     };
     if (includeSecret) {
@@ -172,3 +216,5 @@ struct GameDescription {
 
 Q_DECLARE_METATYPE(psxstudio::PipelineRequest)
 Q_DECLARE_METATYPE(psxstudio::TargetPlatform)
+Q_DECLARE_METATYPE(psxstudio::ExportMode)
+Q_DECLARE_METATYPE(psxstudio::BuildBackend)

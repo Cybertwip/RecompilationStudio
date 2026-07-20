@@ -3,6 +3,7 @@
 #include "PipelineTypes.h"
 
 #include <QMainWindow>
+#include <QSet>
 
 class QCheckBox;
 class QComboBox;
@@ -16,6 +17,7 @@ class QProgressBar;
 class QPushButton;
 class QResizeEvent;
 class QScrollArea;
+class QTabWidget;
 class QThread;
 class QVBoxLayout;
 class QWidget;
@@ -27,6 +29,7 @@ class ThemeManager;
 namespace psxstudio {
 
 class PipelineWorker;
+namespace ci { class CiPanel; struct BuilderInfo; }
 
 class MainWindow final : public QMainWindow {
   Q_OBJECT
@@ -54,12 +57,21 @@ private slots:
   void updateBiosPatchControls();
   void updateBatchMode();
   void updatePlatformControls();
+  void updateExportMode();
   void startBuild();
   void cancelBuild();
   void revealOutput();
   void toggleTheme();
   void onCompleted(const QString& appPath);
   void onFailed(const QString& message, const QString& workspacePath);
+  void onCiSourcePrepared(psxstudio::PipelineRequest request,
+                          const QString& repositoryPath,
+                          const QString& commit);
+  void onCiBuildCompleted(const QString& jobId, const QString& outputPath);
+  void onCiBuildFailed(const QString& jobId,
+                       const QString& message,
+                       const QString& reportPath);
+  void onCiBuildCancelled(const QString& jobId);
   void setBusy(bool busy);
   void updateBuildButton();
 
@@ -83,6 +95,9 @@ private:
   void clearBatchIcon(const QString& id);
   void removeBatchEntry(const QString& id);
   void startNextRequest();
+  void planBuildBackends(QList<PipelineRequest>& requests);
+  void finishIfIdle();
+  void finishSuccessfulExport();
 
   struct BatchGameEntry {
     QString id;
@@ -96,6 +111,7 @@ private:
 
   QLineEdit* discEdit_{ nullptr };
   QComboBox* platformCombo_{ nullptr };
+  QComboBox* exportModeCombo_{ nullptr };
   QCheckBox* batchCheck_{ nullptr };
   QLineEdit* batchDirectoryEdit_{ nullptr };
   QListWidget* batchList_{ nullptr };
@@ -105,6 +121,7 @@ private:
   QLineEdit* titleEdit_{ nullptr };
   QLineEdit* outputEdit_{ nullptr };
   QCheckBox* exportAsZip_{ nullptr };
+  QCheckBox* useCi_{ nullptr };
   QLineEdit* certificateEdit_{ nullptr };
   QLineEdit* certificatePasswordEdit_{ nullptr };
   QCheckBox* signingEnabled_{ nullptr };
@@ -124,6 +141,8 @@ private:
   QPushButton* cancelButton_{ nullptr };
   QPushButton* revealButton_{ nullptr };
   QPushButton* themeButton_{ nullptr };
+  QTabWidget* tabs_{ nullptr };
+  ci::CiPanel* ciPanel_{ nullptr };
   QFrame* inputCard_{ nullptr };
   QFrame* toolsCard_{ nullptr };
   QFrame* brandingCard_{ nullptr };
@@ -137,10 +156,14 @@ private:
   QList<PipelineRequest> pendingRequests_;
   PipelineRequest activeRequest_;
   QStringList completedOutputs_;
+  QSet<QString> activeCiJobs_;
   int activeRequestIndex_{ 0 };
   int totalRequestCount_{ 0 };
   QString outputAppPath_;
   bool formsAreColumns_{ false };
+  bool workerActive_{ false };
+  bool exportFailed_{ false };
+  bool cancelling_{ false };
   QThread* workerThread_{ nullptr };
   PipelineWorker* worker_{ nullptr };
 };

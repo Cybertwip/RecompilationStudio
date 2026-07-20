@@ -216,6 +216,12 @@ MainWindow::MainWindow(QWidget* parent)
   inputLayout->addWidget(platformRow);
   platformRow->setVisible(true);
 
+  useCi_ = new QCheckBox(QStringLiteral("Use CI"), inputCard_);
+  useCi_->setObjectName(QStringLiteral("useCiCheckBox"));
+  useCi_->setToolTip(
+    QStringLiteral("Build mode only. Keep one compatible build local and dispatch remaining platform or queued work to authenticated CI workers."));
+  inputLayout->addWidget(useCi_);
+
   batchCheck_ = new QCheckBox(QStringLiteral("Batch"), inputCard_);
   batchCheck_->setToolTip(
     QStringLiteral("Scan a directory recursively and queue one export for every PlayStation CUE or standalone BIN image."));
@@ -292,11 +298,6 @@ MainWindow::MainWindow(QWidget* parent)
   exportAsZip_->setToolTip(
     QStringLiteral("Create one ZIP per export. Source ZIPs retain their initialized Git repository; build ZIPs contain the verified native package."));
   inputLayout->addWidget(exportAsZip_);
-  useCi_ = new QCheckBox(QStringLiteral("Use CI"), inputCard_);
-  useCi_->setObjectName(QStringLiteral("useCiCheckBox"));
-  useCi_->setToolTip(
-    QStringLiteral("Build mode only. Keep one compatible build local and dispatch remaining platform or queued work to authenticated CI workers."));
-  inputLayout->addWidget(useCi_);
   inputLayout->addStretch(1);
 
   toolsCard_ = makeCard(QStringLiteral("toolsCard"), formsContainer_);
@@ -380,7 +381,7 @@ MainWindow::MainWindow(QWidget* parent)
   statusLayout->setSpacing(9);
   auto* statusHeader = new QHBoxLayout();
   stageLabel_ = new QLabel(QStringLiteral("Ready"), statusCard_);
-  auto* statusHint = new QLabel(QStringLiteral("Proof artifacts are embedded in the generated app"), statusCard_);
+  auto* statusHint = new QLabel(QStringLiteral("Proof artifacts are embedded in every export"), statusCard_);
   statusHint->setObjectName(QStringLiteral("secondaryText"));
   statusHeader->addWidget(stageLabel_);
   statusHeader->addStretch(1);
@@ -1182,7 +1183,14 @@ void MainWindow::planBuildBackends(QList<PipelineRequest>& requests) {
     }
   }
 
-  const QString hostArchitecture = QSysInfo::currentCpuArchitecture();
+  QString hostArchitecture = QSysInfo::currentCpuArchitecture().toLower();
+  if (hostArchitecture == QStringLiteral("amd64") ||
+      hostArchitecture == QStringLiteral("x64") ||
+      hostArchitecture == QStringLiteral("x86-64")) {
+    hostArchitecture = QStringLiteral("x86_64");
+  } else if (hostArchitecture == QStringLiteral("aarch64")) {
+    hostArchitecture = QStringLiteral("arm64");
+  }
   for (int index = 0; index < requests.size(); ++index) {
     auto& request = requests[index];
     const bool requiresLocalSigning = request.targetPlatform == TargetPlatform::MacOS &&
@@ -1197,6 +1205,8 @@ void MainWindow::planBuildBackends(QList<PipelineRequest>& requests) {
     const auto builder = ciPanel_->chooseBuilder(request.targetPlatform,
                                                   preferredArchitecture);
     if (!builder.isValid() ||
+        (request.targetPlatform == hostTargetPlatform() &&
+         builder.architecture != hostArchitecture) ||
         ((request.targetPlatform == TargetPlatform::Windows ||
           request.targetPlatform == TargetPlatform::Linux) &&
          builder.architecture != QStringLiteral("x86_64"))) {

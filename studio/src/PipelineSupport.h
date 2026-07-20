@@ -51,6 +51,9 @@ bool writeBytes(const QString& path, const QByteArray& bytes, QString& error);
 bool writeText(const QString& path, const QString& text, QString& error);
 bool writeJson(const QString& path, const QJsonObject& object, QString& error);
 bool copyFileReplacing(const QString& source, const QString& destination, QString& error);
+bool createMacosIconset(const QString& sourceIcon,
+                        const QString& iconsetPath,
+                        QString& error);
 bool createIcns(const QString& sourceIcon,
                 const QString& workingDirectory,
                 const QString& outputPath,

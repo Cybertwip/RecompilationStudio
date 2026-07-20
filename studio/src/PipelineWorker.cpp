@@ -479,7 +479,16 @@ QString makeProjectCMake(const PipelineRequest& request,
     cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_GAME_MANIFEST}\" \"${_PSX_STEGANOS_PACKAGE_DIR}/game.manifest.json\"\n");
     cmake += QStringLiteral("  VERBATIM)\n");
   } else {
-    cmake += QStringLiteral("set_source_files_properties(\"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\" PROPERTIES MACOSX_PACKAGE_LOCATION \"Resources\")\n");
+    cmake += QStringLiteral("if(NOT EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\")\n");
+    cmake += QStringLiteral("  find_program(PSX_ICONUTIL iconutil REQUIRED)\n");
+    cmake += QStringLiteral("  file(GLOB _PSX_ICONSET_FILES CONFIGURE_DEPENDS \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.iconset/*.png\")\n");
+    cmake += QStringLiteral("  add_custom_command(OUTPUT \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\"\n");
+    cmake += QStringLiteral("    COMMAND ${PSX_ICONUTIL} -c icns \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.iconset\" -o \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\"\n");
+    cmake += QStringLiteral("    DEPENDS ${_PSX_ICONSET_FILES} VERBATIM)\n");
+    cmake += QStringLiteral("  add_custom_target(psx-runtime-icon DEPENDS \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\")\n");
+    cmake += QStringLiteral("  add_dependencies(psx-runtime psx-runtime-icon)\n");
+    cmake += QStringLiteral("endif()\n");
+    cmake += QStringLiteral("set_source_files_properties(\"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION \"Resources\")\n");
     cmake += QStringLiteral("target_sources(psx-runtime PRIVATE \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.icns\")\n");
     cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES\n");
     cmake += QStringLiteral("  MACOSX_BUNDLE TRUE\n");
@@ -1083,15 +1092,13 @@ void PipelineWorker::run(PipelineRequest request) {
     requiredTools.append({ QStringLiteral("GNU strip"), linuxStrip });
     requiredTools.append({ QStringLiteral("GNU readelf"), linuxReadelf });
   }
-  if (macosTarget) {
+  if (macosTarget && localBuild) {
     requiredTools.append({ QStringLiteral("iconutil"), QStringLiteral("/usr/bin/iconutil") });
-    if (localBuild) {
-      requiredTools.append({ QStringLiteral("pkg-config"), pkgConfig });
-      requiredTools.append({ QStringLiteral("ditto"), QStringLiteral("/usr/bin/ditto") });
-      requiredTools.append({ QStringLiteral("otool"), QStringLiteral("/usr/bin/otool") });
-      requiredTools.append({ QStringLiteral("nm"), nm });
-      requiredTools.append({ QStringLiteral("install_name_tool"), QStringLiteral("/usr/bin/install_name_tool") });
-    }
+    requiredTools.append({ QStringLiteral("pkg-config"), pkgConfig });
+    requiredTools.append({ QStringLiteral("ditto"), QStringLiteral("/usr/bin/ditto") });
+    requiredTools.append({ QStringLiteral("otool"), QStringLiteral("/usr/bin/otool") });
+    requiredTools.append({ QStringLiteral("nm"), nm });
+    requiredTools.append({ QStringLiteral("install_name_tool"), QStringLiteral("/usr/bin/install_name_tool") });
   }
   if (signingRequested) {
     requiredTools.append({ QStringLiteral("rcodesign (direct PFX signer)"), rcodesign });
@@ -1851,11 +1858,19 @@ void PipelineWorker::run(PipelineRequest request) {
       fail(error, workspace);
       return;
     }
-  } else if (!createIcns(iconSourcePath, workspace, iconPath, error) ||
-             !writeText(platformMetadataPath,
-                        makeInfoPlist(bundleId, bundleName, bundleName), error)) {
-    fail(error, workspace);
-    return;
+  } else {
+    const QString iconutil = QStringLiteral("/usr/bin/iconutil");
+    const bool iconCreated = QFileInfo(iconutil).isExecutable()
+      ? createIcns(iconSourcePath, workspace, iconPath, error)
+      : createMacosIconset(
+          iconSourcePath,
+          QDir(projectDir).filePath(QStringLiteral("AppIcon.iconset")), error);
+    if (!iconCreated ||
+        !writeText(platformMetadataPath,
+                   makeInfoPlist(bundleId, bundleName, bundleName), error)) {
+      fail(error, workspace);
+      return;
+    }
   }
   const QString gameFull = QDir(generatedDir).filePath(outStem + QStringLiteral("_full.c"));
   const QString gameDispatch = QDir(generatedDir).filePath(outStem + QStringLiteral("_dispatch.c"));
@@ -2317,6 +2332,22 @@ void PipelineWorker::run(PipelineRequest request) {
     fail(QStringLiteral("CMake did not stage game.manifest.json during the build."), workspace);
     return;
   }
+  const auto stagedManifestDocument = readJson(stagedGameManifest, error);
+  const auto expectedGameManifest = gameManifestForRequest(request);
+  const auto stagedManifestObject = stagedManifestDocument.object();
+  if (stagedManifestDocument.isNull() ||
+      stagedManifestObject.value(QStringLiteral("executable")) !=
+        expectedGameManifest.value(QStringLiteral("executable")) ||
+      stagedManifestObject.value(QStringLiteral("name")) !=
+        expectedGameManifest.value(QStringLiteral("name")) ||
+      stagedManifestObject.value(QStringLiteral("platform")) !=
+        expectedGameManifest.value(QStringLiteral("platform"))) {
+    fail(error.isEmpty()
+           ? QStringLiteral("The CMake-staged game.manifest.json does not match the requested package.")
+           : error,
+         workspace);
+    return;
+  }
 
   QByteArray gitOutput;
   runCommand(git,
@@ -2372,6 +2403,7 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("macos_gip_gamepad_compiled"), gipBackendCompiled },
     { QStringLiteral("libusb_version"), libusbVersion },
     { QStringLiteral("framework_commit"), QString::fromUtf8(gitOutput).trimmed() },
+    { QStringLiteral("source_repository_commit"), sourceCommit },
     { QStringLiteral("cmake"), versionText(cmake, { QStringLiteral("--version") }).section('\n', 0, 0) },
     { QStringLiteral("generator"), nativeWindowsTarget
         ? QStringLiteral("Visual Studio 17 2022") : QStringLiteral("Ninja") },

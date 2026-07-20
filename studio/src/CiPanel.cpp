@@ -715,8 +715,14 @@ void CiPanel::waitForPair(const QSharedPointer<Job>& job) {
 
 void CiPanel::prepareBundle(const QSharedPointer<Job>& job) {
   if (!job || job->terminal) return;
+  const QString canonicalDisc = QFileInfo(job->request.cuePath).canonicalFilePath();
+  const QString repositoryIdentity = QStringLiteral("%1\n%2\n%3")
+    .arg(canonicalDisc.isEmpty() ? QFileInfo(job->request.cuePath).absoluteFilePath()
+                                 : canonicalDisc,
+         targetPlatformKey(job->request.targetPlatform),
+         job->request.windowTitle.trimmed());
   job->repositoryKey = QString::fromLatin1(QCryptographicHash::hash(
-    job->repositoryPath.toUtf8(), QCryptographicHash::Sha256).toHex());
+    repositoryIdentity.toUtf8(), QCryptographicHash::Sha256).toHex());
   const QString bundleRoot = QDir(
     QStandardPaths::writableLocation(QStandardPaths::TempLocation))
       .filePath(QStringLiteral("psxrecomp-ci-bundles"));

@@ -478,22 +478,16 @@ bool runIconutil(const QString& iconsetPath, const QString& outputPath, QString&
 
 } // namespace
 
-bool createIcns(const QString& sourceIcon,
-                const QString& workingDirectory,
-                const QString& outputPath,
-                QString& error) {
-  if (QFileInfo(sourceIcon).suffix().compare(QStringLiteral("icns"), Qt::CaseInsensitive) == 0) {
-    return copyFileReplacing(sourceIcon, outputPath, error);
-  }
-
-  const QString iconsetPath = QDir(workingDirectory).filePath(QStringLiteral("AppIcon.iconset"));
+bool createMacosIconset(const QString& sourceIcon,
+                        const QString& iconsetPath,
+                        QString& error) {
   QDir iconset(iconsetPath);
   if (iconset.exists() && !iconset.removeRecursively()) {
-    error = QStringLiteral("Could not reset the temporary iconset directory.");
+    error = QStringLiteral("Could not reset the macOS iconset directory.");
     return false;
   }
   if (!QDir().mkpath(iconsetPath)) {
-    error = QStringLiteral("Could not create the temporary iconset directory.");
+    error = QStringLiteral("Could not create the macOS iconset directory.");
     return false;
   }
 
@@ -512,6 +506,21 @@ bool createIcns(const QString& sourceIcon,
         return false;
       }
     }
+  }
+  return true;
+}
+
+bool createIcns(const QString& sourceIcon,
+                const QString& workingDirectory,
+                const QString& outputPath,
+                QString& error) {
+  if (QFileInfo(sourceIcon).suffix().compare(QStringLiteral("icns"), Qt::CaseInsensitive) == 0) {
+    return copyFileReplacing(sourceIcon, outputPath, error);
+  }
+
+  const QString iconsetPath = QDir(workingDirectory).filePath(QStringLiteral("AppIcon.iconset"));
+  if (!createMacosIconset(sourceIcon, iconsetPath, error)) {
+    return false;
   }
   QDir().mkpath(QFileInfo(outputPath).absolutePath());
   return runIconutil(iconsetPath, outputPath, error);

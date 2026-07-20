@@ -113,6 +113,18 @@ int main(int argc, char** argv) {
   check(psxstudio::ghidraAnalyzeHeadlessPath(fakeGhidraHome) == fakeGhidraLauncher,
         QStringLiteral("host Ghidra analyzeHeadless launcher resolution"));
 
+  const QString repositoryFixture = QDir(temp.path()).filePath(QStringLiteral("source-repository"));
+  const QString repositoryCopy = QDir(temp.path()).filePath(QStringLiteral("source-repository-copy"));
+  check(psxstudio::writeText(
+          QDir(repositoryFixture).filePath(QStringLiteral(".git/HEAD")),
+          QStringLiteral("ref: refs/heads/main\n"), error) &&
+        psxstudio::writeText(
+          QDir(repositoryFixture).filePath(QStringLiteral("CMakeLists.txt")),
+          QStringLiteral("cmake_minimum_required(VERSION 3.20)\n"), error), error);
+  check(psxstudio::copyDirectoryTree(repositoryFixture, repositoryCopy, error) &&
+          QFileInfo(QDir(repositoryCopy).filePath(QStringLiteral(".git/HEAD"))).isFile(),
+        error.isEmpty() ? QStringLiteral("source delivery preserves initialized Git metadata") : error);
+
   check(psxstudio::javaMajorVersion(
           QStringLiteral("openjdk 21.0.11 2026-04-21\nOpenJDK Runtime Environment")) == 21,
         QStringLiteral("OpenJDK 21 version parsing"));
@@ -469,13 +481,31 @@ int main(int argc, char** argv) {
   QProcess generatedConfigure;
   generatedConfigure.start(QStringLiteral("cmake"),
     { QStringLiteral("-S"), macProject, QStringLiteral("-B"), macBuild,
-      QStringLiteral("-G"), QStringLiteral("Ninja") });
+      QStringLiteral("-G"), QStringLiteral("Ninja"),
+      QStringLiteral("-DCMAKE_BUILD_TYPE=Release") });
   check(generatedConfigure.waitForStarted(5000) &&
           generatedConfigure.waitForFinished(30000) &&
           generatedConfigure.exitStatus() == QProcess::NormalExit &&
           generatedConfigure.exitCode() == 0,
         QStringLiteral("generated macOS CMake configures with its build-time package pipeline: %1")
           .arg(QString::fromUtf8(generatedConfigure.readAllStandardError())));
+  QProcess generatedBuild;
+  generatedBuild.start(QStringLiteral("cmake"),
+    { QStringLiteral("--build"), macBuild, QStringLiteral("--target"),
+      QStringLiteral("psx-runtime"), QStringLiteral("--config"),
+      QStringLiteral("Release") });
+  const QString generatedPackage = QDir(macBuild).filePath(
+    QStringLiteral("steganos-package/psx-runtime/Release"));
+  check(generatedBuild.waitForStarted(5000) &&
+          generatedBuild.waitForFinished(30000) &&
+          generatedBuild.exitStatus() == QProcess::NormalExit &&
+          generatedBuild.exitCode() == 0 &&
+          QFileInfo(QDir(generatedPackage).filePath(
+            QStringLiteral("game.manifest.json"))).isFile() &&
+          QFileInfo(QDir(generatedPackage).filePath(
+            QStringLiteral("Portable Test Game.app"))).isDir(),
+        QStringLiteral("generated target builds a Steganos package directory with its root game manifest: %1")
+          .arg(QString::fromUtf8(generatedBuild.readAllStandardError())));
 #endif
 
   const QString sourceTree = QDir(temp.path()).filePath(QStringLiteral("source-tree"));

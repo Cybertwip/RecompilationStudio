@@ -62,6 +62,22 @@ typedef struct {
 extern jmp_buf            g_scheduler_jmpbuf;
 extern psx_sched_escape_t g_sched_escape;
 
+/* Convert the TCB Status word into the live CPU Status used by the host-side
+ * cooperative scheduler. ExceptionHandler-saved contexts are RFE-ready: the
+ * R3000 exception push cleared KUc/IEc (bits 1:0) and moved them to KUp/IEp
+ * (bits 3:2), so they require one architectural RFE pop. PsyQ game startup
+ * code also seeds fresh OpenTh slots directly with a live Status value (for
+ * example 0x40000401); those contexts have never passed through exception
+ * entry and must be restored verbatim. Treating a live seed as RFE-ready drops
+ * IEc and can strand all pending IRQs on the first ChangeTh. */
+static inline uint32_t psx_scheduler_restore_status(uint32_t tcb_status)
+{
+    if ((tcb_status & 0x3u) != 0u) {
+        return tcb_status;
+    }
+    return (tcb_status & 0xFFFFFFC0u) | ((tcb_status >> 2) & 0x0Fu);
+}
+
 /* Deferred cooperative thread switch (Ape Escape memcard fix #2). Thin exports
  * over the scheduler's private TCB save/restore + PCB[0] accessors, so the
  * interrupt path can re-save a deferred thread cleanly and re-point the kernel

@@ -140,6 +140,12 @@ if(BUILD_TESTING)
     target_include_directories(text_xlate_policy_test PRIVATE include)
     add_test(NAME text_xlate_policy COMMAND text_xlate_policy_test)
 
+    add_executable(tcb_status_restore_test
+        tests/tcb_status_restore_test.c
+    )
+    target_include_directories(tcb_status_restore_test PRIVATE include)
+    add_test(NAME tcb_status_restore COMMAND tcb_status_restore_test)
+
     add_executable(gte_trace_policy_test
         tests/gte_trace_policy_test.cpp
     )

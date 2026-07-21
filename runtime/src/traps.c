@@ -338,7 +338,7 @@ static uint32_t psx_restore_context_from_tcb(CPUState* cpu, uint32_t tcb)
     cpu->lo = cpu->read_word(save + 136u);
     {
         uint32_t saved_sr = cpu->read_word(save + 140u);
-        cpu->cop0[12] = (saved_sr & 0xFFFFFFC0u) | ((saved_sr >> 2) & 0x0Fu);
+        cpu->cop0[12] = psx_scheduler_restore_status(saved_sr);
     }
     cpu->cop0[13] = cpu->read_word(save + 144u);
     cpu->gpr[26] = cpu->read_word(save + 128u);

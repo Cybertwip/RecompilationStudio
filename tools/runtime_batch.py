@@ -54,10 +54,12 @@ def main() -> int:
     call.add_argument("command")
     call.add_argument("fields", nargs="*", help="arbitrary key=value fields")
     call.add_argument("--output", type=Path)
+    call.add_argument("--compact", action="store_true", default=argparse.SUPPRESS)
 
     batch = sub.add_parser("batch", help="send requests from a JSON file")
     batch.add_argument("--file", type=Path, required=True)
     batch.add_argument("--output", type=Path)
+    batch.add_argument("--compact", action="store_true", default=argparse.SUPPRESS)
 
     args = parser.parse_args()
     if args.wait and not wait_for_port(args.host, args.port, args.wait):

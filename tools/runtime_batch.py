@@ -18,7 +18,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from psx_debug_protocol import parse_fields, query, wait_for_port
+try:
+    from psx_debug_protocol import parse_fields, query, wait_for_port
+except ImportError:
+    from tools.psx_debug_protocol import parse_fields, query, wait_for_port
 
 
 def load_requests(path: Path) -> List[Dict[str, Any]]:

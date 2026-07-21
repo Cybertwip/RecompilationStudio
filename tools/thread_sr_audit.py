@@ -13,7 +13,10 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from psx_debug_protocol import query
+try:
+    from psx_debug_protocol import query
+except ImportError:
+    from tools.psx_debug_protocol import query
 
 
 def u32(value: Any) -> int:

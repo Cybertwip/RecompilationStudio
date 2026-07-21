@@ -5,6 +5,20 @@ session before doing any work.
 
 ---
 
+## -1. Local verification policy — Beetle is not required
+
+Beetle is **not** part of mandatory session bring-up or ordinary debugging.
+Do not restore, build, launch, or require `psx-beetle`, its static library, or an
+embedded oracle unless the user explicitly requests Beetle for that task. The
+required evidence path is: BIOS disassembly, Ghidra MCP, and the native
+runtime's TCP debug harness.
+
+Ghidra bring-up is deterministic and documented in
+`docs/internal/GHIDRA_MCP_BRINGUP.md`. Always probe and reuse ports `8080` and
+`8081` before launching anything; never open a second MCP-owning CodeBrowser.
+
+---
+
 ## 0. The architecture is locked
 
 v4 implements **Architecture A**: static MIPS-to-C recompilation of
@@ -52,27 +66,26 @@ whatever you're testing belongs to a phase that hasn't started yet.
 
 ---
 
-## 2. Three sources of truth, in priority order
+## 2. Required sources of truth, in priority order
 
-Truth comes from three sources, in this order:
+Truth comes from these required sources, in this order:
 
 1. **BIOS disassembly** at `docs/psx_bios_disasm.txt` for what the BIOS
-   code is supposed to do. Human-annotated pseudocode with named functions,
-   kernel data structures (IntRP, ExCB, TCB, TCBH), A0/B0/C0 tables, boot
-   sequence, and exception handler logic. Check this FIRST.
-2. **Ghidra MCP** for what the raw bytes are at a given address (static
-   analysis of `SCPH1001.BIN` loaded at `0xBFC00000`). Use when the disasm
-   doesn't cover a function or you need exact instruction-level detail.
-3. **Beetle PSX oracle** (embedded in `psx-beetleoracle.exe`) for what real
-   PS1 hardware does at runtime. Beetle PSX (mednafen-psx libretro core)
-   runs in-process with the native runtime, sharing the same debug server.
-   Oracle commands: `find_first_divergence`, `emu_read_ram`, `emu_sio_trace`,
-   `emu_trace_addr`, `emu_step`. Where Beetle has gaps, **build new tooling
-   and visibility** — don't guess, don't route around.
+   code is supposed to do. Check this first.
+2. **Ghidra MCP** for exact bytes, instructions, function boundaries, and
+   decompilation. Use `tools/ghidra_mcp_bringup.py` and
+   `tools/ghidra_mcp_client.py`; the full runbook is
+   `docs/internal/GHIDRA_MCP_BRINGUP.md`.
+3. **Native runtime TCP proof** for live behavior. Production exports strip the
+   server, so use `tools/build_diagnostic_export.py`, then query with
+   `tools/runtime_batch.py` and focused audit tools such as
+   `tools/thread_sr_audit.py`.
 
-Use all three, never just one. Don't guess. Don't say "probably". If you
-cannot answer a question from the disasm, Ghidra, or the Beetle oracle,
-the answer is "I don't know yet" — not a confident guess.
+Use all required sources applicable to the question. Do not guess or say
+"probably". If the disassembly, Ghidra, and native TCP evidence do not answer
+the question, the answer is "I don't know yet" and the next action is to build
+the missing diagnostic command/tool. Beetle is optional only when the user
+explicitly requests it; it is never a bring-up gate.
 
 ---
 
@@ -119,16 +132,19 @@ a fake event. The fake delivery was not progress, it was theater.
 
 At the start of every session, before any code change:
 
-1. Read this file (AGENTS.md).
-2. Read `docs/internal/PLAN.md` to confirm what phase we are in and what the next
-   concrete milestone is.
-3. Verify `docs/psx_bios_disasm.txt` exists (primary reference).
-4. Verify Ghidra MCP is reachable. If not, stop and ask.
-5. State out loud: "Architecture A is locked. No interpreter. No HLE.
-   No stubs. BIOS first. Game never until Phase 5."
+1. Read this file (`AGENTS.md`).
+2. Read `docs/internal/PLAN.md` to confirm the active phase and milestone.
+3. Verify `docs/psx_bios_disasm.txt` exists.
+4. Read `docs/internal/GHIDRA_MCP_BRINGUP.md`, then run
+   `python3 tools/ghidra_mcp_bringup.py status`. Probe/reuse the existing
+   `8080` Ghidra endpoint and `8081` Python bridge before launching anything.
+5. If Ghidra is not healthy, use the deterministic importer/bring-up tools. Ask
+   the user only if that documented bring-up fails.
+6. State out loud: "Architecture A is locked. No interpreter fallback. No
+   stubs. BIOS first. Game never until Phase 5. Beetle is not required."
 
-If any of these fail, do not proceed with the user's task — surface
-the failure first.
+If any required item fails, do not modify code; surface and repair the failure
+first.
 
 ---
 
@@ -277,69 +293,42 @@ verification. It is a reason to fix the screenshot command.
 "Both the native runtime and interpreter show the same wrong value"
 does not make the value correct. It means both have the same bug.
 
-"Beetle's fntrace caller_pc field is always 0, so we'll lean on ra
-chains" is not an acceptable workaround. It is a reason to fix the
-fntrace hook before the next investigation pass.
+"The packaged app has no TCP listener" is not permission to inspect console
+output instead. Rebuild the exact export with `PSX_DEBUG_TOOLS=ON` using
+`tools/build_diagnostic_export.py`.
 
-If you cannot fix the tool, **ask the user** what they observe.
-Never declare a result "correct" without direct verification against
-the oracle.
+If you cannot fix the tool, **ask the user** what they observe. Never declare a
+result correct without direct disassembly/Ghidra/runtime proof.
 
 ---
 
-## 16. Two independent processes, identical debug harness
+## 16. Native runtime and Ghidra use deterministic, reusable harnesses
 
-v4 runs two processes for cross-checking, NEVER one process with both
-backends in it:
+The required live process is **`psx-runtime`**, with the JSON-over-newline TCP
+debug server (normally port `4370`; use a fresh port for diagnostic exports).
+All runtime inspection goes through this protocol. Use
+`tools/runtime_batch.py` for arbitrary commands and add focused audit tools when
+a question needs correlation across rings.
 
-- **`psx-runtime.exe`** — recompiled BIOS only. SDL window, keyboard
-  input, TCP debug server on port **4370**.
-- **`psx-beetle.exe`** — Beetle PSX (mednafen-psx libretro core) only.
-  SDL window, keyboard input, TCP debug server on port **4380**.
-
-Both binaries expose the **same JSON wire protocol** for debug
-commands — `read_ram`, `press`, `set_input`, `clear_input`,
-`pad_status`, `wtrace_*`, `fntrace_*`, `screenshot`, `ping`, etc.
-This means a tool written against psx-runtime works unchanged against
-psx-beetle just by switching ports. Implementations differ (psx-beetle
-uses libretro hooks; psx-runtime uses recomp-emitted instrumentation),
-but the protocol is identical.
-
-**Why two processes, not one:** the embedded-oracle approach
-(`psx-beetleoracle.exe`, retired 2026-05-05) shared input across both
-backends in lockstep. They desynced constantly — once their internal
-state diverged, the same keypress drove them to different screens, and
-"compare on the same press" became unreliable. Two independent
-processes is the only setup where each backend can be navigated to its
-own state and queried on its own timeline. Cross-process comparison
-is done by querying both ports from a tool, NOT by sharing memory.
+Production Studio Release exports set `PSX_DEBUG_TOOLS=OFF`. They are not valid
+diagnostic targets because `main` does not call `debug_server_init`. Rebuild the
+exact packaged inputs without modifying the app:
 
 ```bash
-# Build beetle-psx static lib (one-time, or after modifying beetle-psx/ source)
-cd beetle-psx && make platform=mingw_x86_64 STATIC_LINKING=1 HAVE_LIGHTREC=0 -j8
-cp mednafen_psx_libretro.dll libmednafen_psx.a && cd ..
-
-# Build both binaries
-PATH=/c/msys64/mingw64/bin:$PATH
-cd runtime/build && cmake --build . --target psx-runtime psx-beetle && cd ../..
-
-# Run independently. Either can run alone; both can run together.
-taskkill //F //IM psx-runtime.exe 2>/dev/null
-taskkill //F //IM psx-beetle.exe   2>/dev/null
-start "" "./runtime/build/psx-runtime.exe" "./bios/SCPH1001.BIN"
-start "" "./runtime/build/psx-beetle.exe"  "./bios/SCPH1001.BIN"
+python3 tools/build_diagnostic_export.py \
+  --app '/path/Game.app' \
+  --workspace /private/tmp/psxrecomp-game-debug \
+  --debug-port 4470
 ```
 
-**Key files:**
-- `beetle-psx/` — cloned beetle-psx-libretro repo
-- `beetle-psx/libmednafen_psx.a` — static library used by psx-beetle
-- `runtime/src/main.cpp` + `runtime/src/debug_server.c` — psx-runtime
-- `runtime/src/beetle_main.cpp` + `runtime/src/beetle_debug_server.c`
-  + `runtime/src/beetle_libretro.cpp` — psx-beetle
+Ghidra uses one CodeBrowser/plugin endpoint on `8080` and one reusable Python
+bridge on `8081`. Always run the status probe first. If `8081` is already open
+while Ghidra is closed, reuse that bridge after restarting Ghidra. Never send a
+second GhidraGo request while `8080` is healthy; switching projects requires
+closing/restarting Ghidra so only one MCP-owning CodeBrowser exists.
 
-**Where Beetle has gaps, build new tooling.** Do not fall back to
-DuckStation. Do not guess. Build the diagnostic tool that gives you
-the visibility you need.
+Beetle is not required, is not a session gate, and must not be restored, built,
+or launched unless the user explicitly requests it.
 
 ---
 
@@ -347,7 +336,7 @@ the visibility you need.
 
 `STUBS_TO_FIX.md` lists every known stub in the runtime. Before any
 Phase 5 work (loading Tomba or any game EXE), every stub marked
-"Phase 5+" in that file **must be implemented and oracle-verified**:
+"Phase 5+" in that file **must be implemented and verified through the documented hardware behavior, Ghidra, and native TCP proof**:
 
 - **S3 — MDEC decoder** (FMV playback)
 - **S4 — SPU audio synthesis** (sound output)

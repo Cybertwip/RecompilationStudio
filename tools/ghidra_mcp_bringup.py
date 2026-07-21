@@ -46,7 +46,14 @@ def ghidra_http_probe(host: str, port: int) -> Dict[str, Any]:
     try:
         with urlopen(url, timeout=2.0) as response:
             text = response.read().decode("utf-8", "replace").strip()
-        healthy = bool(text) and "request failed:" not in text.lower() and not text.lower().startswith("error")
+        lowered = text.lower()
+        healthy = (
+            bool(text)
+            and "request failed:" not in lowered
+            and "no program loaded" not in lowered
+            and "no current location" not in lowered
+            and not lowered.startswith("error")
+        )
         return {"healthy": healthy, "url": url, "response": text}
     except (OSError, URLError) as exc:
         return {"healthy": False, "url": url, "error": str(exc)}

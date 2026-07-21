@@ -105,11 +105,12 @@ def analyze(document: Dict[str, Any]) -> Dict[str, Any]:
     current_frame = int(capture_doc.get("frame", {}).get("frame", 0))
     suspicious_frames = [int(item.get("frame", 0)) for item in findings]
     first_suspicious = min(suspicious_frames) if suspicious_frames else None
+    last_suspicious = max(suspicious_frames) if suspicious_frames else None
     irq_stopped_after_suspicious = (
-        first_suspicious is not None
+        last_suspicious is not None
         and last_irq_frame is not None
-        and last_irq_frame <= first_suspicious
-        and current_frame > first_suspicious
+        and last_irq_frame <= last_suspicious
+        and current_frame > last_suspicious
     )
 
     status = "FAIL" if findings and irq_stopped_after_suspicious and pending_enabled and not (sr_now & 1) else "PASS"
@@ -124,6 +125,7 @@ def analyze(document: Dict[str, Any]) -> Dict[str, Any]:
         "pending_enabled_irq_bits": f"0x{pending_enabled:08X}",
         "last_irq_frame": last_irq_frame,
         "first_suspicious_restore_frame": first_suspicious,
+        "last_suspicious_restore_frame": last_suspicious,
         "irq_stopped_after_suspicious_restore": irq_stopped_after_suspicious,
         "display_disable_events": display_disables,
         "suspicious_restores": findings,

@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "status": "CLEAN",
+  "date": "2026-07-22",
+  "title": "PS1 8 MiB main-RAM mirror code-target classification and dispatch",
+  "trigger": {
+    "game": "Chrono Cross",
+    "serial": "SLUS-01041",
+    "source_pc": "0x80029B7C",
+    "target_pc": "0x8003F63C",
+    "old_false_data_range": ["0x8003F63C", "0x8003F7D4"],
+    "old_error": "control flow enters classified data range; classification is not proven safe"
+  },
+  "input": {
+    "exe_sha256": "9a5453bf09d7f5c71a6451d255471374fb2d7cc5f3dfb1ea51223a5c88cdda47",
+    "ghidra_analysis_sha256": "ffc587814bb118bae01ec499d7bb68c0dc8c9930a12f851679969449e5eddcc2",
+    "load_address": "0x80010000",
+    "entry_pc": "0x80010008",
+    "text_size": "0x00093800"
+  },
+  "ghidra_evidence": {
+    "source_function": {
+      "entry": "0x80029B50",
+      "edge_instruction": "0x80029B7C: j 0x8003F63C"
+    },
+    "target_function": {
+      "entry": "0x8003F63C",
+      "body": ["0x8003F63C", "0x8003F7D3"],
+      "prologue": "addiu sp,sp,-0x18",
+      "terminus": "0x8003F7CC: jr ra",
+      "xref_sources": [
+        "0x80029B7C",
+        "0x80029DC8",
+        "0x80029E04",
+        "0x8003B888",
+        "0x8003C6E8",
+        "0x8003E4A8",
+        "0x8003FFF0"
+      ]
+    },
+    "mirrored_overlay_calls": [
+      {
+        "pc": "0x8003F764",
+        "target": "0x80336CD8",
+        "canonical_ram": "0x00136CD8"
+      },
+      {
+        "pc": "0x8003F76C",
+        "target": "0x803356C8",
+        "canonical_ram": "0x001356C8"
+      }
+    ]
+  },
+  "root_cause": "FunctionAnalyzer rejected direct JAL targets above 0x801FFFFF even though the PS1 mirrors 2 MiB DRAM four times across physical 0x00000000..0x007FFFFF. The invalid-JAL heuristic therefore marked clean callers of 0x80200000..0x807FFFFF mirror addresses as data.",
+  "implementation": {
+    "classification": "Direct J/JAL targets are valid main-RAM targets when (target & 0x1FFFFFFF) < 0x00800000.",
+    "runtime_normalization": "Code dispatch, generated game dispatch, memory translation, and dirty-RAM instruction routing fold the 8 MiB window to canonical 2 MiB DRAM with phys &= 0x001FFFFF.",
+    "files": [
+      "recompiler/src/function_analysis.cpp",
+      "recompiler/src/full_function_emitter.cpp",
+      "recompiler/src/main_psx.cpp",
+      "runtime/include/cpu_state.h",
+      "runtime/src/memory.c",
+      "runtime/src/dirty_ram_interp.c"
+    ]
+  },
+  "verification": {
+    "function_analysis_validity": "PASS",
+    "dispatch_hash_codegen": "PASS",
+    "main_ram_mirror": "PASS",
+    "chrono_source_generation": "PASS with the original entry-only seed manifest",
+    "chrono_codegen_audit": "CLEAN",
+    "chrono_codegen_audit_sha256": "8834d9342db02d7a19fc49e5b443e0708efc7348bc65e60d3b83e00774f9178d",
+    "generated_fallback_calls": 0,
+    "unsupported_markers": 0,
+    "missing_dispatch_or_definitions": 0,
+    "unexpected_tail_call_misses": 0,
+    "data_range_count": 2,
+    "real_bug_findings": 0
+  }
+}

@@ -146,6 +146,12 @@ if(BUILD_TESTING)
     target_include_directories(tcb_status_restore_test PRIVATE include)
     add_test(NAME tcb_status_restore COMMAND tcb_status_restore_test)
 
+    add_executable(main_ram_mirror_test
+        tests/main_ram_mirror_test.c
+    )
+    target_include_directories(main_ram_mirror_test PRIVATE include)
+    add_test(NAME main_ram_mirror COMMAND main_ram_mirror_test)
+
     add_executable(gte_trace_policy_test
         tests/gte_trace_policy_test.cpp
     )

@@ -18,6 +18,17 @@
 extern "C" {
 #endif
 
+/* Canonical physical address for code/data in the PS1 main-RAM window. The
+ * machine has 2 MiB of DRAM mirrored four times across physical 0x00000000..
+ * 0x007FFFFF in every segment. Addresses outside that 8 MiB window retain
+ * their ordinary KSEG/KUSEG physical mapping. */
+static inline uint32_t psx_main_ram_mirror_phys(uint32_t addr)
+{
+    uint32_t phys = addr & 0x1FFFFFFFu;
+    if (phys < 0x00800000u) phys &= 0x001FFFFFu;
+    return phys;
+}
+
 /* sljit shard host-helper table — see SLJIT_PERSIST_CACHE.md Stage 1. The sljit
  * JIT routes its host-helper calls through this cpu-relative table (indexed by
  * the enum below) instead of baking absolute function pointers as SLJIT_IMM

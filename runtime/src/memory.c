@@ -41,9 +41,7 @@ static uint8_t bios_rom[BIOS_ROM_SIZE];
  * writes fell into the open-bus no-op and mirror reads returned 0 (the
  * guest's stack silently vanished and $ra came back as 0). */
 static inline uint32_t psx_phys_addr(uint32_t addr) {
-    uint32_t phys = addr & 0x1FFFFFFFu;
-    if (phys < 0x00800000u) phys &= (uint32_t)(RAM_SIZE - 1);
-    return phys;
+    return psx_main_ram_mirror_phys(addr);
 }
 
 /* Expose RAM pointer for oracle comparison (find_first_divergence). */

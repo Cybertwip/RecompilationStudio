@@ -1093,10 +1093,15 @@ int main(int argc, char** argv) {
         ds << "\n";
 
         // Dispatch function
-        uint32_t game_text_start = exe->load_address() & 0x1FFFFFFFu;
+        uint32_t game_text_start = exe->load_address() & 0x001FFFFFu;
         uint32_t game_text_end = game_text_start + exe->code_size();
-        ds << "int psx_game_address_in_text(uint32_t addr) {\n";
+        ds << "static uint32_t psx_game_canonical_address(uint32_t addr) {\n";
         ds << "    uint32_t phys = addr & 0x1FFFFFFFu;\n";
+        ds << "    if (phys < 0x00800000u) return 0x80000000u | (phys & 0x001FFFFFu);\n";
+        ds << "    return addr;\n";
+        ds << "}\n\n";
+        ds << "int psx_game_address_in_text(uint32_t addr) {\n";
+        ds << "    uint32_t phys = psx_main_ram_mirror_phys(addr);\n";
         ds << fmt::format("    return phys >= 0x{:08X}u && phys < 0x{:08X}u;\n",
                           game_text_start, game_text_end);
         ds << "}\n\n";
@@ -1233,6 +1238,7 @@ int main(int argc, char** argv) {
 
         ds << "/* Maps PS1 address to compiled game code. Returns 1 if dispatched, 0 if unknown. */\n";
         ds << "int psx_dispatch_game_compiled(CPUState* cpu, uint32_t addr) {\n";
+        ds << "    addr = psx_game_canonical_address(addr);\n";
         ds << "    const PsxGameDispatchEntry* entry = psx_game_find_entry(addr);\n";
         ds << "    if (!entry) return 0;\n";
         ds << "    psx_check_interrupts_dispatch_entry(cpu, addr);\n";
@@ -1252,7 +1258,7 @@ int main(int argc, char** argv) {
         // Same precise address set as dispatch, without executing the entry.
         ds << "\n/* 1 iff addr is a re-enterable compiled entry/continuation (no exec). */\n";
         ds << "int psx_game_is_function_entry(uint32_t addr) {\n";
-        ds << "    return psx_game_find_entry(addr) != 0;\n";
+        ds << "    return psx_game_find_entry(psx_game_canonical_address(addr)) != 0;\n";
         ds << "}\n";
 
         if (codegen.cps_enabled()) {

@@ -1482,7 +1482,7 @@ void FullFunctionEmitter::emit_dispatch(
 
     // Dispatch function with binary search.
     out += "static uint32_t normalize(uint32_t addr) {\n";
-    out += "    uint32_t phys = addr & 0x1FFFFFFFu;\n";
+    out += "    uint32_t phys = psx_main_ram_mirror_phys(addr);\n";
     out += "    /* Kernel Part 2: ROM 0x1FC10000+ -> RAM 0x500+ */\n";
     out += "    if (phys >= 0x1FC10000u && phys <= 0x1FC17FFFu)\n";
     out += "        phys = phys - 0x1FC10000u + 0x00000500u;\n";
@@ -1535,7 +1535,7 @@ void FullFunctionEmitter::emit_dispatch(
     out += "         * state and the guest resumes at $ra via the trampoline's normal\n";
     out += "         * return/tail contract below. rc 0 \xE2\x87\x92 pure LLE fall-through. */\n";
     out += "        if (g_psx_bios_hle_hook &&\n";
-    out += "            g_psx_bios_hle_hook(cpu, addr & 0x1FFFFFFFu)) {\n";
+    out += "            g_psx_bios_hle_hook(cpu, psx_main_ram_mirror_phys(addr))) {\n";
     out += "            cpu->pc = cpu->gpr[31];\n";
     out += "            found = 1;\n";
     out += "        }\n";
@@ -1544,7 +1544,7 @@ void FullFunctionEmitter::emit_dispatch(
     out += "         * physical 0x30000-0x5AFFF. If the target belongs to the\n";
     out += "         * active game text range, route it through the game/dirty-RAM\n";
     out += "         * path before normalizing it to shell ROM. */\n";
-    out += "        uint32_t game_phys = addr & 0x1FFFFFFFu;\n";
+    out += "        uint32_t game_phys = psx_main_ram_mirror_phys(addr);\n";
     out += "        /* Class-A shell-window collision fix: post-game-start the BIOS shell\n";
     out += "         * copy at RAM 0x30000-0x5AFFF is DEAD (overwritten by the game EXE,\n";
     out += "         * its runtime-loaded overlays, or CD streaming), so normalize()->shell\n";

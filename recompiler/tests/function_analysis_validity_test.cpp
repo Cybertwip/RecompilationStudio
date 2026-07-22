@@ -106,6 +106,35 @@ int main() {
         ++failures;
     }
 
+    // Main RAM is mirrored four times across the first 8 MiB. Chrono Cross
+    // contains ordinary static functions that JAL runtime overlays through the
+    // 3rd mirror (for example 0x80336CD8 -> canonical RAM 0x00136CD8). Such a
+    // call is valid code evidence and must not make the caller a data range.
+    constexpr std::uint32_t mirror_entry = 0x8003F63Cu;
+    constexpr std::uint32_t mirror_target = 0x80336CD8u;
+    PSXRecomp::PS1Executable mirror_exe{};
+    std::memcpy(mirror_exe.header.magic, "PS-X EXE", 8);
+    mirror_exe.header.initial_pc = mirror_entry;
+    mirror_exe.header.load_address = mirror_entry;
+    mirror_exe.header.file_size = 0x40u;
+    mirror_exe.code_data.assign(mirror_exe.header.file_size, 0xFFu);
+    write_word(mirror_exe, 0x00u, 0x27BDFFE8u); // addiu sp,sp,-24
+    write_word(mirror_exe, 0x04u, 0xAFBF0014u); // sw ra,20(sp)
+    write_word(mirror_exe, 0x08u,
+               0x0C000000u | ((mirror_target >> 2) & 0x03FFFFFFu));
+    write_word(mirror_exe, 0x0Cu, 0x00000000u); // nop (JAL delay slot)
+    write_word(mirror_exe, 0x10u, 0x8FBF0014u); // lw ra,20(sp)
+    write_word(mirror_exe, 0x14u, 0x03E00008u); // jr ra
+    write_word(mirror_exe, 0x18u, 0x27BD0018u); // addiu sp,sp,24
+
+    PSXRecomp::FunctionAnalyzer mirror_analyzer(mirror_exe);
+    mirror_analyzer.add_forced_entry(mirror_entry);
+    const auto mirror_analysis = mirror_analyzer.analyze();
+    if (!has_code_extent(mirror_analysis, mirror_entry, mirror_entry + 0x1Cu)) {
+        std::cerr << "FAIL: mirrored-main-RAM JAL classified a real function as data\n";
+        ++failures;
+    }
+
     if (failures == 0) {
         std::cout << "Function-analysis validity and trap-boundary regressions passed\n";
     }

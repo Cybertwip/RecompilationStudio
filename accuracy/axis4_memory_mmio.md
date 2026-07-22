@@ -18,12 +18,12 @@ All file:line citations are against the trees above as of 2026-06-26.
 ## 1. What our implementation does
 
 ### 1.1 Address-space translation (`memory.c`)
-Every access computes `phys = addr & 0x1FFFFFFF` unconditionally
-(`psx_read_word` L695, `psx_read_half` L781, `psx_read_byte` L837, and the write
-mirrors), with ONE pre-translation special-case: `0xFFFE0130` (KSEG2 cache/BIU
-control) handled before masking (`psx_read_word` L693, `psx_write_word` L734).
-This collapses KUSEG (`0x00..`), KSEG0 (`0x80..`), KSEG1 (`0xA0..`) onto the same
-29-bit physical space — the intended PS1 mirroring.
+Guest addresses first receive the KSEG/KUSEG physical mask. Addresses in the
+first 8 MiB are then folded with `phys &= 0x001FFFFF`, matching the four hardware
+mirrors of the 2 MiB DRAM. The shared `psx_main_ram_mirror_phys()` rule is also
+used by generated code dispatch and dirty-RAM instruction routing, so code and
+data observe the same mirror. `0xFFFE0130` remains a pre-translation KSEG2
+cache/BIU-control special case.
 
 ### 1.2 Physical region decode (after masking)
 - `phys < RAM_SIZE` (0x00000000..0x001FFFFF, **2 MB**) → `ram[]` (L697, L742).
@@ -77,19 +77,19 @@ noted for completeness, L856-879).
 
 ## 2. Discrepancies vs Beetle + psx-spx
 
-### 2.1 RAM mirror window is 2 MB, hardware decodes 8 MB (4× mirror) — REAL DIVERGENCE
-- **Beetle:** `libretro.cpp` MemRW L789 decodes `if (A < 0x00800000)` (an **8 MB**
-  window) then indexes `MainRAM->Read<T>(A & 0x1FFFFF)` (L814) — the 2 MB DRAM
-  **mirrors 4 times** across 0x000000..0x7FFFFF in each KUSEG/KSEG segment. (Retail
-  consoles have 2 MB; the upper 6 MB are aliases of the same chips.)
-- **Ours:** `memory.c` L697/742 gate on `phys < RAM_SIZE` (`RAM_SIZE = 2 MB`,
-  L25). Physical 0x00200000..0x007FFFFF falls through every region test to
-  `unmapped_fatal()` → **returns 0 on read, silently drops writes** (L728/777).
-- **Impact:** A guest (or relocated kernel code) touching a RAM mirror at
-  0x00200000+ / 0x80200000+ reads 0 instead of the aliased DRAM byte, and its
-  write is lost. Most code stays within 2 MB, but mirror access is legal and the
-  BIOS RAM-size routine writes a sentinel at an aliased offset to probe installed
-  RAM. Divergence is silent (no fatal), so it can corrupt state without a crash.
+### 2.1 RAM mirror window and code dispatch — RESOLVED 2026-07-22
+The physical 0x00000000..0x007FFFFF window now folds onto the canonical 2 MiB
+DRAM in `memory.c`. The same fold is applied to static game dispatch, top-level
+BIOS/game dispatch, and dirty-RAM overlay instruction fetch/dispatch. This is
+load-bearing for titles that execute or call code through upper RAM mirrors.
+
+Chrono Cross supplied the regression: clean function `0x8003F63C` calls runtime
+overlays at `0x80336CD8` and `0x803356C8`, which map to canonical RAM
+`0x00136CD8` and `0x001356C8`. The old classifier rejected those JALs as
+out-of-RAM and misclassified the whole function as data. The fixed classifier
+accepts all direct code targets in the hardware 8 MiB mirror window; generated
+dispatch and dirty-RAM execution canonicalize them before lookup/fetch. See
+`docs/internal/ram_mirror_jal_classification_proof.json`.
 
 ### 2.2 Address masking is unconditional `& 0x1FFFFFFF`; hardware masks per-segment — DIVERGENCE (mostly benign, one real edge)
 - **Beetle:** `cpu.cpp` L69-76 `addr_mask[8]` indexed by `A >> 29`:

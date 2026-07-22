@@ -77,6 +77,15 @@ static bool has_valid_operand_encoding(uint32_t instr) {
     return decoded.isValid();
 }
 
+static bool is_psx_main_ram_direct_target(uint32_t target) {
+    // The PS1 has 2 MiB of DRAM mirrored four times across the first 8 MiB
+    // of KUSEG/KSEG0/KSEG1. Direct J/JAL targets in 0x80000000..0x807FFFFF
+    // are therefore valid main-RAM code addresses even when the canonical
+    // physical offset is above 0x001FFFFF (for example Chrono Cross overlay
+    // calls at 0x80336CD8 -> mirror 0x00136CD8).
+    return (target & 0x1FFFFFFFu) < 0x00800000u;
+}
+
 bool FunctionAnalyzer::is_valid_mips_word(uint32_t instr) {
     if (instr == 0xFFFFFFFFu || instr == 0xFFFFFFFDu) return false;
 
@@ -499,7 +508,7 @@ bool FunctionAnalyzer::is_likely_data_section(uint32_t start_addr, uint32_t end_
         if (opcode == 3) {  // JAL opcode
             // PS1 JAL target: upper 4 bits from PC region (0x80000000), low 28 bits from instr
             uint32_t target = ((instr & 0x03FFFFFFu) << 2) | 0x80000000u;
-            if (target > 0x801FFFFFu) {
+            if (!is_psx_main_ram_direct_target(target)) {
                 invalid_jal_count++;
             }
         }
@@ -1250,7 +1259,7 @@ FunctionAnalysisResult FunctionAnalyzer::analyze() {
         if (((instr >> 26) & 0x3Fu) == 0x03u) {
             uint32_t target = ((pc + 4u) & 0xF0000000u) |
                               ((instr & 0x03FFFFFFu) << 2);
-            if (target > 0x801FFFFFu) return false;
+            if (!is_psx_main_ram_direct_target(target)) return false;
         }
         return true;
     };

@@ -98,6 +98,10 @@ kseg_mask = "0x1FFFFFFF"
 
         if "uint32_t lo = 0, hi" in source:
             raise AssertionError("generated dispatcher still contains binary search")
+        if "psx_game_canonical_address" not in source:
+            raise AssertionError("generated game dispatcher does not canonicalize RAM mirrors")
+        if "psx_main_ram_mirror_phys(addr)" not in source:
+            raise AssertionError("generated game text-range check ignores RAM mirrors")
         if manifest["lookup"] != "open_addressed_linear_probe":
             raise AssertionError("dispatch manifest names the wrong lookup algorithm")
         count = manifest["record_count"]

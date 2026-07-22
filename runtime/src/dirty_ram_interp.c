@@ -294,6 +294,7 @@ static inline uint32_t target26    (uint32_t i) { return  i        & 0x03FFFFFFu
 /* Read a 32-bit instruction word from kernel RAM at the given physical addr.
  * Caller has already verified the address is in dirty kernel RAM. */
 static inline uint32_t fetch_word(uint32_t phys) {
+    phys = psx_main_ram_mirror_phys(phys);
     const uint8_t *ram = memory_get_ram_ptr();
     return  (uint32_t)ram[phys]
          | ((uint32_t)ram[phys + 1] <<  8)
@@ -583,7 +584,7 @@ static inline int phys_is_overlay_flow_region(uint32_t phys) {
 }
 
 static int is_local_dirty_target(uint32_t target) {
-    uint32_t phys = target & 0x1FFFFFFFu;
+    uint32_t phys = psx_main_ram_mirror_phys(target);
     return phys_is_overlay_flow_region(phys) && dirty_ram_is_dirty(phys);
 }
 
@@ -1065,7 +1066,7 @@ static int interp_enter_compiled(CPUState *cpu, uint32_t target) {
     /* Decline when the target page no longer matches the static game image.
      * Returning 0 lets the JAL/JALR handler fall through to local-flow interp
      * of the live RAM bytes instead of running stale compiled code. */
-    if (!dirty_ram_text_native_ok(target & 0x1FFFFFFFu)) return 0;
+    if (!dirty_ram_text_native_ok(psx_main_ram_mirror_phys(target))) return 0;
     if (psx_mixed_owner_enabled()
         && interp_host_stack_used() > psx_mixed_stack_watermark()) {
         cpu->pc = target;
@@ -2142,7 +2143,7 @@ int psx_slice_block(CPUState *cpu, uint32_t block_addr, uint32_t bcyc, int side_
 }
 
 static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_addr) {
-    uint32_t phys = addr & 0x1FFFFFFFu;
+    uint32_t phys = psx_main_ram_mirror_phys(addr);
     int clean_game_text_miss = 0;
 
     if (addr == 0x80000048u) {

@@ -732,6 +732,7 @@ extern "C" void runtime_force_interp_step(void) {
     using gbarecomp::active_bus;
     gba::GbaBus* bus = active_bus();
     if (!bus) return;
+    if (runtime_hle_irq_epilogue()) return;
 
     // Per-instruction prologue, matching the generated-code prologue exactly
     // (arm_codegen.cpp: "if (runtime_should_yield()) return;"). runtime_should_yield

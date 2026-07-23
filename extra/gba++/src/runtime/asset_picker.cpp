@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -177,8 +178,12 @@ AssetResult load_and_validate(const std::string& path,
 AssetResult resolve_asset(const std::string& argv_path,
                           const AssetSpec& spec,
                           const std::string& argv0) {
-    const std::string exe_dir = exe_dir_from(argv0);
-    const std::string cache = cache_path(exe_dir, spec.cache_filename);
+    const char* cache_env = std::getenv("GBARECOMP_ASSET_CACHE_DIR");
+    const std::string cache_dir = (cache_env && cache_env[0])
+        ? std::string(cache_env) : exe_dir_from(argv0);
+    std::error_code cache_ec;
+    fs::create_directories(cache_dir, cache_ec);
+    const std::string cache = cache_path(cache_dir, spec.cache_filename);
 
     // 1. Explicit argv path: if it loads and validates, take it (cache
     //    for next launch). If it doesn't even load (missing file / bad

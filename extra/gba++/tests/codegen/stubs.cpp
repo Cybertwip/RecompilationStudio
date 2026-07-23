@@ -243,3 +243,5 @@ extern "C" int runtime_bridge_interpret(uint32_t, bool, uint32_t,
                                          unsigned long long) {
     return 0;
 }
+
+extern "C" int g_force_interp = 0;

@@ -359,6 +359,7 @@ extern uint32_t g_runtime_break_pc;
 
 void runtime_swi(uint32_t swi_imm);
 void runtime_irq(uint32_t return_address);
+int runtime_hle_irq_epilogue(void);
 
 // ── BIOS HLE hook (opt-in alternative to the recompiled/LLE BIOS) ──────
 // nullptr (the default) = pure LLE: runtime_swi always enters SVC mode and

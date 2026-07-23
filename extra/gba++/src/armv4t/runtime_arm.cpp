@@ -1184,6 +1184,41 @@ extern "C" uint32_t      g_irq_iret_depth = 0;
 
 namespace {
 
+constexpr uint32_t kHleIrqMaxDepth = 32u;
+uint32_t g_hle_irq_src_stack[kHleIrqMaxDepth] = {};
+uint16_t g_hle_irq_ie_stack[kHleIrqMaxDepth] = {};
+
+void runtime_irq_standalone_begin_async(uint32_t return_address,
+                                        uint32_t irq_src,
+                                        uint32_t saved_cpsr) {
+    const uint32_t slot = g_irq_nest_depth > 0u
+        ? (g_irq_nest_depth - 1u) % kHleIrqMaxDepth : 0u;
+    g_hle_irq_src_stack[slot] = irq_src;
+    g_hle_irq_ie_stack[slot] = bus_read_u16(0x04000200u);
+
+    const uint32_t new_cpsr =
+        (saved_cpsr & ~(0x1Fu | CPSR_T_BIT)) | 0x12u | CPSR_I_BIT;
+    const unsigned old_bank = mode_to_bank(saved_cpsr);
+    const unsigned irq_bank = mode_to_bank(new_cpsr);
+    if (old_bank != irq_bank) {
+        bank_out(old_bank, saved_cpsr);
+        bank_in(irq_bank, new_cpsr);
+    }
+    g_cpu.cpsr = new_cpsr;
+    g_cpu.banked_spsr[irq_bank] = saved_cpsr;
+
+    const uint32_t return_lr = return_address + 4u;
+    const uint32_t sp = g_cpu.R[13] - 24u;
+    g_cpu.R[13] = sp;
+    const uint32_t saved_regs[6] = {
+        g_cpu.R[0], g_cpu.R[1], g_cpu.R[2], g_cpu.R[3], g_cpu.R[12], return_lr
+    };
+    for (unsigned i = 0; i < 6; ++i) bus_write_u32(sp + i * 4u, saved_regs[i]);
+    g_cpu.R[0] = 0x04000000u;
+    g_cpu.R[14] = 0x00000138u;
+    g_cpu.R[15] = bus_read_u32(0x03007FFCu) & ~3u;
+}
+
 void runtime_irq_standalone_hle(uint32_t return_address,
                                 uint32_t irq_src,
                                 uint32_t saved_cpsr) {
@@ -1259,6 +1294,41 @@ void runtime_irq_standalone_hle(uint32_t return_address,
 
 }  // namespace
 
+extern "C" int runtime_hle_irq_epilogue(void) {
+    if (!g_bios_hle_standalone || g_irq_nest_depth == 0u ||
+        (g_cpu.R[15] & ~1u) != 0x00000138u ||
+        (g_cpu.cpsr & 0x1Fu) != 0x12u) {
+        return 0;
+    }
+    const uint32_t slot = (g_irq_nest_depth - 1u) % kHleIrqMaxDepth;
+    const uint32_t irq_src = g_hle_irq_src_stack[slot];
+    const uint16_t saved_ie = g_hle_irq_ie_stack[slot];
+    const unsigned irq_bank = mode_to_bank(g_cpu.cpsr);
+    const uint32_t saved_cpsr = g_cpu.banked_spsr[irq_bank];
+    const unsigned old_bank = mode_to_bank(saved_cpsr);
+    const uint32_t sp = g_cpu.R[13];
+    uint32_t restored[6]{};
+    for (unsigned i = 0; i < 6; ++i) restored[i] = bus_read_u32(sp + i * 4u);
+    g_cpu.R[13] = sp + 24u;
+    g_cpu.R[0] = restored[0]; g_cpu.R[1] = restored[1];
+    g_cpu.R[2] = restored[2]; g_cpu.R[3] = restored[3];
+    g_cpu.R[12] = restored[4]; g_cpu.R[14] = restored[5];
+
+    const uint16_t flags = bus_read_u16(0x03007FF8u);
+    bus_write_u16(0x03007FF8u, static_cast<uint16_t>(flags | irq_src));
+    bus_write_u16(0x04000202u, static_cast<uint16_t>(irq_src));
+    bus_write_u16(0x04000200u, saved_ie);
+
+    if (old_bank != irq_bank) {
+        bank_out(irq_bank, g_cpu.cpsr);
+        bank_in(old_bank, saved_cpsr);
+    }
+    g_cpu.cpsr = saved_cpsr;
+    g_cpu.R[15] = restored[5] - 4u;
+    --g_irq_nest_depth;
+    return 1;
+}
+
 extern "C" void runtime_irq(uint32_t return_address) {
     ++g_runtime_irq_entries;
     ++g_irq_nest_depth;
@@ -1292,6 +1362,10 @@ extern "C" void runtime_irq(uint32_t return_address) {
                         g_irq_nest_depth);
     runtime_irq_log_record(irq_src, return_address, saved_cpsr);
 
+    if (g_bios_hle_standalone && g_force_interp) {
+        runtime_irq_standalone_begin_async(return_address, irq_src, saved_cpsr);
+        return;  // depth is released by runtime_hle_irq_epilogue at 0x138
+    }
     if (g_bios_hle_standalone) {
         runtime_irq_standalone_hle(return_address, irq_src, saved_cpsr);
         --g_irq_nest_depth;

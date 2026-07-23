@@ -283,6 +283,11 @@ int run(int argc, char** argv) {
   std::error_code ec;
   fs::create_directories(data, ec);
   if (!ec) fs::current_path(data, ec);
+#if defined(_WIN32)
+  _putenv_s("GBARECOMP_ASSET_CACHE_DIR", data.string().c_str());
+#else
+  setenv("GBARECOMP_ASSET_CACHE_DIR", data.string().c_str(), 1);
+#endif
 
   if (!has_option(args, "--config")) {
     args.emplace_back("--config");

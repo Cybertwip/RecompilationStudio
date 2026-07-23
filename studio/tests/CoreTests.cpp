@@ -188,6 +188,7 @@ int main(int argc, char** argv) {
     QStringLiteral("Studio Test Advance"), QString(40, QLatin1Char('a')), 0x12345678u);
   check(gbaMain.contains(QStringLiteral("parent_path().parent_path() / \"Resources\"")) &&
           gbaMain.contains(QStringLiteral("--save-path")) &&
+          gbaMain.contains(QStringLiteral("GBARECOMP_ASSET_CACHE_DIR")) &&
           gbaMain.contains(QStringLiteral("builtin_rom_sha1")),
         QStringLiteral("generated GBA entry point resolves packaged resources and writable saves"));
   const QString gbaToml = psxstudio::generatedGbaGameToml(

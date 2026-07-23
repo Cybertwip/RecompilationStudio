@@ -132,6 +132,9 @@ def main():
     p = sub.add_parser("tracepc")
     p.add_argument("pc")
     p.add_argument("--count", type=int, default=4096)
+    p = sub.add_parser("paced")
+    p.add_argument("--frames", type=int, default=600)
+    p.add_argument("--hz", type=float, default=59.7275)
     p = sub.add_parser("watchhash")
     p.add_argument("--frames", type=int, default=30)
     p = sub.add_parser("watchmem")
@@ -228,6 +231,17 @@ def main():
             if value == pc: rows.append(row)
         print(json.dumps({"ok": True, "pc": hex(pc), "matches": rows,
                           "scanned": len(r.get("entries", []))}))
+    elif args.cmd == "paced":
+        period = 1.0 / max(args.hz, 1.0)
+        t0 = time.monotonic()
+        for i in range(args.frames):
+            c.call(cmd="step", timeout=5.0)
+            deadline = t0 + (i + 1) * period
+            delay = deadline - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        print(json.dumps({"ok": True, "frames": args.frames,
+                          "elapsed": round(time.monotonic() - t0, 3)}))
     elif args.cmd == "watchhash":
         rows = []
         for frame in range(args.frames + 1):

@@ -55,6 +55,7 @@ private slots:
   void chooseBiosInitialSplash();
   void chooseBiosHandoffImage();
   void updateBiosPatchControls();
+  void updateSystemControls();
   void updateBatchMode();
   void updatePlatformControls();
   void updateExportMode();
@@ -109,7 +110,13 @@ private:
     QString volumeId;
   };
 
+  QLabel* headerTitle_{ nullptr };
+  QLabel* headerSubtitle_{ nullptr };
+  QLabel* discLabel_{ nullptr };
+  QLabel* biosLabel_{ nullptr };
+  QLabel* padPolicyLabel_{ nullptr };
   QLineEdit* discEdit_{ nullptr };
+  QComboBox* systemCombo_{ nullptr };
   QComboBox* platformCombo_{ nullptr };
   QComboBox* exportModeCombo_{ nullptr };
   QCheckBox* batchCheck_{ nullptr };
@@ -151,6 +158,13 @@ private:
   QScrollArea* formsScroll_{ nullptr };
   QGridLayout* formsLayout_{ nullptr };
   oclero::qlementine::ThemeManager* themeManager_{ nullptr };
+  SystemKind currentSystem_{ SystemKind::PlayStation };
+  QString psxInputPath_;
+  QString psxBiosPath_;
+  QString psxBatchDirectory_;
+  QString gbaInputPath_;
+  QString gbaBiosPath_;
+  QString gbaBatchDirectory_;
   QStringList selectedBins_;
   QList<BatchGameEntry> batchEntries_;
   QList<PipelineRequest> pendingRequests_;

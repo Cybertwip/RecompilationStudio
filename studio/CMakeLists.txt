@@ -79,6 +79,8 @@ set(STUDIO_CORE_SOURCES
   src/DiscCatalog.h
   src/DiscInspector.cpp
   src/DiscInspector.h
+  src/GbaSupport.cpp
+  src/GbaSupport.h
   src/PipelineSupport.cpp
   src/PipelineSupport.h
   src/PipelineTypes.h
@@ -178,6 +180,8 @@ if(BUILD_TESTING)
     src/DiscCatalog.h
     src/DiscInspector.cpp
     src/DiscInspector.h
+    src/GbaSupport.cpp
+    src/GbaSupport.h
     src/PipelineSupport.cpp
     src/PipelineSupport.h
     src/PipelineTypes.h

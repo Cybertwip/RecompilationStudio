@@ -3,6 +3,7 @@
 #include "BiosBrandingPatcher.h"
 #include "CueSheet.h"
 #include "DiscInspector.h"
+#include "GbaSupport.h"
 #include "PipelineSupport.h"
 
 #include <QCoreApplication>
@@ -863,6 +864,10 @@ bool PipelineWorker::runCommand(const QString& program,
 
 void PipelineWorker::run(PipelineRequest request) {
   cancelRequested_.store(false, std::memory_order_relaxed);
+  if (request.system == SystemKind::GameBoyAdvance) {
+    runGba(request);
+    return;
+  }
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;

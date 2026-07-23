@@ -8,6 +8,27 @@
 
 namespace psxstudio {
 
+enum class SystemKind {
+  PlayStation,
+  GameBoyAdvance,
+};
+
+inline QString systemKindKey(SystemKind system) {
+  return system == SystemKind::GameBoyAdvance ? QStringLiteral("gba")
+                                               : QStringLiteral("playstation");
+}
+
+inline QString systemKindDisplayName(SystemKind system) {
+  return system == SystemKind::GameBoyAdvance
+    ? QStringLiteral("Game Boy Advance") : QStringLiteral("PlayStation");
+}
+
+inline SystemKind systemKindFromKey(const QString& key) {
+  return key.compare(QStringLiteral("gba"), Qt::CaseInsensitive) == 0 ||
+         key.compare(QStringLiteral("game-boy-advance"), Qt::CaseInsensitive) == 0
+    ? SystemKind::GameBoyAdvance : SystemKind::PlayStation;
+}
+
 enum class TargetPlatform {
   All,
   MacOS,
@@ -120,10 +141,12 @@ inline TargetPlatform targetPlatformFromKey(const QString& key) {
 }
 
 struct PipelineRequest {
+  SystemKind system{ SystemKind::PlayStation };
   TargetPlatform targetPlatform{ hostTargetPlatform() };
   ExportMode exportMode{ ExportMode::Build };
   BuildBackend buildBackend{ BuildBackend::Local };
   QString cuePath;
+  QString romPath;
   QStringList selectedBinPaths;
   QString biosPath;
   QString iconPath;
@@ -154,10 +177,12 @@ struct PipelineRequest {
       bins.append(path);
     }
     QJsonObject object{
+      { QStringLiteral("system"), systemKindKey(system) },
       { QStringLiteral("platform"), targetPlatformKey(targetPlatform) },
       { QStringLiteral("export_mode"), exportModeKey(exportMode) },
       { QStringLiteral("build_backend"), buildBackendKey(buildBackend) },
       { QStringLiteral("cue_path"), cuePath },
+      { QStringLiteral("rom_path"), romPath },
       { QStringLiteral("bin_paths"), bins },
       { QStringLiteral("bios_path"), biosPath },
       { QStringLiteral("icon_path"), iconPath },
@@ -215,6 +240,7 @@ struct GameDescription {
 } // namespace psxstudio
 
 Q_DECLARE_METATYPE(psxstudio::PipelineRequest)
+Q_DECLARE_METATYPE(psxstudio::SystemKind)
 Q_DECLARE_METATYPE(psxstudio::TargetPlatform)
 Q_DECLARE_METATYPE(psxstudio::ExportMode)
 Q_DECLARE_METATYPE(psxstudio::BuildBackend)

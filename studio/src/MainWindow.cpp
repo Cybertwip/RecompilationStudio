@@ -2,6 +2,7 @@
 
 #include "CiPanel.h"
 #include "DiscCatalog.h"
+#include "GbaSupport.h"
 #include "PipelineSupport.h"
 #include "PipelineWorker.h"
 
@@ -36,8 +37,9 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QSettings>
 #include <QSet>
+#include <QSettings>
+#include <QSignalBlocker>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QTabWidget>
@@ -157,18 +159,18 @@ MainWindow::MainWindow(QWidget* parent)
   auto* headerTextLayout = new QVBoxLayout(headerText);
   headerTextLayout->setContentsMargins(0, 0, 0, 0);
   headerTextLayout->setSpacing(4);
-  auto* title = new QLabel(QStringLiteral("Build a native PlayStation app"), headerText);
-  auto titleFont = title->font();
+  headerTitle_ = new QLabel(QStringLiteral("Build a native PlayStation app"), headerText);
+  auto titleFont = headerTitle_->font();
   titleFont.setBold(true);
   titleFont.setPointSizeF(titleFont.pointSizeF() + 7.0);
-  title->setFont(titleFont);
-  auto* subtitle = new QLabel(
+  headerTitle_->setFont(titleFont);
+  headerSubtitle_ = new QLabel(
     QStringLiteral("One workflow for disc analysis, evidence-backed source generation, native compilation, "
                    "and platform packaging."),
     headerText);
-  subtitle->setWordWrap(true);
-  headerTextLayout->addWidget(title);
-  headerTextLayout->addWidget(subtitle);
+  headerSubtitle_->setWordWrap(true);
+  headerTextLayout->addWidget(headerTitle_);
+  headerTextLayout->addWidget(headerSubtitle_);
   themeButton_ = new QPushButton(header);
   themeButton_->setMinimumWidth(104);
   themeButton_->setToolTip(QStringLiteral("Switch between dark and light themes"));
@@ -197,6 +199,20 @@ MainWindow::MainWindow(QWidget* parent)
   inputLayout->setContentsMargins(18, 16, 18, 18);
   inputLayout->setSpacing(10);
   inputLayout->addWidget(makeSectionTitle(QStringLiteral("App inputs"), inputCard_));
+
+  auto* systemRow = new QWidget(inputCard_);
+  systemRow->setMinimumHeight(34);
+  auto* systemLayout = new QHBoxLayout(systemRow);
+  systemLayout->setContentsMargins(0, 0, 0, 0);
+  auto* systemLabel = new QLabel(QStringLiteral("System"), systemRow);
+  systemLabel->setMinimumWidth(142);
+  systemCombo_ = new QComboBox(systemRow);
+  systemCombo_->addItem(QStringLiteral("PlayStation"), systemKindKey(SystemKind::PlayStation));
+  systemCombo_->addItem(QStringLiteral("Game Boy Advance"), systemKindKey(SystemKind::GameBoyAdvance));
+  configureReadOnlyComboBox(systemCombo_);
+  systemLayout->addWidget(systemLabel);
+  systemLayout->addWidget(systemCombo_, 1);
+  inputLayout->addWidget(systemRow);
 
   auto* platformRow = new QWidget(inputCard_);
   platformRow->setMinimumHeight(34);
@@ -229,6 +245,7 @@ MainWindow::MainWindow(QWidget* parent)
 
   discEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("Disc BIN/CUE"),
                          QStringLiteral("One .cue and all referenced .bin files"), SLOT(chooseDisc()));
+  discLabel_ = qobject_cast<QLabel*>(discEdit_->parentWidget()->layout()->itemAt(0)->widget());
   batchDirectoryEdit_ = addPathRow(
     inputCard_, inputLayout, QStringLiteral("Game directory"),
     QStringLiteral("Folder containing PlayStation BIN/CUE files"), SLOT(chooseBatchDirectory()));
@@ -248,6 +265,7 @@ MainWindow::MainWindow(QWidget* parent)
   inputLayout->addWidget(batchList_);
   biosEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("PlayStation BIOS"),
                          QStringLiteral("Canonical SCPH1001.BIN only"), SLOT(chooseBios()));
+  biosLabel_ = qobject_cast<QLabel*>(biosEdit_->parentWidget()->layout()->itemAt(0)->widget());
   iconEdit_ = addPathRow(inputCard_, inputLayout, QStringLiteral("App icon"),
                          QStringLiteral("Optional PNG, SVG, or ICNS"), SLOT(chooseIcon()));
   if (auto* iconRow = qobject_cast<QHBoxLayout*>(iconEdit_->parentWidget()->layout())) {
@@ -263,14 +281,14 @@ MainWindow::MainWindow(QWidget* parent)
     QStringLiteral("Keeps the recompiled BIOS linked, but skips its visible shell/intro and proceeds directly to disc boot."));
   inputLayout->addWidget(skipBiosBoot_);
 
-  auto* padPolicy = new QLabel(
+  padPolicyLabel_ = new QLabel(
     QStringLiteral("Controller: automatic D-Pad first, Hybrid fallback"), inputCard_);
-  padPolicy->setObjectName(QStringLiteral("secondaryText"));
-  padPolicy->setWordWrap(true);
-  padPolicy->setToolTip(
+  padPolicyLabel_->setObjectName(QStringLiteral("secondaryText"));
+  padPolicyLabel_->setWordWrap(true);
+  padPolicyLabel_->setToolTip(
     QStringLiteral("Each game negotiates its controller at runtime. A real D-Pad is "
                    "presented first; Hybrid is enabled only if the game rejects it."));
-  inputLayout->addWidget(padPolicy);
+  inputLayout->addWidget(padPolicyLabel_);
 
   macosGipGamepad_ = new QCheckBox(
     QStringLiteral("Enable wired Xbox/PDP controllers on macOS"), inputCard_);
@@ -472,6 +490,8 @@ MainWindow::MainWindow(QWidget* parent)
   connect(cancelButton_, &QPushButton::clicked, this, &MainWindow::cancelBuild);
   connect(revealButton_, &QPushButton::clicked, this, &MainWindow::revealOutput);
   connect(themeButton_, &QPushButton::clicked, this, &MainWindow::toggleTheme);
+  connect(systemCombo_, &QComboBox::currentIndexChanged,
+          this, &MainWindow::updateSystemControls);
   connect(platformCombo_, &QComboBox::currentIndexChanged,
           this, &MainWindow::updatePlatformControls);
   connect(batchCheck_, &QCheckBox::toggled, this, &MainWindow::updateBatchMode);
@@ -512,6 +532,7 @@ MainWindow::MainWindow(QWidget* parent)
   }
 
   loadSettings();
+  updateSystemControls();
   updateBatchMode();
   updateExportMode();
   updatePlatformControls();
@@ -682,13 +703,32 @@ QString MainWindow::detectGhidraHome() const {
 
 void MainWindow::loadSettings() {
   QSettings settings;
+  const QString systemKey = settings.value(
+    QStringLiteral("app/system"), systemKindKey(SystemKind::PlayStation)).toString();
+  const int systemIndex = systemCombo_->findData(systemKey);
+  {
+    const QSignalBlocker blocker(systemCombo_);
+    systemCombo_->setCurrentIndex(systemIndex >= 0 ? systemIndex : 0);
+  }
+  currentSystem_ = systemKindFromKey(systemCombo_->currentData().toString());
+  psxInputPath_ = settings.value(QStringLiteral("paths/psx_disc"),
+                                 settings.value(QStringLiteral("paths/disc"))).toString();
+  psxBiosPath_ = settings.value(QStringLiteral("paths/psx_bios"),
+                                settings.value(QStringLiteral("paths/bios"))).toString();
+  psxBatchDirectory_ = settings.value(QStringLiteral("batch/psx_directory"),
+                                      settings.value(QStringLiteral("batch/directory"))).toString();
+  gbaInputPath_ = settings.value(QStringLiteral("paths/gba_rom")).toString();
+  gbaBiosPath_ = settings.value(QStringLiteral("paths/gba_bios")).toString();
+  gbaBatchDirectory_ = settings.value(QStringLiteral("batch/gba_directory")).toString();
+  discEdit_->setText(currentSystem_ == SystemKind::GameBoyAdvance ? gbaInputPath_ : psxInputPath_);
+  biosEdit_->setText(currentSystem_ == SystemKind::GameBoyAdvance ? gbaBiosPath_ : psxBiosPath_);
+  batchCheck_->setChecked(settings.value(QStringLiteral("batch/enabled"), false).toBool());
+  batchDirectoryEdit_->setText(currentSystem_ == SystemKind::GameBoyAdvance
+    ? gbaBatchDirectory_ : psxBatchDirectory_);
   const QString platformKey = settings.value(
     QStringLiteral("app/platform"), targetPlatformKey(hostTargetPlatform())).toString();
   const int platformIndex = platformCombo_->findData(platformKey);
   platformCombo_->setCurrentIndex(platformIndex >= 0 ? platformIndex : 0);
-  batchCheck_->setChecked(settings.value(QStringLiteral("batch/enabled"), false).toBool());
-  batchDirectoryEdit_->setText(settings.value(QStringLiteral("batch/directory")).toString());
-  biosEdit_->setText(settings.value(QStringLiteral("paths/bios")).toString());
   iconEdit_->setText(settings.value(QStringLiteral("paths/icon")).toString());
   outputEdit_->setText(settings.value(QStringLiteral("paths/output"),
                                       QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)).toString());
@@ -718,10 +758,30 @@ void MainWindow::loadSettings() {
 
 void MainWindow::saveSettings() const {
   QSettings settings;
+  QString psxInput = psxInputPath_;
+  QString psxBios = psxBiosPath_;
+  QString psxBatch = psxBatchDirectory_;
+  QString gbaInput = gbaInputPath_;
+  QString gbaBios = gbaBiosPath_;
+  QString gbaBatch = gbaBatchDirectory_;
+  if (currentSystem_ == SystemKind::GameBoyAdvance) {
+    gbaInput = discEdit_->text();
+    gbaBios = biosEdit_->text();
+    gbaBatch = batchDirectoryEdit_->text();
+  } else {
+    psxInput = discEdit_->text();
+    psxBios = biosEdit_->text();
+    psxBatch = batchDirectoryEdit_->text();
+  }
+  settings.setValue(QStringLiteral("app/system"), systemCombo_->currentData().toString());
   settings.setValue(QStringLiteral("app/platform"), platformCombo_->currentData().toString());
   settings.setValue(QStringLiteral("batch/enabled"), batchCheck_->isChecked());
-  settings.setValue(QStringLiteral("batch/directory"), batchDirectoryEdit_->text());
-  settings.setValue(QStringLiteral("paths/bios"), biosEdit_->text());
+  settings.setValue(QStringLiteral("batch/psx_directory"), psxBatch);
+  settings.setValue(QStringLiteral("batch/gba_directory"), gbaBatch);
+  settings.setValue(QStringLiteral("paths/psx_disc"), psxInput);
+  settings.setValue(QStringLiteral("paths/psx_bios"), psxBios);
+  settings.setValue(QStringLiteral("paths/gba_rom"), gbaInput);
+  settings.setValue(QStringLiteral("paths/gba_bios"), gbaBios);
   settings.setValue(QStringLiteral("paths/icon"), iconEdit_->text());
   settings.setValue(QStringLiteral("paths/output"), outputEdit_->text());
   settings.setValue(QStringLiteral("paths/certificate"), certificateEdit_->text());
@@ -742,6 +802,29 @@ void MainWindow::saveSettings() const {
 }
 
 void MainWindow::chooseDisc() {
+  if (currentSystem_ == SystemKind::GameBoyAdvance) {
+    const QString path = QFileDialog::getOpenFileName(
+      this, QStringLiteral("Select Game Boy Advance ROM"),
+      discEdit_->text().isEmpty() ? QDir::homePath()
+                                  : QFileInfo(discEdit_->text()).absolutePath(),
+      QStringLiteral("Game Boy Advance ROMs (*.gba *.GBA);;All files (*)"));
+    if (path.isEmpty()) return;
+    GbaDescription game;
+    QString error;
+    if (!inspectGbaRom(path, game, error)) {
+      QMessageBox::warning(this, QStringLiteral("GBA ROM selection"), error);
+      return;
+    }
+    if (!game.warning.isEmpty()) {
+      QMessageBox::warning(this, QStringLiteral("Unusual GBA header"), game.warning);
+    }
+    discEdit_->setText(path);
+    selectedBins_.clear();
+    if (titleEdit_->text().isEmpty())
+      titleEdit_->setText(game.title + QStringLiteral(" Recompiled"));
+    return;
+  }
+
   const auto files = QFileDialog::getOpenFileNames(
     this, QStringLiteral("Select PlayStation BIN/CUE files"),
     discEdit_->text().isEmpty() ? QDir::homePath() : QFileInfo(discEdit_->text()).absolutePath(),
@@ -778,18 +861,72 @@ void MainWindow::chooseDisc() {
     titleEdit_->setText(QFileInfo(sourcePath).completeBaseName() + QStringLiteral(" Recompiled"));
   }
 }
-
 void MainWindow::chooseBatchDirectory() {
+  const bool gba = currentSystem_ == SystemKind::GameBoyAdvance;
   const QString path = QFileDialog::getExistingDirectory(
-    this, QStringLiteral("Select PlayStation game directory"),
+    this, gba ? QStringLiteral("Select Game Boy Advance game directory")
+              : QStringLiteral("Select PlayStation game directory"),
     batchDirectoryEdit_->text().isEmpty() ? QDir::homePath()
                                           : batchDirectoryEdit_->text());
   if (!path.isEmpty()) {
     populateBatchDirectory(path, true);
   }
 }
-
 void MainWindow::populateBatchDirectory(const QString& path, bool showDialogs) {
+  if (currentSystem_ == SystemKind::GameBoyAdvance) {
+    QList<GbaCatalogEntry> catalog;
+    QStringList warnings;
+    QString error;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const bool scanned = scanGbaDirectory(path, catalog, warnings, error);
+    QApplication::restoreOverrideCursor();
+    batchDirectoryEdit_->setText(path);
+    batchEntries_.clear();
+    if (!scanned) {
+      batchSummaryLabel_->setText(error);
+      rebuildBatchList();
+      if (showDialogs)
+        QMessageBox::warning(this, QStringLiteral("No GBA games found"), error);
+      updateBuildButton();
+      return;
+    }
+    QSettings settings;
+    for (const auto& game : catalog) {
+      const QString id = batchEntrySettingsId(game.sourcePath);
+      const QString iconKey = batchIconSettingKey(id);
+      QString savedIcon = settings.value(iconKey).toString();
+      if (!savedIcon.isEmpty() && !QFileInfo(savedIcon).isFile()) {
+        settings.remove(iconKey);
+        savedIcon.clear();
+      }
+      batchEntries_.append({ id, game.sourcePath, {}, game.suggestedTitle,
+                             savedIcon, game.gameCode, QStringLiteral("GBA") });
+    }
+    batchSummaryLabel_->setText(
+      warnings.isEmpty()
+        ? QStringLiteral("%1 GBA game%2 found. Edit names and choose optional icons below.")
+            .arg(batchEntries_.size()).arg(batchEntries_.size() == 1 ? QString() : QStringLiteral("s"))
+        : QStringLiteral("%1 GBA game%2 found; %3 header warning%4 recorded.")
+            .arg(batchEntries_.size()).arg(batchEntries_.size() == 1 ? QString() : QStringLiteral("s"))
+            .arg(warnings.size()).arg(warnings.size() == 1 ? QString() : QStringLiteral("s")));
+    rebuildBatchList();
+    if (showDialogs && !warnings.isEmpty()) {
+      QMessageBox warning(QMessageBox::Warning, QStringLiteral("GBA header warnings"),
+                          QStringLiteral("Studio found %1 buildable GBA image%2 with %3 warning%4.")
+                            .arg(batchEntries_.size())
+                            .arg(batchEntries_.size() == 1 ? QString() : QStringLiteral("s"))
+                            .arg(warnings.size())
+                            .arg(warnings.size() == 1 ? QString() : QStringLiteral("s")),
+                          QMessageBox::Ok, this);
+      warning.setDetailedText(warnings.join(QStringLiteral("
+")));
+      warning.exec();
+    }
+    updateBuildButton();
+    reflowForms(true);
+    return;
+  }
+
   QList<DiscCatalogEntry> catalog;
   QStringList warnings;
   QString error;
@@ -996,6 +1133,73 @@ void MainWindow::chooseBiosHandoffImage() {
   if (!path.isEmpty()) biosHandoffImageEdit_->setText(path);
 }
 
+void MainWindow::updateSystemControls() {
+  const SystemKind selected = systemKindFromKey(systemCombo_->currentData().toString());
+  if (selected != currentSystem_) {
+    if (currentSystem_ == SystemKind::GameBoyAdvance) {
+      gbaInputPath_ = discEdit_->text();
+      gbaBiosPath_ = biosEdit_->text();
+      gbaBatchDirectory_ = batchDirectoryEdit_->text();
+    } else {
+      psxInputPath_ = discEdit_->text();
+      psxBiosPath_ = biosEdit_->text();
+      psxBatchDirectory_ = batchDirectoryEdit_->text();
+    }
+    currentSystem_ = selected;
+    {
+      const QSignalBlocker inputBlocker(discEdit_);
+      const QSignalBlocker biosBlocker(biosEdit_);
+      const QSignalBlocker batchBlocker(batchDirectoryEdit_);
+      discEdit_->setText(selected == SystemKind::GameBoyAdvance ? gbaInputPath_ : psxInputPath_);
+      biosEdit_->setText(selected == SystemKind::GameBoyAdvance ? gbaBiosPath_ : psxBiosPath_);
+      batchDirectoryEdit_->setText(selected == SystemKind::GameBoyAdvance
+        ? gbaBatchDirectory_ : psxBatchDirectory_);
+    }
+    selectedBins_.clear();
+    batchEntries_.clear();
+    rebuildBatchList();
+    if (batchCheck_->isChecked() && QFileInfo(batchDirectoryEdit_->text()).isDir())
+      populateBatchDirectory(batchDirectoryEdit_->text(), false);
+  }
+
+  const bool gba = selected == SystemKind::GameBoyAdvance;
+  headerTitle_->setText(gba ? QStringLiteral("Build a native Game Boy Advance app")
+                            : QStringLiteral("Build a native PlayStation app"));
+  headerSubtitle_->setText(gba
+    ? QStringLiteral("One workflow for self-contained ARM/THUMB recompilation, native compilation, and platform packaging — no Ghidra step.")
+    : QStringLiteral("One workflow for disc analysis, evidence-backed source generation, native compilation, and platform packaging."));
+  if (discLabel_) discLabel_->setText(gba ? QStringLiteral("GBA ROM") : QStringLiteral("Disc BIN/CUE"));
+  discEdit_->setPlaceholderText(gba ? QStringLiteral("One .gba cartridge image")
+                                    : QStringLiteral("One .cue and all referenced .bin files"));
+  if (biosLabel_) biosLabel_->setText(gba ? QStringLiteral("GBA BIOS") : QStringLiteral("PlayStation BIOS"));
+  biosEdit_->setPlaceholderText(gba ? QStringLiteral("16 KiB gba_bios.bin")
+                                    : QStringLiteral("Canonical SCPH1001.BIN only"));
+  batchCheck_->setToolTip(gba
+    ? QStringLiteral("Scan a directory recursively and queue one export for every .gba image.")
+    : QStringLiteral("Scan a directory recursively and queue one export for every PlayStation CUE or standalone BIN image."));
+  batchDirectoryEdit_->setPlaceholderText(gba
+    ? QStringLiteral("Folder containing .gba cartridge images")
+    : QStringLiteral("Folder containing PlayStation BIN/CUE files"));
+  batchSummaryLabel_->setText(gba
+    ? QStringLiteral("Choose a directory to create the GBA game list. Icons are optional.")
+    : QStringLiteral("Choose a directory to create the game list. Icons are optional."));
+  titleEdit_->setPlaceholderText(gba ? QStringLiteral("Example: Final Fantasy VI Advance Recompiled")
+                                     : QStringLiteral("Example: Evil Zone Recompiled"));
+
+  ghidraEdit_->parentWidget()->setVisible(!gba);
+  brandingCard_->setVisible(!gba);
+  skipBiosBoot_->setVisible(!gba);
+  padPolicyLabel_->setVisible(!gba);
+  macosGipGamepad_->setVisible(!gba &&
+    (targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::MacOS ||
+     targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::All));
+  if (gba) biosPatchEnabled_->setChecked(false);
+  updateBatchMode();
+  updatePlatformControls();
+  reflowForms(true);
+  updateBuildButton();
+}
+
 void MainWindow::updateBiosPatchControls() {
   const bool enabled = biosPatchEnabled_ && biosPatchEnabled_->isChecked();
   if (biosInitialSplashEdit_) biosInitialSplashEdit_->parentWidget()->setEnabled(enabled);
@@ -1025,9 +1229,13 @@ void MainWindow::updateExportMode() {
 }
 
 void MainWindow::chooseBios() {
+  const bool gba = currentSystem_ == SystemKind::GameBoyAdvance;
   const auto path = QFileDialog::getOpenFileName(
-    this, QStringLiteral("Select SCPH1001.BIN"), QFileInfo(biosEdit_->text()).absolutePath(),
-    QStringLiteral("SCPH1001 BIOS (SCPH1001.BIN);;BIN files (*.BIN *.bin)"));
+    this, gba ? QStringLiteral("Select 16 KiB GBA BIOS")
+              : QStringLiteral("Select SCPH1001.BIN"),
+    QFileInfo(biosEdit_->text()).absolutePath(),
+    gba ? QStringLiteral("GBA BIOS (*.bin *.BIN);;All files (*)")
+        : QStringLiteral("SCPH1001 BIOS (SCPH1001.BIN);;BIN files (*.BIN *.bin)"));
   if (!path.isEmpty()) {
     biosEdit_->setText(path);
   }
@@ -1087,12 +1295,17 @@ void MainWindow::chooseGhidraHome() {
 
 PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   PipelineRequest request;
+  request.system = systemKindFromKey(systemCombo_->currentData().toString());
   request.targetPlatform = targetPlatformFromKey(platformCombo_->currentData().toString());
   request.exportMode = exportModeFromKey(exportModeCombo_->currentData().toString());
   request.buildBackend = BuildBackend::Local;
   request.useCi = request.exportMode == ExportMode::Build && useCi_->isChecked();
-  request.cuePath = discEdit_->text();
-  request.selectedBinPaths = selectedBins_;
+  if (request.system == SystemKind::GameBoyAdvance) {
+    request.romPath = discEdit_->text();
+  } else {
+    request.cuePath = discEdit_->text();
+    request.selectedBinPaths = selectedBins_;
+  }
   request.biosPath = biosEdit_->text();
   request.iconPath = iconEdit_->text();
   request.windowTitle = titleEdit_->text();
@@ -1103,13 +1316,16 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   }
   request.ghidraHome = ghidraEdit_->text();
   request.frameworkRoot = QString::fromUtf8(PSXRECOMP_SOURCE_ROOT);
-  request.patchBiosBranding = biosPatchEnabled_->isChecked();
+  request.patchBiosBranding = request.system == SystemKind::PlayStation &&
+                               biosPatchEnabled_->isChecked();
   request.biosInitialSplashPath = biosInitialSplashEdit_->text();
   request.biosHandoffImagePath = biosHandoffImageEdit_->text();
   request.biosMuteBootAudio = biosMuteAudio_->isChecked();
   request.biosRemoveStockPsGlyph = biosRemovePsGlyph_->isChecked();
-  request.skipBiosBoot = skipBiosBoot_->isChecked();
-  request.macosGipGamepad = macosGipGamepad_->isChecked();
+  request.skipBiosBoot = request.system == SystemKind::PlayStation &&
+                         skipBiosBoot_->isChecked();
+  request.macosGipGamepad = request.system == SystemKind::PlayStation &&
+                           macosGipGamepad_->isChecked();
   request.exportAsZip = exportAsZip_->isChecked();
   request.overwriteOutput = overwrite;
   return request;
@@ -1128,8 +1344,15 @@ QList<PipelineRequest> MainWindow::requestsFromUi(bool overwrite) const {
           request.certificatePath.clear();
           request.certificatePassword.clear();
         }
-        request.cuePath = entry.sourcePath;
-        request.selectedBinPaths = entry.selectedBinPaths;
+        if (request.system == SystemKind::GameBoyAdvance) {
+          request.romPath = entry.sourcePath;
+          request.cuePath.clear();
+          request.selectedBinPaths.clear();
+        } else {
+          request.cuePath = entry.sourcePath;
+          request.romPath.clear();
+          request.selectedBinPaths = entry.selectedBinPaths;
+        }
         request.iconPath = entry.iconPath;
         request.windowTitle = entry.title.trimmed();
         requests.append(request);
@@ -1536,6 +1759,7 @@ void MainWindow::setBusy(bool busy) {
   batchCheck_->setEnabled(!busy);
   batchList_->setEnabled(!busy);
   signingEnabled_->setEnabled(!busy);
+  systemCombo_->setEnabled(!busy);
   platformCombo_->setEnabled(!busy);
   skipBiosBoot_->setEnabled(!busy);
   macosGipGamepad_->setEnabled(!busy);
@@ -1571,8 +1795,9 @@ void MainWindow::updatePlatformControls() {
   certificatePasswordEdit_->parentWidget()->setVisible(signingRequested);
   certificateEdit_->parentWidget()->setEnabled(signingRequested && !busy);
   certificatePasswordEdit_->parentWidget()->setEnabled(signingRequested && !busy);
-  macosGipGamepad_->setVisible(includesMacos);
-  macosGipGamepad_->setEnabled(includesMacos && !busy);
+  const bool playStation = currentSystem_ == SystemKind::PlayStation;
+  macosGipGamepad_->setVisible(playStation && includesMacos);
+  macosGipGamepad_->setEnabled(playStation && includesMacos && !busy);
   useCi_->setEnabled(buildMode && !busy);
   exportAsZip_->setText(exportMode == ExportMode::Source
     ? QStringLiteral("Export source as zip") : QStringLiteral("Export as zip"));
@@ -1621,7 +1846,8 @@ void MainWindow::updateBuildButton() {
   const ExportMode exportMode =
     exportModeFromKey(exportModeCombo_->currentData().toString());
   const bool buildMode = exportMode == ExportMode::Build;
-  const bool brandingReady = !biosPatchEnabled_->isChecked() ||
+  const bool brandingReady = currentSystem_ == SystemKind::GameBoyAdvance ||
+    !biosPatchEnabled_->isChecked() ||
     (!biosInitialSplashEdit_->text().isEmpty() && !biosHandoffImageEdit_->text().isEmpty());
   const auto selectedPlatform = targetPlatformFromKey(platformCombo_->currentData().toString());
   const bool includesMacos = selectedPlatform == TargetPlatform::MacOS ||
@@ -1643,8 +1869,10 @@ void MainWindow::updateBuildButton() {
                 [](TargetPlatform platform) {
                   return targetPlatformSupportedOnHost(platform);
                 });
+  const bool analysisReady = currentSystem_ == SystemKind::GameBoyAdvance ||
+                             !ghidraEdit_->text().isEmpty();
   const bool ready = gameReady && !biosEdit_->text().isEmpty() &&
-                     !outputEdit_->text().isEmpty() && !ghidraEdit_->text().isEmpty() &&
+                     !outputEdit_->text().isEmpty() && analysisReady &&
                      signingReady && brandingReady && ciReady && localPlatformReady;
   buildButton_->setText(QStringLiteral("Export"));
   buildButton_->setEnabled(ready);

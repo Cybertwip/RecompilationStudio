@@ -71,7 +71,7 @@ read-only for this work.
 
 ### 4. Add the GBA pipeline
 
-- Validate the GBA ROM header/size and a 16 KiB BIOS.
+- Validate the GBA ROM header/size and select canonical LLE or standalone HLE from the optional 16 KiB BIOS.
 - Hash both inputs and create a deterministic temporary workspace.
 - Build `gba_recompile`, generate sharded C++, and generate a standalone CMake
   project that links `extra/gba++` without touching root `runtime/`.

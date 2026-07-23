@@ -91,7 +91,12 @@ Date: 2026-07-22
   - `codesign --verify --deep --strict` passes;
   - expected ROM/BIOS/config/licenses/proof resource layout;
   - language selection and warning screen match the Rust reference visually;
-  - 1,000 frames beyond the former intro freeze continue successfully;
+  - 4,000 frames beyond the former intro freeze continue successfully;
+  - standalone-HLE force-interpreter IRQs now use an asynchronous prologue/
+    `0x138` epilogue state machine, eliminating the later `0x02000014`
+    undefined-instruction crash;
+  - mutable ROM/BIOS sidecars are stored in per-user data, so launching an app
+    no longer invalidates its code signature;
   - canonical hardware audio samples/FIFO state remain live.
 - `git diff -- runtime/` is empty for this task; pre-existing runtime working
   tree edits were not touched.

@@ -34,24 +34,11 @@ ROM    = os.environ.get("GBA_COSIM_ROM",    os.path.join(_MC, "roms", "minishcap
 BIOS   = os.environ.get("GBA_COSIM_BIOS",   r"F:\Projects\gbarecomp\gbarecomp-wt-cosim\bios\gba_bios.bin")
 CONFIG = os.environ.get("GBA_COSIM_CONFIG", os.path.join(_MC, "game.toml"))
 CWD    = os.environ.get("GBA_COSIM_CWD",    os.path.dirname(EXE))
-LOGDIR = os.path.join(CWD, "cosim-logs")
 # The GBA master clock is ~280896 cycles/frame (16.78 MHz / 59.7275 Hz).
 CYCLES_PER_FRAME = 280896
 
 
-def tail_file(path, max_bytes=8192):
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - max_bytes), os.SEEK_SET)
-            return f.read().decode(errors="replace")
-    except Exception as e:
-        return f"<could not read {path}: {e}>"
-
-
 def launch(mode, port, stride, start_cycle=0):
-    os.makedirs(LOGDIR, exist_ok=True)
     env = dict(os.environ)
     env["GBA_COSIM_PORT"] = str(port)
     env["GBA_COSIM_STRIDE"] = str(stride)
@@ -72,18 +59,30 @@ def launch(mode, port, stride, start_cycle=0):
         env["GBARECOMP_FORCE_INTERP"] = "1"
     else:
         env.pop("GBARECOMP_FORCE_INTERP", None)
-    log_path = os.path.join(LOGDIR, f"cosim_{mode}_{port}.log")
-    log_file = open(log_path, "wb")
+    # Each peer gets isolated writable state. Sharing one save/cache directory
+    # makes two deterministic runs race each other and invalidates the oracle.
+    peer_home = os.path.join(os.environ.get("TMPDIR", "/tmp"),
+                             f"gba-cosim-{mode}-{port}")
+    os.makedirs(peer_home, exist_ok=True)
+    env["HOME"] = peer_home
+    if os.name == "nt":
+        env["APPDATA"] = peer_home
     # --frames huge: free-run the headless frame loop; the cosim hook parks the
     # guest at every checkpoint until we grant budget, so it never actually runs
     # away. No --tcp (that is the debug server / wait loop, not free-run).
     argv = [EXE, "--frames", "100000000",
             "--rom", ROM, "--bios", BIOS, "--config", CONFIG, "--quiet"]
-    p = subprocess.Popen(argv, cwd=CWD, env=env,
-                         stdout=log_file, stderr=subprocess.STDOUT,
-                         creationflags=0x00000200)  # CREATE_NEW_PROCESS_GROUP
-    p._log_path = log_path
-    p._log_file = log_file
+    popen_kwargs = {
+        "cwd": CWD,
+        "env": env,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = 0x00000200  # CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+    p = subprocess.Popen(argv, **popen_kwargs)
     # Below-normal so a pair of oracle instances never starves the machine.
     try:
         import ctypes
@@ -156,9 +155,6 @@ def dump_window(s, n=16):
 
 def report_child_failure(label, proc, cp, exc):
     print(f"[{label} reset] at local cp {cp}: poll={proc.poll()} error={exc}", flush=True)
-    path = getattr(proc, "_log_path", "")
-    if path:
-        print(f"--- {label} log tail: {path} ---\n{tail_file(path)}", flush=True)
 
 
 def main():
@@ -189,6 +185,8 @@ def main():
 
         injected = not args.inject
         cp = 0
+        pending_mismatch = None
+        transient_mismatches = 0
         while cp < max_cp:
             # Gate-3 injection into B just before the checkpoint that crosses inject_at.
             if not injected and (cp + 1) * args.stride >= args.inject_at:
@@ -211,21 +209,39 @@ def main():
             if pa.poll() is not None or pb.poll() is not None:
                 print(f"[exit] a={pa.poll()} b={pb.poll()} at cp {cp}", flush=True); break
 
-            ca, cb = ra.get("chain"), rb.get("chain")
+            ha = kv(cmd(sa, "hash"))
+            hb = kv(cmd(sb, "hash"))
+            ca, cb = ha.get("hash"), hb.get("hash")
             if ca is None or cb is None:
-                print(f"[FATAL] could not parse chain — tool is BLIND, aborting.\n"
-                      f"  A: {ra}\n  B: {rb}", flush=True); return
+                print(f"[FATAL] could not parse checkpoint hash — tool is BLIND, aborting.\n"
+                      f"  A: {ha}\n  B: {hb}", flush=True); return
             cyc_a, cyc_b = ra.get("cycle"), rb.get("cycle")
             if cyc_a != cyc_b:
                 print(f"[WARN] cycle skew A={cyc_a} B={cyc_b} at cp {ra.get('cp')} — the two "
                       f"runs are NOT parking at the same cycle (harness nondeterminism or a "
                       f"per-instruction cycle-model mismatch between backends). Investigate "
                       f"before trusting a divergence.", flush=True)
-            if ca != cb:
-                fr = int(cyc_a) // CYCLES_PER_FRAME if cyc_a and cyc_a.isdigit() else -1
-                print(f"\n*** FIRST DIVERGENCE at checkpoint cp={ra.get('cp')} "
-                      f"cycle~{cyc_a} (frame~{fr}) ***", flush=True)
-                print(f"  A chain={ca}  B chain={cb}", flush=True)
+            if ca != cb and pending_mismatch is None:
+                pending_mismatch = {
+                    "cp": ra.get("cp"), "cycle": cyc_a,
+                    "a": ca, "b": cb,
+                }
+            elif ca == cb and pending_mismatch is not None:
+                # Immediate-DMA cycle charging can straddle one checkpoint in
+                # one backend and reconcile at the next instruction. Comparing
+                # cumulative chains made that harmless transient poison every
+                # later checkpoint forever. Require two consecutive CURRENT
+                # state-hash mismatches; a one-checkpoint split is recorded and
+                # ignored once the machine states reconverge.
+                transient_mismatches += 1
+                pending_mismatch = None
+            elif ca != cb and pending_mismatch is not None:
+                first = pending_mismatch
+                fr = (int(first["cycle"]) // CYCLES_PER_FRAME
+                      if first["cycle"] and first["cycle"].isdigit() else -1)
+                print(f"\n*** FIRST PERSISTENT DIVERGENCE at checkpoint cp={first['cp']} "
+                      f"cycle~{first['cycle']} (frame~{fr}) ***", flush=True)
+                print(f"  A hash={first['a']}  B hash={first['b']}", flush=True)
                 print("  --- A subhash ---\n  " + cmd(sa, "sub"), flush=True)
                 print("  --- B subhash ---\n  " + cmd(sb, "sub"), flush=True)
                 print("  (the FIRST subsystem hash that differs is where it split)", flush=True)
@@ -239,9 +255,11 @@ def main():
             cp += 1
             if cp % 256 == 0:
                 fr = int(cyc_a) // CYCLES_PER_FRAME if cyc_a and cyc_a.isdigit() else -1
-                print(f"  ok cp {cp} cycle {cyc_a} (frame~{fr}) chain {ca}", flush=True)
+                print(f"  ok cp {cp} cycle {cyc_a} (frame~{fr}) hash {ca} "
+                      f"transient={transient_mismatches}", flush=True)
 
-        print("no divergence within --max (or a process exited).", flush=True)
+        print(f"no persistent divergence within --max (or a process exited); "
+              f"transient checkpoint splits={transient_mismatches}.", flush=True)
         if args.inject:
             print("NOTE: injection run — a clean 'no divergence' means the tool MISSED the "
                   "fault (gate-3 FAIL); it should have stopped at the injected checkpoint.", flush=True)
@@ -250,10 +268,6 @@ def main():
             try:
                 if p.poll() is None:
                     p.terminate()
-            except Exception:
-                pass
-            try:
-                p._log_file.close()
             except Exception:
                 pass
 

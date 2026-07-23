@@ -82,6 +82,200 @@ struct Cli {
     bool emit_symbol_map = true; // --no-symbol-map opts out (debug aid)
 };
 
+struct CallbackPointerEntry {
+    uint32_t source_addr = 0;
+    uint32_t raw_value = 0;
+    uint32_t target_addr = 0;
+    CpuMode mode = CpuMode::Arm;
+};
+
+struct CallbackPointerTable {
+    uint32_t source_addr = 0;
+    uint32_t stride = 0;
+    std::vector<CallbackPointerEntry> entries;
+};
+
+std::vector<CallbackPointerTable> discover_callback_pointer_tables(
+    const std::vector<uint8_t>& rom, uint32_t rom_base,
+    const Config* config) {
+    auto in_rom = [&](uint32_t addr, uint32_t width) {
+        return addr >= rom_base &&
+               static_cast<uint64_t>(addr - rom_base) + width <= rom.size();
+    };
+    auto in_data_range = [&](uint32_t addr) {
+        if (!config) return false;
+        for (const auto& range : config->data_ranges) {
+            if (addr >= range.start && addr < range.end) return true;
+        }
+        for (const auto& table : config->jump_tables) {
+            const uint64_t end = static_cast<uint64_t>(table.addr) +
+                                 static_cast<uint64_t>(table.count) * table.stride;
+            if (addr >= table.addr && static_cast<uint64_t>(addr) < end)
+                return true;
+        }
+        return false;
+    };
+    auto read16 = [&](uint32_t addr) -> uint16_t {
+        const std::size_t off = static_cast<std::size_t>(addr - rom_base);
+        return static_cast<uint16_t>(rom[off]) |
+               (static_cast<uint16_t>(rom[off + 1]) << 8);
+    };
+    auto read32 = [&](uint32_t addr) -> uint32_t {
+        const std::size_t off = static_cast<std::size_t>(addr - rom_base);
+        return static_cast<uint32_t>(rom[off]) |
+               (static_cast<uint32_t>(rom[off + 1]) << 8) |
+               (static_cast<uint32_t>(rom[off + 2]) << 16) |
+               (static_cast<uint32_t>(rom[off + 3]) << 24);
+    };
+    auto arm_prologue = [&](uint32_t target) {
+        for (uint32_t i = 0; i < 2; ++i) {
+            const uint32_t pc = target + i * 4u;
+            if (!in_rom(pc, 4)) return false;
+            const auto ins = armv4t::ArmDecoder::decode(read32(pc), pc);
+            if (ins.op == armv4t::IrOp::STM && !ins.block.load &&
+                ins.block.writeback && ins.block.rn == 13 &&
+                ins.block.pre_indexed && !ins.block.add &&
+                (ins.block.reg_list & (1u << 14)) != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto decode_run = [&](uint32_t target, CpuMode mode) {
+        uint32_t pc = target;
+        for (uint32_t i = 0; i < 6; ++i) {
+            armv4t::Instr ins;
+            if (mode == CpuMode::Thumb) {
+                if (!in_rom(pc, 2)) return i != 0;
+                ins = armv4t::ThumbDecoder::decode(read16(pc), pc);
+                pc += 2;
+            } else {
+                if (!in_rom(pc, 4)) return i != 0;
+                ins = armv4t::ArmDecoder::decode(read32(pc), pc);
+                pc += 4;
+            }
+            if (ins.is_undefined) return false;
+            if (ins.is_return && i != 0) return true;
+        }
+        return true;
+    };
+    auto thumb_has_local_return = [&](uint32_t target) {
+        uint32_t pc = target;
+        for (uint32_t i = 0; i < 64u; ++i) {
+            if (!in_rom(pc, 2)) return false;
+            const auto ins = armv4t::ThumbDecoder::decode(read16(pc), pc);
+            if (ins.is_undefined) return false;
+            if (ins.is_return) return true;
+            if (ins.is_branch && !ins.is_call &&
+                ins.cond == armv4t::Cond::AL) {
+                // A table entry should identify a self-contained callable
+                // body. Do not speculate across a tail branch here; direct
+                // control-flow discovery already owns those targets.
+                return false;
+            }
+            pc += 2u;
+        }
+        return false;
+    };
+    auto decode_pointer = [&](uint32_t source,
+                              CallbackPointerEntry* out) -> bool {
+        if (!in_rom(source, 4)) return false;
+        const uint32_t raw = read32(source);
+        CpuMode mode;
+        uint32_t target;
+        if ((raw & 1u) != 0u) {
+            mode = CpuMode::Thumb;
+            target = raw & ~uint32_t{1};
+        } else if ((raw & 3u) == 0u) {
+            mode = CpuMode::Arm;
+            target = raw;
+        } else {
+            return false;
+        }
+        if (!in_rom(target, mode == CpuMode::Thumb ? 2u : 4u) ||
+            in_data_range(target) || !decode_run(target, mode)) {
+            return false;
+        }
+        if (mode == CpuMode::Thumb && !thumb_has_local_return(target))
+            return false;
+        if (mode == CpuMode::Arm && !arm_prologue(target)) return false;
+        *out = CallbackPointerEntry{source, raw, target, mode};
+        return true;
+    };
+
+    std::vector<CallbackPointerTable> tables;
+    std::unordered_set<uint64_t> seen_tables;
+    for (uint32_t source = rom_base;
+         static_cast<uint64_t>(source - rom_base) + 4u <= rom.size();
+         source += 4u) {
+        CallbackPointerEntry first;
+        if (!decode_pointer(source, &first)) continue;
+
+        CallbackPointerTable best;
+        for (uint32_t stride = 8u; stride <= 64u; stride += 4u) {
+            CallbackPointerEntry previous;
+            if (source >= rom_base + stride &&
+                decode_pointer(source - stride, &previous) &&
+                previous.mode == first.mode) {
+                continue;  // canonicalize at the first record in the table
+            }
+            CallbackPointerTable candidate;
+            candidate.source_addr = source;
+            candidate.stride = stride;
+            for (uint32_t index = 0; index < 256u; ++index) {
+                const uint64_t entry64 = static_cast<uint64_t>(source) +
+                                         static_cast<uint64_t>(index) * stride;
+                if (entry64 > UINT32_MAX) break;
+                CallbackPointerEntry entry;
+                if (!decode_pointer(static_cast<uint32_t>(entry64), &entry) ||
+                    entry.mode != first.mode) {
+                    break;
+                }
+                candidate.entries.push_back(entry);
+            }
+            if (candidate.entries.size() >= 3u &&
+                candidate.entries.size() > best.entries.size()) {
+                best = std::move(candidate);
+            }
+        }
+        if (best.entries.size() < 3u) continue;
+        const uint64_t key = (static_cast<uint64_t>(best.source_addr) << 8) |
+                             best.stride;
+        if (seen_tables.insert(key).second) tables.push_back(std::move(best));
+    }
+    return tables;
+}
+
+void write_callback_pointer_manifest(
+    const std::string& out_dir,
+    const std::vector<CallbackPointerTable>& tables) {
+    std::ofstream out(std::filesystem::path(out_dir) /
+                      "callback_pointer_manifest.json",
+                      std::ios::binary | std::ios::trunc);
+    if (!out) return;
+    out << "{\n  \"schema\": 1,\n  \"tables\": [";
+    for (std::size_t i = 0; i < tables.size(); ++i) {
+        const auto& table = tables[i];
+        out << (i == 0 ? "\n" : ",\n")
+            << "    {\"source\": \"0x" << std::hex << std::uppercase
+            << table.source_addr << "\", \"stride\": " << std::dec
+            << table.stride << ", \"count\": " << table.entries.size()
+            << ", \"entries\": [";
+        for (std::size_t j = 0; j < table.entries.size(); ++j) {
+            const auto& entry = table.entries[j];
+            out << (j == 0 ? "" : ", ")
+                << "{\"source\": \"0x" << std::hex << std::uppercase
+                << entry.source_addr << "\", \"raw\": \"0x"
+                << entry.raw_value << "\", \"target\": \"0x"
+                << entry.target_addr << "\", \"mode\": \""
+                << (entry.mode == CpuMode::Thumb ? "thumb" : "arm")
+                << "\"}";
+        }
+        out << "]}";
+    }
+    out << "\n  ]\n}\n";
+}
+
 void print_usage() {
     std::printf(
         "gba_recompile --rom <path> [--entry HEX] [--symbols TSV]\n"
@@ -1010,6 +1204,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::vector<CallbackPointerTable> callback_pointer_tables;
+    std::size_t callback_pointer_seed_count = 0;
     if (cli.bios_mode) {
         // GBA BIOS exception vector layout (ARM ARM A2.6):
         //   0x00 reset       — power-on entry
@@ -1040,6 +1236,25 @@ int main(int argc, char** argv) {
         finder.add_seed(FunctionSeed{effective_entry, CpuMode::Arm,
                                       "start_vector"});
         for (const auto& s : seeds) finder.add_seed(s);
+
+        callback_pointer_tables = discover_callback_pointer_tables(
+            rom, effective_rom_base, have_cfg ? &cfg : nullptr);
+        std::unordered_set<uint64_t> callback_targets;
+        for (const auto& table : callback_pointer_tables) {
+            for (const auto& entry : table.entries) {
+                const uint64_t key =
+                    (static_cast<uint64_t>(entry.target_addr) << 1) |
+                    (entry.mode == CpuMode::Thumb ? 1u : 0u);
+                if (!callback_targets.insert(key).second) continue;
+                FunctionSeed seed{entry.target_addr, entry.mode, {}};
+                seed.speculative = true;
+                finder.add_seed(seed);
+                ++callback_pointer_seed_count;
+            }
+        }
+        std::printf("==> callback pointer tables: %zu (%zu unique seeds)\n",
+                    callback_pointer_tables.size(),
+                    callback_pointer_seed_count);
     }
     finder.run(cli.max_functions);
 
@@ -1194,6 +1409,10 @@ int main(int argc, char** argv) {
     std::string mkdir_cmd = "mkdir -p \"" + cli.out_dir + "\"";
 #endif
     std::system(mkdir_cmd.c_str());
+    if (!cli.bios_mode) {
+        write_callback_pointer_manifest(cli.out_dir,
+                                        callback_pointer_tables);
+    }
 
     // Sanitize function names to valid, unique, non-reserved C++ identifiers
     // before emission. Work on a copy so the finder's canonical vector (and

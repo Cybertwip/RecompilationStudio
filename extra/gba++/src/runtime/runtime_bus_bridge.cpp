@@ -501,6 +501,12 @@ static inline void drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
     }
     tick_devices(bus, ppu, cyc);
     recompute_event_budget(bus, ppu);
+#ifdef GBA_COSIM
+    // DMA advances the master clock outside runtime_tick(). Checkpoint after
+    // the stolen-cycle device window is fully materialized so the oracle never
+    // samples one backend before this advance and the other after it.
+    cosim_on_tick();
+#endif
 }
 
 // Materialize lagged device state up to 'now'. Called before any MMIO access so
@@ -600,6 +606,12 @@ extern "C" void runtime_tick(uint32_t cycles) {
             g_runtime_cycles += gba::kIrqWakeDelayCycles;
             tick_devices(bus, ppu, gba::kIrqWakeDelayCycles);
             recompute_event_budget(bus, ppu);
+#ifdef GBA_COSIM
+            // Wake latency is another direct master-clock advance outside the
+            // ordinary runtime_tick increment. Keep fixed-cycle checkpoints
+            // aligned to the fully materialized machine state.
+            cosim_on_tick();
+#endif
         }
         runtime_irq(g_cpu.R[15]);
     }

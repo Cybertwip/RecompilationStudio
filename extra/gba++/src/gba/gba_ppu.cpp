@@ -327,7 +327,7 @@ void mark_obj_window_scanline(bool* mask,
     if ((dispcnt & 0x8000u) == 0) return;
 
     uint32_t bg_mode = dispcnt & 0x07u;
-    uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+    uint32_t obj_tile_base = 0x10000u;
     bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
 
     for (int idx = 127; idx >= 0; --idx) {
@@ -355,6 +355,7 @@ void mark_obj_window_scanline(bool* mask,
 
         bool color256 = (attr0 & 0x2000u) != 0;
         uint32_t tile_num = attr2 & 0x3FFu;
+        if (bg_mode >= 3 && tile_num < 512u) continue;
         int tiles_w = sw / 8;
         int tiles_h = sh / 8;
 
@@ -677,10 +678,45 @@ void render_scanline_internal(uint8_t* rgb,
     } else if (bg_mode == 2) {
         render_affine_bg(3, 0x0E, 0x30);
         render_affine_bg(2, 0x0C, 0x20);
+    } else if (bg_mode >= 3 && bg_mode <= 5 && (dispcnt & 0x0400u)) {
+        // Bitmap modes expose BG2 as a framebuffer. Match the Rust reference:
+        // mode 3 = 240x160 direct BGR555, mode 4 = 240x160 indexed/paged,
+        // mode 5 = 160x128 direct/paged. The bitmap participates in the same
+        // BG2 priority/window/blend composition as affine BG2.
+        const uint16_t bg2cnt = static_cast<uint16_t>(io[0x0C] | (io[0x0D] << 8));
+        const int key = static_cast<int>((bg2cnt & 0x3u) * 256u + 128u + 2u);
+        const uint32_t page = (dispcnt & 0x0010u) ? 0xA000u : 0u;
+        for (uint32_t x = 0; x < kScreenWidth; ++x) {
+            if (!layer_enabled(x, 2)) continue;
+            uint16_t color = 0;
+            bool opaque = true;
+            if (bg_mode == 3) {
+                const uint32_t off = (y * 240u + x) * 2u;
+                if (off + 1u >= 96u * 1024u) continue;
+                color = static_cast<uint16_t>(load_u16_le(&vram[off]) & 0x7FFFu);
+            } else if (bg_mode == 4) {
+                const uint32_t off = page + y * 240u + x;
+                if (off >= 96u * 1024u) continue;
+                const uint8_t index = vram[off];
+                if (index == 0u) opaque = false;
+                else color = load_u16_le(&pal[static_cast<uint32_t>(index) * 2u]);
+            } else {
+                if (x >= 160u || y >= 128u) opaque = false;
+                else {
+                    const uint32_t off = page + (y * 160u + x) * 2u;
+                    if (off + 1u >= 96u * 1024u) continue;
+                    color = static_cast<uint16_t>(load_u16_le(&vram[off]) & 0x7FFFu);
+                }
+            }
+            if (!opaque) continue;
+            submit(x, color, key, 2,
+                   blend_enabled(x) && ((first_targets & (1u << 2)) != 0),
+                   (second_targets & (1u << 2)) != 0);
+        }
     }
 
     if (dispcnt & 0x1000u) {
-        uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+        uint32_t obj_tile_base = 0x10000u;
         bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
         const uint8_t* obj_pal = pal + 0x200;
         for (int idx = 127; idx >= 0; --idx) {
@@ -704,6 +740,7 @@ void render_scanline_internal(uint8_t* rgb,
             if (sx & 0x100) sx -= 0x200;
             bool color256 = (attr0 & 0x2000u) != 0;
             uint32_t tile_num = attr2 & 0x3FFu;
+        if (bg_mode >= 3 && tile_num < 512u) continue;
             uint32_t palette_bank = (attr2 >> 12) & 0xFu;
             int tiles_w = sw / 8;
             int tiles_h = sh / 8;
@@ -1146,7 +1183,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
     }
 
     if (dispcnt & 0x1000u) {
-        uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+        uint32_t obj_tile_base = 0x10000u;
         bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
         const uint8_t* obj_pal = pal + 0x200;
         for (int idx = 127; idx >= 0; --idx) {
@@ -1185,6 +1222,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             };
             bool color256 = (attr0 & 0x2000u) != 0;
             uint32_t tile_num = attr2 & 0x3FFu;
+        if (bg_mode >= 3 && tile_num < 512u) continue;
             uint32_t palette_bank = (attr2 >> 12) & 0xFu;
             int tiles_w = sw / 8;
             int tiles_h = sh / 8;

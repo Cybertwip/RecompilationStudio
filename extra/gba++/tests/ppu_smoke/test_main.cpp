@@ -120,6 +120,61 @@ void test_brightness_native_domain_and_green_precision() {
     expect_pixel(f.rgb.data(), 24, 49, 16, "darken native-domain rounding");
 }
 
+void test_bitmap_modes_render_bg2() {
+    Fixture f;
+    // Mode 3: direct-color pixel at (0,0).
+    store16(&f.vram[0], 0x001Fu);  // red
+    f.ppu.render(f.rgb.data(), 0x0403u, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 255, 0, 0, "mode 3 direct-color pixel");
+
+    // Mode 4: indexed page 0, then page 1 selected by DISPCNT bit 4.
+    std::fill(f.rgb.begin(), f.rgb.end(), 0);
+    std::fill(f.vram.begin(), f.vram.end(), 0);
+    store16(&f.pal[2], 0x03E0u);  // index 1 = green
+    store16(&f.pal[4], 0x7C00u);  // index 2 = blue
+    f.vram[0] = 1;
+    f.vram[0xA000] = 2;
+    f.ppu.render(f.rgb.data(), 0x0404u, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 255, 0, "mode 4 page zero indexed pixel");
+    f.ppu.render(f.rgb.data(), 0x0414u, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 0, 255, "mode 4 page one indexed pixel");
+
+    // In bitmap modes OBJ tile indices 0..511 overlap the framebuffer and are
+    // not drawable. Tile 512 begins at VRAM 0x14000.
+    std::fill(f.rgb.begin(), f.rgb.end(), 0);
+    std::fill(f.oam.begin(), f.oam.end(), 0);
+    store16(&f.oam[0], 0x2000u);  // 256-color, y=0
+    store16(&f.oam[2], 0x0000u);  // x=0
+    store16(&f.oam[4], 0x0000u);  // prohibited bitmap-overlap tile 0
+    f.vram[0] = 1;                // green bitmap BG pixel
+    f.vram[0x14000] = 1;          // red OBJ texel if erroneously drawn
+    store16(&f.pal[2], 0x03E0u);
+    store16(&f.pal[0x202], 0x001Fu);
+    f.ppu.render(f.rgb.data(), 0x1404u, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 255, 0,
+                 "mode 4 suppresses OBJ tiles below 512");
+    store16(&f.oam[4], 0x0200u);  // tile 512 -> 0x14000
+    f.ppu.render(f.rgb.data(), 0x1404u, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 255, 0, 0,
+                 "mode 4 OBJ tile 512 starts at 0x14000");
+
+    // Mode 5: 160x128 direct-color page and transparent area outside it.
+    std::fill(f.rgb.begin(), f.rgb.end(), 0);
+    std::fill(f.vram.begin(), f.vram.end(), 0);
+    store16(&f.vram[0], 0x7C00u);
+    store16(&f.pal[0], 0x03E0u);  // backdrop outside 160x128
+    f.ppu.render(f.rgb.data(), 0x0405u, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 0, 255, "mode 5 direct-color pixel");
+    expect_pixel(f.rgb.data() + 200u * 3u, 0, 255, 0,
+                 "mode 5 outside area uses backdrop");
+}
+
 void test_extended_view_geometry_and_clamp() {
     gba::GbaPpu ppu;
     ppu.set_view_margins(24, 24, 0, 0);
@@ -643,6 +698,7 @@ void test_extended_view_extends_nearest_window_edge() {
 int main() {
     test_alpha_native_domain_and_green_precision();
     test_brightness_native_domain_and_green_precision();
+    test_bitmap_modes_render_bg2();
     test_extended_view_geometry_and_clamp();
     test_extended_view_capability_policy();
     test_resize_driven_view_policy();

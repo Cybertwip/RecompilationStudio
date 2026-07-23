@@ -132,6 +132,8 @@ def main():
     p = sub.add_parser("tracepc")
     p.add_argument("pc")
     p.add_argument("--count", type=int, default=4096)
+    p = sub.add_parser("watchhash")
+    p.add_argument("--frames", type=int, default=30)
     p = sub.add_parser("watchmem")
     p.add_argument("addr")
     p.add_argument("--len", type=int, default=16)
@@ -226,6 +228,16 @@ def main():
             if value == pc: rows.append(row)
         print(json.dumps({"ok": True, "pc": hex(pc), "matches": rows,
                           "scanned": len(r.get("entries", []))}))
+    elif args.cmd == "watchhash":
+        rows = []
+        for frame in range(args.frames + 1):
+            h = c.call(cmd="state_hash", timeout=5.0)
+            st = c.call(cmd="run_status", timeout=5.0)
+            rows.append({"step": frame, "frame": st.get("frame"),
+                         "pc": st.get("pc"), "hash": h})
+            if frame != args.frames:
+                c.call(cmd="step", timeout=10.0)
+        print(json.dumps({"ok": True, "rows": rows}))
     elif args.cmd == "watchmem":
         addr = int(args.addr, 0)
         cmd = "read_" + args.region

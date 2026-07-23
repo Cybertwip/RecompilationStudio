@@ -196,8 +196,15 @@ int main(int argc, char** argv) {
   check(gbaToml.contains(QStringLiteral("path = \"bios/gba_bios.bin\"")) &&
           gbaToml.contains(QStringLiteral("path = \"game/game.gba\"")) &&
           gbaToml.contains(QStringLiteral("hle = false")) &&
+          gbaToml.contains(QStringLiteral("shadow = false")) &&
           gbaToml.contains(QStringLiteral("entry_point = \"0X080000C0\"")),
         QStringLiteral("generated GBA runtime configuration pins packaged inputs"));
+  const QString gbaHleToml = psxstudio::generatedGbaGameToml(
+    gbaRequest, gbaDescription, QString(40, QLatin1Char('a')), 0x12345678u,
+    QString(40, QLatin1Char('b')), 0x87654321u, true);
+  check(gbaHleToml.contains(QStringLiteral("hle = true")) &&
+          gbaHleToml.contains(QStringLiteral("hle_keep_intro = false")),
+        QStringLiteral("noncanonical or absent GBA BIOS selects standalone HLE"));
   const QString gbaCmake = psxstudio::generatedGbaProjectCMake(
     gbaRequest, gbaDescription, QStringLiteral("Studio Test Advance"),
     QStringLiteral("org.psxrecomp.gba.test"));

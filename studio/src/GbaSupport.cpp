@@ -359,7 +359,7 @@ QString generatedGbaGameToml(const PipelineRequest& request,
   text += QStringLiteral("[runtime]\nwindow_title = %1\ndebug_port = 4371\n\n")
             .arg(tomlQuoted(request.windowTitle));
   text += QStringLiteral("[video]\nscreen = \"frontlit\"\nresize_view = false\n\n");
-  text += QStringLiteral("[audio]\nshadow = true\n");
+  text += QStringLiteral("[audio]\nshadow = false\n");
   return text;
 }
 

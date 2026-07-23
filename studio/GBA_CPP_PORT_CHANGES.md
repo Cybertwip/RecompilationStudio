@@ -34,8 +34,9 @@ Date: 2026-07-22
 
 ### Studio GBA pipeline
 
-- Validates ROM size/header metadata and a 16 KiB BIOS, then records SHA-1,
-  SHA-256, and CRC32 proof.
+- Validates ROM size/header metadata and hashes all inputs. A canonical 16 KiB
+  BIOS uses LLE; an absent or noncanonical image uses standalone BIOS HLE with
+  a deterministic zero placeholder that is never executed.
 - Builds `gba_recompile`, emits deterministic 16-shard C++, hashes every
   generated file, and records the honest AOT/self-heal coverage policy.
 - Produces an initialized Git source repository containing the isolated C++
@@ -66,6 +67,15 @@ Date: 2026-07-22
 
 - Rust behavioral reference: `cargo test --workspace --release` — **168 tests
   passed**.
+- Freeze/render repairs verified against the Rust reference:
+  - standalone BIOS HLE now implements reset/wait calls and IRQ dispatch;
+  - forced-stop interpreter bridges no longer skip RAM continuations or static
+    callees;
+  - bitmap BG modes 3/4/5 render through BG2;
+  - bitmap OBJ tile indices below 512 are rejected and tile 512 maps to
+    `0x14000`;
+  - a no-HALT watchdog preserves state and switches a stalled standalone-HLE
+    session to the reference interpreter instead of leaving the window frozen.
 - C++ port: configure/build plus `ctest --output-on-failure` — **16/16 tests
   passed**.
 - Studio: `PSXRecompStudioTests` and BIOS branding tests — **2/2 passed**.
@@ -79,7 +89,10 @@ Date: 2026-07-22
   - `@rpath/libSDL2-2.0.0.dylib` with bundled SDL2 and SDL3 compatibility
     runtime;
   - `codesign --verify --deep --strict` passes;
-  - expected ROM/BIOS/config/licenses/proof resource layout.
+  - expected ROM/BIOS/config/licenses/proof resource layout;
+  - language selection and warning screen match the Rust reference visually;
+  - 1,000 frames beyond the former intro freeze continue successfully;
+  - canonical hardware audio samples/FIFO state remain live.
 - `git diff -- runtime/` is empty for this task; pre-existing runtime working
   tree edits were not touched.
 
@@ -93,3 +106,20 @@ this C++ baseline include the egui launcher, SQLite `gamedb` reader, standalone
 `gba-pack` CLI vocabulary, wgpu/Wayland presentation backend, and the GAX/RDRV
 shadow engines. Those differences are preserved and documented rather than
 filled with guessed implementations.
+
+
+## Runtime fallback disclosure
+
+Generic ROM discovery still leaves interior dispatch gaps. The runtime reports
+those gaps, bridges them through the reference ARM7TDMI interpreter, and in
+standalone-HLE mode switches the whole session to that interpreter if generated
+AOT code spends a sustained second without HALT progress. This is deliberate,
+state-preserving, and loudly reported as `DEGRADED`; it prevents the later intro
+freeze but means such a session is not honestly “fully static.” A canonical-BIOS
+build remains on the normal AOT/LLE path unless it encounters its own reported
+coverage gap.
+
+The generic Studio profile disables the MP2K enhanced-audio shadow by default.
+FFVI’s driver variant failed the verifier and already reverted to canonical
+hardware audio; disabling the shadow removes the misleading degradation message
+and avoids extra audio work while retaining the verified FIFO/canonical output.

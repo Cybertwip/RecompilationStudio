@@ -14,7 +14,9 @@ selected output directory receives only the final platform package.
 ## Game Boy Advance flow
 
 Choose **Game Boy Advance** in the System selector, then provide one `.gba`
-cartridge image and one 16 KiB GBA BIOS image. GBA builds are self-contained and
+cartridge image. A canonical 16 KiB GBA BIOS is optional: canonical images use
+LLE; a blank or noncanonical selection uses the ported standalone BIOS HLE path.
+GBA builds are self-contained and
 do not invoke Ghidra. Batch mode scans recursively for `.gba` files. Studio
 builds the isolated C++ platform core under `extra/gba++`, emits sharded
 ARM/THUMB C++, and reuses the same platform, source/build, ZIP, signing, CI,

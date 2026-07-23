@@ -25,6 +25,10 @@ extern "C" {
  * binary produced the file. */
 void freeze_heartbeat_start(const char *backend_label);
 
+/* Write the canonical full freeze snapshot immediately. Used by diagnostic
+ * fatal/watchdog paths before termination; first fatal snapshot wins. */
+void freeze_heartbeat_fatal_dump(const char *reason);
+
 #ifdef __cplusplus
 }
 #endif

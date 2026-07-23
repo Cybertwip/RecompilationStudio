@@ -8,7 +8,10 @@
  * since last debug_server_poll; if it exceeds a threshold, the ring is
  * flushed to disk and the process aborts cleanly so the dump survives.
  *
- * NOT for permanent use. Disabled by setting STARVATION_RING_ENABLED=0.
+ * Diagnostic builds enable it by default. Production PSX_NO_DEBUG_TOOLS
+ * builds compile it out completely so slow/thermally-throttled hosts are never
+ * terminated by a fixed wall-clock threshold and pay no ring-recording cost.
+ * An explicit STARVATION_RING_ENABLED definition still overrides the default.
  */
 #ifndef PSXRECOMP_STARVATION_RING_H
 #define PSXRECOMP_STARVATION_RING_H
@@ -20,7 +23,11 @@ extern "C" {
 #endif
 
 #ifndef STARVATION_RING_ENABLED
-#define STARVATION_RING_ENABLED 1
+#  ifdef PSX_NO_DEBUG_TOOLS
+#    define STARVATION_RING_ENABLED 0
+#  else
+#    define STARVATION_RING_ENABLED 1
+#  endif
 #endif
 
 #define STARVATION_RING_CAP (1 << 14)  /* 16K entries */
@@ -86,10 +93,8 @@ void starvation_ring_record(uint8_t kind, uint8_t tx, uint8_t rx,
                             uint8_t pad_state, uint8_t selected_slot,
                             int g_sio_timing_active);
 
-/* Watchdog: call from debug_server_poll() to refresh the heartbeat.
- * If too much wall-time passes without a refresh AND the BIOS is
- * actively running (post-boot), the ring is dumped and the process
- * aborts. */
+/* Diagnostic-only watchdog heartbeat. In PSX_NO_DEBUG_TOOLS builds every
+ * function in this interface is compiled as a no-op. */
 void starvation_watchdog_heartbeat(void);
 
 /* Host-side intentional stalls (in-game pause/settings menu) must pause

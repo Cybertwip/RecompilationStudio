@@ -11,6 +11,7 @@
 
 #include "starvation_ring.h"
 #include "psx_cycles.h"
+#include "freeze_heartbeat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -234,13 +235,10 @@ void starvation_watchdog_check(void) {
     if (timeout == 0) return;              /* watchdog disabled (renderer bring-up) */
     uint64_t now = host_us_now();
     if (now - s_last_heartbeat_us > timeout) {
-        starvation_ring_dump(NULL);
-        /* Abort cleanly so the dump file is preserved and the user knows
-         * the runtime starved. */
-        fprintf(stderr, "starvation_watchdog: %llu us without heartbeat — "
-                "ring dumped to starvation_dump.jsonl, aborting\n",
-                (unsigned long long)(now - s_last_heartbeat_us));
-        fflush(stderr);
+        /* Diagnostic builds fail closed, but use the canonical structured
+         * freeze snapshot (rings + CPU + dirty-insn tail), never a printf/log
+         * side channel. Production builds compile this whole path out. */
+        freeze_heartbeat_fatal_dump("starvation watchdog");
         exit(2);
     }
 }

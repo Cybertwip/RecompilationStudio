@@ -152,6 +152,14 @@ if(BUILD_TESTING)
     target_include_directories(main_ram_mirror_test PRIVATE include)
     add_test(NAME main_ram_mirror COMMAND main_ram_mirror_test)
 
+    add_executable(starvation_release_policy_test
+        tests/starvation_release_policy_test.c
+        src/starvation_ring.c
+    )
+    target_include_directories(starvation_release_policy_test PRIVATE include)
+    target_compile_definitions(starvation_release_policy_test PRIVATE PSX_NO_DEBUG_TOOLS=1)
+    add_test(NAME starvation_release_policy COMMAND starvation_release_policy_test)
+
     add_executable(gte_trace_policy_test
         tests/gte_trace_policy_test.cpp
     )

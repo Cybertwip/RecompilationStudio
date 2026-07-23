@@ -1069,6 +1069,26 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         cmd_state_hash(ctx, out);
         return;
     }
+    if (contains("\"call_stack\"")) {
+        const uint32_t depth = runtime_call_stack_depth();
+        const uint32_t floor = runtime_call_stack_floor();
+        const uint32_t* entries = runtime_call_stack_data();
+        const uint32_t first = depth > 128u ? depth - 128u : 0u;
+        char header[128];
+        std::snprintf(header, sizeof(header),
+                      "{\"ok\":true,\"depth\":%u,\"floor\":%u,"
+                      "\"first\":%u,\"entries\":[",
+                      depth, floor, first);
+        out = header;
+        for (uint32_t i = first; i < depth; ++i) {
+            if (i != first) out += ",";
+            char item[24];
+            std::snprintf(item, sizeof(item), "\"0x%08X\"", entries[i]);
+            out += item;
+        }
+        out += "]}";
+        return;
+    }
     if (contains("\"registers\"")) {
         if (!ctx.cpu && !ctx.recomp_cpu) {
             emit_error(out, "cpu unavailable");

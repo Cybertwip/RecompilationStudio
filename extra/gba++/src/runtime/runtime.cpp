@@ -1780,15 +1780,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             const char* name = st == RS_RUNNING ? "running"
                              : st == RS_STEP    ? "stepping"
                              : st == RS_QUIT    ? "quit" : "paused";
-            char buf[192];
+            char buf[320];
             std::snprintf(buf, sizeof(buf),
                 "{\"ok\":true,\"run\":\"%s\",\"parked\":%s,\"pc\":\"0x%08X\","
-                "\"cpsr\":\"0x%08X\",\"frame\":%llu,\"vblank_starts\":%llu}",
+                "\"cpsr\":\"0x%08X\",\"frame\":%llu,\"vblank_starts\":%llu,"
+                "\"irq_depth\":%u,\"irq_iret_depth\":%u,\"irq_max_depth\":%llu,"
+                "\"call_depth\":%u,\"call_floor\":%u,\"force_interp\":%s}",
                 name, pk ? "true" : "false",
                 static_cast<unsigned>(g_cpu.R[15]),
                 static_cast<unsigned>(g_cpu.cpsr),
                 static_cast<unsigned long long>(ppu.frame_count()),
-                static_cast<unsigned long long>(g_runtime_vblank_starts));
+                static_cast<unsigned long long>(g_runtime_vblank_starts),
+                static_cast<unsigned>(g_irq_nest_depth),
+                static_cast<unsigned>(g_irq_iret_depth),
+                static_cast<unsigned long long>(g_runtime_irq_max_depth),
+                runtime_call_stack_depth(), runtime_call_stack_floor(),
+                g_force_interp ? "true" : "false");
             return std::string(buf);
         };
         // The recomp vectors IRQs in runtime_irq (runtime_arm.cpp), called from
@@ -2341,17 +2348,24 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                              : state == WDS_STEP_FRAME ? "step_frame"
                              : state == WDS_STEP_DISPATCH ? "step_dispatch"
                              : "quit";
-            char response[224];
+            char response[352];
             std::snprintf(
                 response, sizeof(response),
                 "{\"ok\":true,\"run\":\"%s\",\"parked\":%s,"
                 "\"pc\":\"0x%08X\",\"cpsr\":\"0x%08X\","
-                "\"frame\":%llu,\"vblank_starts\":%llu}",
+                "\"frame\":%llu,\"vblank_starts\":%llu,"
+                "\"irq_depth\":%u,\"irq_iret_depth\":%u,\"irq_max_depth\":%llu,"
+                "\"call_depth\":%u,\"call_floor\":%u,\"force_interp\":%s}",
                 name, parked ? "true" : "false",
                 static_cast<unsigned>(g_cpu.R[15]),
                 static_cast<unsigned>(g_cpu.cpsr),
                 static_cast<unsigned long long>(ppu.frame_count()),
-                static_cast<unsigned long long>(g_runtime_vblank_starts));
+                static_cast<unsigned long long>(g_runtime_vblank_starts),
+                static_cast<unsigned>(g_irq_nest_depth),
+                static_cast<unsigned>(g_irq_iret_depth),
+                static_cast<unsigned long long>(g_runtime_irq_max_depth),
+                runtime_call_stack_depth(), runtime_call_stack_floor(),
+                g_force_interp ? "true" : "false");
             return std::string(response);
         };
         window_debug_context.host_audio_query = [&]() -> std::string {

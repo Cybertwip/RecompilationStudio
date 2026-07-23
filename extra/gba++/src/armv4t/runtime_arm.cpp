@@ -878,6 +878,10 @@ extern "C" uint32_t runtime_call_stack_depth(void) {
     return g_call_return_depth;
 }
 
+extern "C" uint32_t runtime_call_stack_floor(void) {
+    return g_call_return_floor;
+}
+
 extern "C" const uint32_t* runtime_call_stack_data(void) {
     return g_call_return_stack;
 }

@@ -150,6 +150,9 @@ void runtime_dispatch_miss(uint32_t target_pc);
 // from GBARECOMP_FORCE_INTERP at startup. See COSIM_ORACLE.md §1.
 extern int g_force_interp;
 void runtime_force_interp_step(void);
+extern uint32_t g_irq_nest_depth;
+extern uint32_t g_irq_iret_depth;
+extern unsigned long long g_runtime_irq_max_depth;
 
 // True iff a STATIC (recompiled) dispatch-table entry exists for this guest PC
 // + instruction-set state. The on-miss bridge uses it to detect re-entry into
@@ -187,6 +190,7 @@ void runtime_call_cancel_return(uint32_t return_pc);
 // window. restore replaces the live stack wholesale (clamped to the
 // stack capacity). Returned pointer is valid until the next push/pop.
 uint32_t        runtime_call_stack_depth(void);
+uint32_t        runtime_call_stack_floor(void);
 const uint32_t* runtime_call_stack_data(void);
 void            runtime_call_stack_restore(const uint32_t* entries,
                                            uint32_t depth);

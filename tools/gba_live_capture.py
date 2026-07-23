@@ -225,6 +225,10 @@ def main() -> int:
     sample_index = 0
     deadline = started_mono
     consecutive_errors = 0
+    previous_frame = None
+    previous_presents = None
+    presentation_stall_samples = 0
+    fault_captured = False
 
     try:
         while not stop:
@@ -248,12 +252,27 @@ def main() -> int:
                 sample["irq_tail"] = client.call(cmd="irq_cap", count=16)
 
                 pc = parse_pc(sample["run_status"].get("pc"))
-                fps = float(sample["presentation_state"].get("fps", 0.0) or 0.0)
-                if not valid_gba_exec_pc(pc) or (fps > 0.0 and fps < 45.0):
+                frame_now = sample["run_status"].get("frame")
+                presents_now = sample["presentation_state"].get("total_presents")
+                if (isinstance(frame_now, int) and isinstance(previous_frame, int) and
+                    isinstance(presents_now, int) and isinstance(previous_presents, int) and
+                    frame_now > previous_frame and presents_now == previous_presents):
+                    presentation_stall_samples += 1
+                else:
+                    presentation_stall_samples = 0
+                previous_frame = frame_now
+                previous_presents = presents_now
+
+                fault_reason = None
+                if not valid_gba_exec_pc(pc):
+                    fault_reason = "invalid_pc"
+                elif presentation_stall_samples >= 2:
+                    fault_reason = "guest_frames_advance_without_presents"
+                if fault_reason and not fault_captured:
                     sample["fault_probe"] = {
-                        "reason": "invalid_pc" if not valid_gba_exec_pc(pc)
-                                  else "presentation_below_45_fps",
+                        "reason": fault_reason,
                         "registers": client.call(cmd="registers"),
+                        "call_stack": client.call(cmd="call_stack"),
                         "runtime_trace": client.call(cmd="runtime_trace", count=512,
                                                      timeout=10.0),
                         "irq_cap": client.call(cmd="irq_cap", count=256,
@@ -267,6 +286,7 @@ def main() -> int:
                                                      addr="0x04000200", len=16,
                                                      timeout=10.0),
                     }
+                    fault_captured = True
 
                 if args.misses_every > 0 and sample_index % args.misses_every == 0:
                     sample["misses"] = client.call(cmd="misses", timeout=10.0)

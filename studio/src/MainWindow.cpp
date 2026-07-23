@@ -918,8 +918,7 @@ void MainWindow::populateBatchDirectory(const QString& path, bool showDialogs) {
                             .arg(warnings.size())
                             .arg(warnings.size() == 1 ? QString() : QStringLiteral("s")),
                           QMessageBox::Ok, this);
-      warning.setDetailedText(warnings.join(QStringLiteral("
-")));
+      warning.setDetailedText(warnings.join(QStringLiteral("\n")));
       warning.exec();
     }
     updateBuildButton();

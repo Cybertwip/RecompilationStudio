@@ -476,6 +476,49 @@ bool runIconutil(const QString& iconsetPath, const QString& outputPath, QString&
   return QFileInfo::exists(outputPath);
 }
 
+void appendBe32(QByteArray& bytes, quint32 value) {
+  bytes.append(static_cast<char>((value >> 24u) & 0xffu));
+  bytes.append(static_cast<char>((value >> 16u) & 0xffu));
+  bytes.append(static_cast<char>((value >> 8u) & 0xffu));
+  bytes.append(static_cast<char>(value & 0xffu));
+}
+
+bool writePngBackedIcns(const QString& iconsetPath,
+                        const QString& outputPath,
+                        QString& error) {
+  struct Element { const char* type; const char* file; };
+  static constexpr Element elements[]{
+    { "icp4", "icon_16x16.png" },
+    { "icp5", "icon_32x32.png" },
+    { "icp6", "icon_32x32@2x.png" },
+    { "ic07", "icon_128x128.png" },
+    { "ic08", "icon_256x256.png" },
+    { "ic09", "icon_512x512.png" },
+    { "ic10", "icon_512x512@2x.png" },
+  };
+  QByteArray payload;
+  for (const auto& element : elements) {
+    QFile png(QDir(iconsetPath).filePath(QString::fromLatin1(element.file)));
+    if (!png.open(QIODevice::ReadOnly)) {
+      error = QStringLiteral("Could not read ICNS source %1: %2")
+                .arg(png.fileName(), png.errorString());
+      return false;
+    }
+    const QByteArray image = png.readAll();
+    if (!image.startsWith("\x89PNG\r\n\x1a\n")) {
+      error = QStringLiteral("ICNS source is not a PNG: %1").arg(png.fileName());
+      return false;
+    }
+    payload.append(element.type, 4);
+    appendBe32(payload, static_cast<quint32>(image.size() + 8));
+    payload.append(image);
+  }
+  QByteArray icns("icns", 4);
+  appendBe32(icns, static_cast<quint32>(payload.size() + 8));
+  icns.append(payload);
+  return writeBytes(outputPath, icns, error);
+}
+
 } // namespace
 
 bool createMacosIconset(const QString& sourceIcon,
@@ -523,7 +566,14 @@ bool createIcns(const QString& sourceIcon,
     return false;
   }
   QDir().mkpath(QFileInfo(outputPath).absolutePath());
-  return runIconutil(iconsetPath, outputPath, error);
+  QString iconutilError;
+  if (runIconutil(iconsetPath, outputPath, iconutilError)) return true;
+  if (writePngBackedIcns(iconsetPath, outputPath, error)) {
+    error.clear();
+    return true;
+  }
+  if (error.isEmpty()) error = iconutilError;
+  return false;
 }
 
 bool createIco(const QString& sourceIcon,

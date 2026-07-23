@@ -1,7 +1,9 @@
 #include "CueSheet.h"
 #include "DiscCatalog.h"
 #include "DiscInspector.h"
+#include "GbaSupport.h"
 #include "PipelineSupport.h"
+#include "PipelineWorker.h"
 
 #include "quazip.h"
 #include "quazipfile.h"
@@ -50,6 +52,25 @@ QByteArray directoryRecord(const QByteArray& name, quint32 lba, quint32 size, bo
   return record;
 }
 
+bool makeTestGba(const QString& path, QString& error) {
+  QByteArray rom(1 << 20, static_cast<char>(0xff));
+  qToLittleEndian<quint32>(0xEA00002Eu,
+                           reinterpret_cast<uchar*>(rom.data()));
+  for (int i = 4; i < 0xA0; ++i) rom[i] = static_cast<char>((i * 37 + 11) & 0xff);
+  std::memcpy(rom.data() + 0xA0, "STUDIO TEST ", 12);
+  std::memcpy(rom.data() + 0xAC, "TSTE", 4);
+  std::memcpy(rom.data() + 0xB0, "01", 2);
+  rom[0xB2] = static_cast<char>(0x96);
+  rom[0xB3] = 0;
+  rom[0xBC] = 0;
+  quint32 sum = 0x19;
+  for (int offset = 0xA0; offset <= 0xBC; ++offset)
+    sum += static_cast<uchar>(rom.at(offset));
+  rom[0xBD] = static_cast<char>((-static_cast<qint32>(sum)) & 0xff);
+  std::memcpy(rom.data() + 0x1000, "FLASH1M_V123", 12);
+  return psxstudio::writeBytes(path, rom, error);
+}
+
 bool makeTestDisc(const QString& path, QString& error) {
   constexpr int sectorSize = 2048;
   QByteArray image(24 * sectorSize, 0);
@@ -84,6 +105,35 @@ bool makeTestDisc(const QString& path, QString& error) {
 
 int main(int argc, char** argv) {
   QCoreApplication app(argc, argv);
+  if (argc >= 6 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--gba-pipeline-smoke")) {
+    psxstudio::PipelineRequest request;
+    request.system = psxstudio::SystemKind::GameBoyAdvance;
+    request.targetPlatform = psxstudio::hostTargetPlatform();
+    request.exportMode = QString::fromLocal8Bit(argv[5]) == QStringLiteral("source")
+      ? psxstudio::ExportMode::Source : psxstudio::ExportMode::Build;
+    request.romPath = QString::fromLocal8Bit(argv[2]);
+    request.biosPath = QString::fromLocal8Bit(argv[3]);
+    request.outputDirectory = QString::fromLocal8Bit(argv[4]);
+    request.frameworkRoot = QDir::cleanPath(
+      QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("../..")));
+    request.windowTitle = QStringLiteral("GBA Studio Smoke");
+    request.exportAsZip = false;
+    request.overwriteOutput = true;
+    psxstudio::PipelineWorker worker;
+    bool ok = false;
+    QString failure;
+    QObject::connect(&worker, &psxstudio::PipelineWorker::logLine,
+                     [](const QString& line) { qInfo().noquote() << line; });
+    QObject::connect(&worker, &psxstudio::PipelineWorker::completed,
+                     [&](const QString& path) { ok = true; qInfo().noquote() << path; });
+    QObject::connect(&worker, &psxstudio::PipelineWorker::failed,
+                     [&](const QString& message, const QString& workspace) {
+                       failure = message + QStringLiteral("\n") + workspace;
+                     });
+    worker.run(request);
+    if (!ok) qCritical().noquote() << failure;
+    return ok ? 0 : 1;
+  }
   QTemporaryDir temp;
   check(temp.isValid(), QStringLiteral("temporary directory creation"));
   if (!temp.isValid()) {
@@ -91,6 +141,70 @@ int main(int argc, char** argv) {
   }
 
   QString error;
+  const QString fallbackIcns = QDir(temp.path()).filePath(QStringLiteral("fallback.icns"));
+  check(psxstudio::createIcns(
+          QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg"),
+          temp.path(), fallbackIcns, error), error);
+  QFile fallbackIcnsFile(fallbackIcns);
+  check(fallbackIcnsFile.open(QIODevice::ReadOnly) &&
+          fallbackIcnsFile.read(4) == QByteArray("icns", 4) &&
+          fallbackIcnsFile.size() > 8,
+        QStringLiteral("PNG-backed ICNS fallback repairs iconutil failures"));
+  fallbackIcnsFile.close();
+
+  const QString gbaPath = QDir(temp.path()).filePath(QStringLiteral("studio-test.gba"));
+  check(makeTestGba(gbaPath, error), error);
+  psxstudio::GbaDescription gbaDescription;
+  check(psxstudio::inspectGbaRom(gbaPath, gbaDescription, error) &&
+          gbaDescription.title == QStringLiteral("STUDIO TEST") &&
+          gbaDescription.gameCode == QStringLiteral("TSTE") &&
+          gbaDescription.entryTarget == 0x080000C0u &&
+          gbaDescription.headerBranchValid && gbaDescription.complementValid &&
+          gbaDescription.saveType == QStringLiteral("flash1m") &&
+          gbaDescription.warning.isEmpty(),
+        error.isEmpty() ? QStringLiteral("GBA ROM header inspection") : error);
+  QList<psxstudio::GbaCatalogEntry> gbaCatalog;
+  QStringList gbaWarnings;
+  check(psxstudio::scanGbaDirectory(temp.path(), gbaCatalog, gbaWarnings, error) &&
+          gbaCatalog.size() == 1 &&
+          gbaCatalog.constFirst().gameCode == QStringLiteral("TSTE"),
+        error.isEmpty() ? QStringLiteral("GBA batch directory scan") : error);
+  psxstudio::PipelineRequest gbaRequest;
+  gbaRequest.system = psxstudio::SystemKind::GameBoyAdvance;
+  gbaRequest.targetPlatform = psxstudio::TargetPlatform::MacOS;
+  gbaRequest.romPath = gbaPath;
+  gbaRequest.windowTitle = QStringLiteral("Studio Test Advance");
+  check(psxstudio::systemKindFromKey(QStringLiteral("GBA")) ==
+          psxstudio::SystemKind::GameBoyAdvance &&
+          psxstudio::systemKindKey(gbaRequest.system) == QStringLiteral("gba") &&
+          gbaRequest.toJson().value(QStringLiteral("system")).toString() ==
+            QStringLiteral("gba") &&
+          gbaRequest.toJson().value(QStringLiteral("rom_path")).toString() == gbaPath,
+        QStringLiteral("GBA request system and ROM serialization"));
+  const QString gbaMain = psxstudio::generatedGbaMainCpp(
+    QStringLiteral("Studio Test Advance"), QString(40, QLatin1Char('a')), 0x12345678u);
+  check(gbaMain.contains(QStringLiteral("parent_path().parent_path() / \"Resources\"")) &&
+          gbaMain.contains(QStringLiteral("--save-path")) &&
+          gbaMain.contains(QStringLiteral("builtin_rom_sha1")),
+        QStringLiteral("generated GBA entry point resolves packaged resources and writable saves"));
+  const QString gbaToml = psxstudio::generatedGbaGameToml(
+    gbaRequest, gbaDescription, QString(40, QLatin1Char('a')), 0x12345678u,
+    QString(40, QLatin1Char('b')), 0x87654321u);
+  check(gbaToml.contains(QStringLiteral("path = \"bios/gba_bios.bin\"")) &&
+          gbaToml.contains(QStringLiteral("path = \"game/game.gba\"")) &&
+          gbaToml.contains(QStringLiteral("hle = false")) &&
+          gbaToml.contains(QStringLiteral("entry_point = \"0X080000C0\"")),
+        QStringLiteral("generated GBA runtime configuration pins packaged inputs"));
+  const QString gbaCmake = psxstudio::generatedGbaProjectCMake(
+    gbaRequest, gbaDescription, QStringLiteral("Studio Test Advance"),
+    QStringLiteral("org.psxrecomp.gba.test"));
+  check(gbaCmake.contains(QStringLiteral("add_subdirectory(gba++")) &&
+          gbaCmake.contains(QStringLiteral("MACOSX_BUNDLE")) &&
+          gbaCmake.contains(QStringLiteral("TARGET_BUNDLE_CONTENT_DIR:psx-runtime")) &&
+          gbaCmake.contains(QStringLiteral("steganos-package/psx-runtime")) &&
+          gbaCmake.contains(QStringLiteral("add_executable(psx-runtime MACOSX_BUNDLE")),
+        QStringLiteral("generated GBA CMake follows Studio app and CI package structure"));
+
   const QString fakeGhidraHome = QDir(temp.path()).filePath(QStringLiteral("ghidra"));
   const QString fakeGhidraProperties =
     QDir(fakeGhidraHome).filePath(QStringLiteral("Ghidra/application.properties"));

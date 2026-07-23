@@ -72,7 +72,7 @@ QString cppQuoted(QString value) {
   return QStringLiteral("\"") + value + QStringLiteral("\"");
 }
 
-QString hex32(quint32 value) {
+QString gbaHex32(quint32 value) {
   return QStringLiteral("0x%1").arg(value, 8, 16, QLatin1Char('0')).toUpper();
 }
 
@@ -347,12 +347,12 @@ QString generatedGbaGameToml(const PipelineRequest& request,
   text += QStringLiteral("game_code = %1\n\n").arg(tomlQuoted(game.gameCode));
   text += QStringLiteral("[bios]\npath = \"bios/gba_bios.bin\"\n");
   text += QStringLiteral("sha1 = %1\ncrc32 = %2\nhle = false\n\n")
-            .arg(tomlQuoted(biosSha1), tomlQuoted(hex32(biosCrc32)));
+            .arg(tomlQuoted(biosSha1), tomlQuoted(gbaHex32(biosCrc32)));
   text += QStringLiteral("[rom]\npath = \"game/game.gba\"\n");
   text += QStringLiteral("sha1 = %1\ncrc32 = %2\n\n")
-            .arg(tomlQuoted(romSha1), tomlQuoted(hex32(romCrc32)));
+            .arg(tomlQuoted(romSha1), tomlQuoted(gbaHex32(romCrc32)));
   text += QStringLiteral("[recompiler]\nentry_point = %1\nout_dir = \"generated\"\nstrict = false\n\n")
-            .arg(tomlQuoted(hex32(game.entryTarget)));
+            .arg(tomlQuoted(gbaHex32(game.entryTarget)));
   text += QStringLiteral("[save]\ntype = %1\n\n").arg(tomlQuoted(game.saveType));
   text += QStringLiteral("[runtime]\nwindow_title = %1\ndebug_port = 4371\n\n")
             .arg(tomlQuoted(request.windowTitle));

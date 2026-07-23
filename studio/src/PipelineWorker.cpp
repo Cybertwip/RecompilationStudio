@@ -28,6 +28,7 @@
 #include <QVersionNumber>
 
 #include <algorithm>
+#include <memory>
 
 namespace psxstudio {
 
@@ -3307,5 +3308,768 @@ void PipelineWorker::run(PipelineRequest request) {
   QDir(workspace).removeRecursively();
   emit completed(outputApp);
 }
+
+void PipelineWorker::runGba(const PipelineRequest& request) {
+  const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
+  const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
+  const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
+  const bool sourceExport = request.exportMode == ExportMode::Source;
+  const bool remoteCiBuild = request.exportMode == ExportMode::Build &&
+                             request.buildBackend == BuildBackend::RemoteCi;
+  const bool localBuild = request.exportMode == ExportMode::Build && !remoteCiBuild;
+  const bool nativeWindowsTarget = localBuild && windowsTarget &&
+                                   hostTargetPlatform() == TargetPlatform::Windows;
+  const bool nativeLinuxTarget = localBuild && linuxTarget &&
+                                 hostTargetPlatform() == TargetPlatform::Linux;
+  const bool crossWindowsTarget = localBuild && windowsTarget && !nativeWindowsTarget;
+  const bool crossLinuxTarget = localBuild && linuxTarget && !nativeLinuxTarget;
+  const bool directoryPackageTarget = windowsTarget || linuxTarget;
+  const bool signingRequested = localBuild && macosTarget &&
+    !request.certificatePath.trimmed().isEmpty() && !request.certificatePassword.isEmpty();
+  const int totalStages = localBuild ? 8 : 6;
+  int stage = 0;
+  QString workspace;
+  QString error;
+  auto nextStage = [&](const QString& name) {
+    emit stageChanged(name, ++stage, totalStages);
+    emit logLine(QStringLiteral("\n=== %1 ===").arg(name));
+  };
+  auto fail = [&](const QString& message) {
+    emit logLine(QStringLiteral("ERROR: %1").arg(message));
+    emit failed(message, workspace);
+  };
+  auto cancelledOut = [&]() {
+    if (!workspace.isEmpty()) QDir(workspace).removeRecursively();
+    emit cancelled();
+  };
+
+  nextStage(QStringLiteral("Validate GBA inputs"));
+  if (request.targetPlatform == TargetPlatform::All) {
+    fail(QStringLiteral("The All platform selection must be expanded before the GBA pipeline starts."));
+    return;
+  }
+  if (localBuild && !targetPlatformSupportedOnHost(request.targetPlatform)) {
+    fail(QStringLiteral("This host cannot build a local %1 GBA package. Enable CI or export source instead.")
+           .arg(targetPlatformDisplayName(request.targetPlatform)));
+    return;
+  }
+  GbaDescription game;
+  if (!inspectGbaRom(request.romPath, game, error)) {
+    fail(error);
+    return;
+  }
+  if (!game.warning.isEmpty()) emit logLine(QStringLiteral("Warning: %1").arg(game.warning));
+  if (QFileInfo(request.biosPath).size() != 16 * 1024) {
+    fail(QStringLiteral("The GBA BIOS must be exactly 16,384 bytes."));
+    return;
+  }
+  const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
+    ? QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg")
+    : request.iconPath;
+  if (!QFileInfo(iconSourcePath).isFile() && !iconSourcePath.startsWith(QStringLiteral(":/"))) {
+    fail(QStringLiteral("The selected app icon is not readable."));
+    return;
+  }
+  const QString bundleName = cleanBundleName(request.windowTitle);
+  if (bundleName.isEmpty()) {
+    fail(QStringLiteral("The window title cannot be converted to a valid app name."));
+    return;
+  }
+  if (!QFileInfo(request.outputDirectory).isDir() ||
+      !QFileInfo(request.outputDirectory).isWritable()) {
+    fail(QStringLiteral("Select a writable output directory."));
+    return;
+  }
+  const QString gbaRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba++"));
+  if (!QFileInfo(QDir(gbaRoot).filePath(QStringLiteral("CMakeLists.txt"))).isFile()) {
+    fail(QStringLiteral("The framework does not contain extra/gba++."));
+    return;
+  }
+  if (localBuild && macosTarget &&
+      request.certificatePath.trimmed().isEmpty() != request.certificatePassword.isEmpty()) {
+    fail(QStringLiteral("Select both a PFX certificate and password, or leave both empty."));
+    return;
+  }
+  if (signingRequested && !QFileInfo(request.certificatePath).isFile()) {
+    fail(QStringLiteral("The selected PFX signing certificate is not readable."));
+    return;
+  }
+  const QString cmake = findExecutable(QStringLiteral("cmake"));
+  const QString git = findExecutable(QStringLiteral("git"));
+  const QString ninja = hostTargetPlatform() == TargetPlatform::Windows
+    ? QString() : findExecutable(QStringLiteral("ninja"));
+  if (cmake.isEmpty() || git.isEmpty() ||
+      (hostTargetPlatform() != TargetPlatform::Windows && ninja.isEmpty())) {
+    fail(QStringLiteral("GBA exports require CMake, Git, and Ninja on non-Windows hosts."));
+    return;
+  }
+  const QString rcodesign = signingRequested ? findRcodesign() : QString();
+  if (signingRequested && rcodesign.isEmpty()) {
+    fail(QStringLiteral("rcodesign is required for PFX-signed macOS GBA apps."));
+    return;
+  }
+
+  const QString romSha1 = sha1File(request.romPath, error);
+  const QString romSha256 = sha256File(request.romPath, error);
+  const quint32 romCrc32 = crc32File(request.romPath, error);
+  const QString biosSha1 = sha1File(request.biosPath, error);
+  const QString biosSha256 = sha256File(request.biosPath, error);
+  const quint32 biosCrc32 = crc32File(request.biosPath, error);
+  if (romSha1.isEmpty() || romSha256.isEmpty() || biosSha1.isEmpty() || biosSha256.isEmpty()) {
+    fail(error.isEmpty() ? QStringLiteral("The GBA inputs could not be hashed.") : error);
+    return;
+  }
+  emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · entry %4")
+    .arg(game.title, game.gameCode).arg(game.romSize)
+    .arg(QStringLiteral("0x%1").arg(game.entryTarget, 8, 16, QLatin1Char('0'))));
+  emit logLine(QStringLiteral("GBA BIOS: 16 KiB · SHA-1 %1").arg(biosSha1));
+
+  nextStage(QStringLiteral("Prepare GBA source workspace"));
+  const QString preferredWorkspaceRoot =
+    QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
+      .filePath(QStringLiteral("org.psxrecomp.studio/workspaces"));
+  const QString fallbackWorkspaceRoot =
+    QDir(QDir::tempPath()).filePath(QStringLiteral("org.psxrecomp.studio/workspaces"));
+  std::unique_ptr<QTemporaryDir> temporary;
+  for (const QString& root : { preferredWorkspaceRoot, fallbackWorkspaceRoot }) {
+    if (!QDir().mkpath(root)) continue;
+    auto candidate = std::make_unique<QTemporaryDir>(
+      QDir(root).filePath(QStringLiteral("psxrecomp-gba-XXXXXX")));
+    candidate->setAutoRemove(false);
+    if (candidate->isValid()) {
+      temporary = std::move(candidate);
+      break;
+    }
+  }
+  if (!temporary) {
+    fail(QStringLiteral("Could not create a GBA build workspace in the cache or temporary directory."));
+    return;
+  }
+  workspace = temporary->path();
+  const QString projectDir = QDir(workspace).filePath(QStringLiteral("project"));
+  const QString generatedDir = QDir(projectDir).filePath(QStringLiteral("generated"));
+  const QString sourceDir = QDir(projectDir).filePath(QStringLiteral("src"));
+  const QString packageResources = QDir(projectDir).filePath(QStringLiteral("package_resources"));
+  const QString packageBios = QDir(packageResources).filePath(QStringLiteral("bios"));
+  const QString packageGame = QDir(packageResources).filePath(QStringLiteral("game"));
+  const QString packageLicenses = QDir(packageResources).filePath(QStringLiteral("licenses"));
+  const QString proofDir = QDir(projectDir).filePath(QStringLiteral("proof"));
+  const QString toolBuildDir = QDir(workspace).filePath(QStringLiteral("gba-tools-build"));
+  const QString buildDir = QDir(workspace).filePath(QStringLiteral("build"));
+  const QString stageDir = QDir(workspace).filePath(QStringLiteral("stage"));
+  for (const auto& path : { projectDir, generatedDir, sourceDir, packageResources,
+                            packageBios, packageGame, packageLicenses, proofDir,
+                            toolBuildDir, buildDir, stageDir }) {
+    if (!QDir().mkpath(path)) {
+      fail(QStringLiteral("Could not create workspace directory %1.").arg(path));
+      return;
+    }
+  }
+  if (!copyDirectoryTree(gbaRoot, QDir(projectDir).filePath(QStringLiteral("gba++")), error) ||
+      !copyFileReplacing(request.romPath,
+                         QDir(packageGame).filePath(QStringLiteral("game.gba")), error) ||
+      !copyFileReplacing(request.biosPath,
+                         QDir(packageBios).filePath(QStringLiteral("gba_bios.bin")), error)) {
+    fail(error);
+    return;
+  }
+  const QStringList licenseCopies{
+    QDir(gbaRoot).filePath(QStringLiteral("LICENSE")),
+    QDir(gbaRoot).filePath(QStringLiteral("THIRD_PARTY_ATTRIBUTION.md")),
+    QDir(gbaRoot).filePath(QStringLiteral("third_party/tomlpp/LICENSE")),
+    QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-rust/LICENSE-MIT")),
+    QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-rust/LICENSE-APACHE")),
+    QDir(request.frameworkRoot).filePath(QStringLiteral("LICENSE")),
+  };
+  const QStringList licenseNames{
+    QStringLiteral("GBARecomp-PolyForm-Noncommercial-1.0.0.txt"),
+    QStringLiteral("GBARecomp-Third-Party-Attribution.md"),
+    QStringLiteral("tomlplusplus-MIT.txt"),
+    QStringLiteral("JRickey-gba-recomp-MIT.txt"),
+    QStringLiteral("JRickey-gba-recomp-Apache-2.0.txt"),
+    QStringLiteral("PSXRecomp.txt"),
+  };
+  for (qsizetype i = 0; i < licenseCopies.size(); ++i) {
+    if (!copyFileReplacing(licenseCopies.at(i), QDir(packageLicenses).filePath(licenseNames.at(i)), error)) {
+      fail(error);
+      return;
+    }
+  }
+
+  const QString bundleId = sanitizedBundleIdentifier(
+    game.gameCode.isEmpty() ? QStringLiteral("gba") : game.gameCode, request.windowTitle);
+  if (!writeText(QDir(sourceDir).filePath(QStringLiteral("main.cpp")),
+                 generatedGbaMainCpp(bundleName, romSha1, romCrc32), error) ||
+      !writeText(QDir(packageResources).filePath(QStringLiteral("game.toml")),
+                 generatedGbaGameToml(request, game, romSha1, romCrc32,
+                                      biosSha1, biosCrc32), error) ||
+      !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
+                 gameManifestForRequest(request), error) ||
+      !writeText(QDir(projectDir).filePath(QStringLiteral(".gitignore")),
+                 QStringLiteral("/build*/\n/.cache/\nrecomp_cache/\nrecomp_coverage*.json\nrecomp_master_misses*.toml.frag\n.DS_Store\n"), error)) {
+    fail(error);
+    return;
+  }
+  if (macosTarget) {
+    if (!createIcns(iconSourcePath, workspace,
+                    QDir(projectDir).filePath(QStringLiteral("AppIcon.icns")), error) ||
+        !writeText(QDir(projectDir).filePath(QStringLiteral("Info.plist")),
+                   generatedGbaInfoPlist(bundleName, bundleId), error)) {
+      fail(error);
+      return;
+    }
+  } else if (windowsTarget) {
+    const QString icon = QDir(projectDir).filePath(QStringLiteral("AppIcon.ico"));
+    if (!createIco(iconSourcePath, icon, error) ||
+        !writeText(QDir(projectDir).filePath(QStringLiteral("app.rc")),
+                   makeWindowsResource(icon), error)) {
+      fail(error);
+      return;
+    }
+  } else if (!createPngIcon(iconSourcePath,
+                            QDir(projectDir).filePath(QStringLiteral("AppIcon.png")), error)) {
+    fail(error);
+    return;
+  }
+
+  const QJsonObject inputProof{
+    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("system"), QStringLiteral("gba") },
+    { QStringLiteral("title"), game.title },
+    { QStringLiteral("game_code"), game.gameCode },
+    { QStringLiteral("entry_word"), QStringLiteral("0x%1").arg(game.entryWord, 8, 16, QLatin1Char('0')) },
+    { QStringLiteral("entry_target"), QStringLiteral("0x%1").arg(game.entryTarget, 8, 16, QLatin1Char('0')) },
+    { QStringLiteral("rom_size"), QString::number(game.romSize) },
+    { QStringLiteral("rom_sha1"), romSha1 },
+    { QStringLiteral("rom_sha256"), romSha256 },
+    { QStringLiteral("rom_crc32"), QStringLiteral("%1").arg(romCrc32, 8, 16, QLatin1Char('0')) },
+    { QStringLiteral("bios_size"), QString::number(16 * 1024) },
+    { QStringLiteral("bios_sha1"), biosSha1 },
+    { QStringLiteral("bios_sha256"), biosSha256 },
+    { QStringLiteral("bios_crc32"), QStringLiteral("%1").arg(biosCrc32, 8, 16, QLatin1Char('0')) },
+    { QStringLiteral("cpp_port_commit"), QStringLiteral("13cae89f9dba719454c283e330bf9e131af68c8c") },
+    { QStringLiteral("rust_reference_tests"), 168 },
+  };
+  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_inputs.json")), inputProof, error) ||
+      !writeJson(QDir(proofDir).filePath(QStringLiteral("request.json")), request.toJson(false), error)) {
+    fail(error);
+    return;
+  }
+
+  nextStage(QStringLiteral("Build C++ GBA recompiler"));
+  QStringList toolConfigure{ QStringLiteral("-S"), QDir(projectDir).filePath(QStringLiteral("gba++")),
+                             QStringLiteral("-B"), toolBuildDir,
+                             QStringLiteral("-DGBARECOMP_COMPILER_CACHE=OFF"),
+                             QStringLiteral("-DGBARECOMP_BUILD_ORACLE=OFF") };
+  if (hostTargetPlatform() == TargetPlatform::Windows) {
+    toolConfigure << QStringLiteral("-G") << QStringLiteral("Visual Studio 17 2022")
+                  << QStringLiteral("-A") << QStringLiteral("x64");
+  } else {
+    toolConfigure << QStringLiteral("-G") << QStringLiteral("Ninja")
+                  << QStringLiteral("-DCMAKE_BUILD_TYPE=Release");
+  }
+  QStringList toolBuild{ QStringLiteral("--build"), toolBuildDir,
+                         QStringLiteral("--target"), QStringLiteral("gba_recompile"),
+                         QStringLiteral("--parallel"),
+                         QString::number(std::max(1, QThread::idealThreadCount())) };
+  if (hostTargetPlatform() == TargetPlatform::Windows)
+    toolBuild << QStringLiteral("--config") << QStringLiteral("Release");
+  if (!runCommand(cmake, toolConfigure, workspace,
+                  QStringLiteral("cmake -S <gba++> -B <tool-build>"), 15 * 60 * 1000) ||
+      !runCommand(cmake, toolBuild, workspace,
+                  QStringLiteral("cmake --build <tool-build> --target gba_recompile"),
+                  2 * 60 * 60 * 1000)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The C++ GBA recompiler could not be built."));
+    return;
+  }
+  QString recompiler = QDir(toolBuildDir).filePath(
+    hostTargetPlatform() == TargetPlatform::Windows
+      ? QStringLiteral("Release/gba_recompile.exe") : QStringLiteral("gba_recompile"));
+  if (!QFileInfo(recompiler).isExecutable() && hostTargetPlatform() == TargetPlatform::Windows)
+    recompiler = QDir(toolBuildDir).filePath(QStringLiteral("gba_recompile.exe"));
+  if (!QFileInfo(recompiler).isFile()) {
+    fail(QStringLiteral("The GBA recompiler executable was not produced."));
+    return;
+  }
+
+  nextStage(QStringLiteral("Generate ARM/THUMB C++"));
+  QByteArray generationOutput;
+  if (!runCommand(recompiler,
+                  { QStringLiteral("--rom"), QDir(packageGame).filePath(QStringLiteral("game.gba")),
+                    QStringLiteral("--entry"), QStringLiteral("0x08000000"),
+                    QStringLiteral("--out"), generatedDir,
+                    QStringLiteral("--max-functions"), QStringLiteral("100000"),
+                    QStringLiteral("--codegen-shards"), QStringLiteral("16") },
+                  projectDir,
+                  QStringLiteral("gba_recompile --rom <game.gba> --entry 0x08000000 --out <generated>"),
+                  4 * 60 * 60 * 1000, &generationOutput)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The GBA ROM could not be statically translated."));
+    return;
+  }
+  const QStringList shards = QDir(generatedDir).entryList(
+    { QStringLiteral("recompiled_*.cpp") }, QDir::Files, QDir::Name);
+  if (shards.size() < 2 ||
+      !QFileInfo(QDir(generatedDir).filePath(QStringLiteral("dispatch_table.cpp"))).isFile() ||
+      !QFileInfo(QDir(generatedDir).filePath(QStringLiteral("recompiled.h"))).isFile()) {
+    fail(QStringLiteral("The GBA recompiler did not emit the required sharded source set."));
+    return;
+  }
+  QJsonArray generatedFiles;
+  QDirIterator generated(generatedDir, QDir::Files, QDirIterator::Subdirectories);
+  while (generated.hasNext()) {
+    const QString file = generated.next();
+    const QString hash = sha256File(file, error);
+    if (hash.isEmpty()) { fail(error); return; }
+    generatedFiles.append(QJsonObject{
+      { QStringLiteral("path"), QDir(generatedDir).relativeFilePath(file) },
+      { QStringLiteral("size"), QString::number(QFileInfo(file).size()) },
+      { QStringLiteral("sha256"), hash },
+    });
+  }
+  const QJsonObject generationProof{
+    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("entry_seed"), QStringLiteral("0x08000000") },
+    { QStringLiteral("shards"), shards.size() },
+    { QStringLiteral("files"), generatedFiles },
+    { QStringLiteral("tool_output"), QString::fromUtf8(generationOutput) },
+    { QStringLiteral("coverage_policy"), QStringLiteral("AOT corpus plus the C++ port's measured self-healing bridge; runtime reports non-AOT PCs") },
+  };
+  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_generation.json")),
+                 generationProof, error)) {
+    fail(error);
+    return;
+  }
+
+  nextStage(QStringLiteral("Finalize GBA source repository"));
+  const QString readme = QStringLiteral(
+    "# %1 — GBARecomp Studio source export\n\n"
+    "Generated by PSXRecomp Studio for **%2**. The repository contains the "
+    "C++ ARM7TDMI/GBA platform core, sharded ROM translation, selected ROM and "
+    "BIOS package inputs, build rules, and proof artifacts.\n\n"
+    "## Build\n\n```sh\ncmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
+    "cmake --build build --target psx-runtime --parallel\n```\n\n"
+    "The CI-compatible package is emitted under "
+    "`build/steganos-package/psx-runtime/<configuration>/`.\n")
+      .arg(request.windowTitle, targetPlatformDisplayName(request.targetPlatform));
+  if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
+                 generatedGbaProjectCMake(request, game, bundleName, bundleId), error) ||
+      !writeText(QDir(projectDir).filePath(QStringLiteral("README.md")), readme, error) ||
+      !createProofArchive(proofDir,
+                          QDir(packageResources).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
+                          error)) {
+    fail(error);
+    return;
+  }
+
+  QByteArray commitOutput;
+  if (!runCommand(git, { QStringLiteral("init"), QStringLiteral("--initial-branch=main") },
+                  projectDir, QStringLiteral("git init --initial-branch=main"), 60000) ||
+      !runCommand(git, { QStringLiteral("config"), QStringLiteral("user.name"),
+                         QStringLiteral("PSXRecomp Studio") }, projectDir,
+                  QStringLiteral("git config user.name <studio>"), 30000) ||
+      !runCommand(git, { QStringLiteral("config"), QStringLiteral("user.email"),
+                         QStringLiteral("studio@psxrecomp.local") }, projectDir,
+                  QStringLiteral("git config user.email <studio>"), 30000) ||
+      !runCommand(git, { QStringLiteral("add"), QStringLiteral("-A") }, projectDir,
+                  QStringLiteral("git add -A"), 2 * 60 * 60 * 1000) ||
+      !runCommand(git, { QStringLiteral("commit"), QStringLiteral("-m"),
+                         QStringLiteral("Generate %1 %2 GBA source")
+                           .arg(request.windowTitle,
+                                targetPlatformDisplayName(request.targetPlatform)) },
+                  projectDir, QStringLiteral("git commit -m <generated GBA source>"),
+                  2 * 60 * 60 * 1000) ||
+      !runCommand(git, { QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
+                  projectDir, QStringLiteral("git rev-parse HEAD"), 30000,
+                  &commitOutput)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The generated GBA source repository could not be committed."));
+    return;
+  }
+  const QString sourceCommit = QString::fromUtf8(commitOutput).trimmed().section('\n', -1);
+  emit logLine(QStringLiteral("Generated GBA source commit: %1").arg(sourceCommit));
+
+  auto removeEntry = [](const QString& path) {
+    const QFileInfo info(path);
+    if (!info.exists() && !info.isSymLink()) return true;
+    return info.isDir() && !info.isSymLink() ? QDir(path).removeRecursively()
+                                             : QFile::remove(path);
+  };
+  auto publishZip = [&](const QString& source, const QString& rootName,
+                        const QString& output) -> bool {
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
+    const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
+    removeEntry(staging); removeEntry(backup);
+    if (!createPackageArchive(source, rootName, staging, error, {},
+                              [this]() { return cancellationRequested(); })) {
+      removeEntry(staging); return false;
+    }
+    const QString stagedHash = sha256File(staging, error);
+    if (stagedHash.isEmpty()) { removeEntry(staging); return false; }
+    const bool exists = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
+    if (exists && !request.overwriteOutput) {
+      error = QStringLiteral("The output already exists and overwrite was not approved: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (exists && !QDir().rename(output, backup)) {
+      error = QStringLiteral("Could not preserve the previous output: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (!QDir().rename(staging, output)) {
+      if (exists) QDir().rename(backup, output);
+      error = QStringLiteral("Could not publish %1.").arg(output);
+      return false;
+    }
+    const QString deliveredHash = sha256File(output, error);
+    if (deliveredHash != stagedHash) {
+      error = QStringLiteral("The delivered archive changed during publication.");
+      return false;
+    }
+    if (exists) removeEntry(backup);
+    return true;
+  };
+  auto publishDirectory = [&](const QString& source, const QString& output) -> bool {
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
+    const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
+    removeEntry(staging); removeEntry(backup);
+    if (!copyDirectoryTree(source, staging, error)) return false;
+    const bool exists = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
+    if (exists && !request.overwriteOutput) {
+      error = QStringLiteral("The output already exists and overwrite was not approved: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (exists && !QDir().rename(output, backup)) {
+      error = QStringLiteral("Could not preserve the previous output: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (!QDir().rename(staging, output)) {
+      if (exists) QDir().rename(backup, output);
+      error = QStringLiteral("Could not publish %1.").arg(output);
+      return false;
+    }
+    if (exists) removeEntry(backup);
+    return true;
+  };
+
+  if (sourceExport) {
+    nextStage(QStringLiteral("Deliver GBA source repository"));
+    const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
+    const bool ok = request.exportAsZip
+      ? publishZip(projectDir, QFileInfo(output).completeBaseName(), output)
+      : publishDirectory(projectDir, output);
+    if (!ok) {
+      if (cancellationRequested()) cancelledOut(); else fail(error);
+      return;
+    }
+    QDir(workspace).removeRecursively();
+    emit completed(output);
+    return;
+  }
+
+  if (remoteCiBuild) {
+    nextStage(QStringLiteral("Stage GBA source for CI"));
+    const QString ciRoot =
+      QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
+        .filePath(QStringLiteral("org.psxrecomp.studio/psxrecomp-ci-sources"));
+    if (!QDir().mkpath(ciRoot)) {
+      fail(QStringLiteral("Could not create the CI source cache."));
+      return;
+    }
+    const QString ciRepository = QDir(ciRoot).filePath(
+      QStringLiteral("%1-gba-%2-%3")
+        .arg(sanitizedFileStem(request.windowTitle),
+             targetPlatformKey(request.targetPlatform),
+             QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    if (!QDir().rename(projectDir, ciRepository) &&
+        (!copyDirectoryTree(projectDir, ciRepository, error) ||
+         !QDir(projectDir).removeRecursively())) {
+      fail(error.isEmpty() ? QStringLiteral("Could not stage the GBA source repository for CI.") : error);
+      return;
+    }
+    QDir(workspace).removeRecursively();
+    emit ciSourcePrepared(request, ciRepository, sourceCommit);
+    return;
+  }
+
+  QString dependencyCachePath =
+    QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+      .filePath(QStringLiteral("dependencies"));
+  if (!QDir().mkpath(dependencyCachePath)) {
+    dependencyCachePath = QDir(workspace).filePath(QStringLiteral("dependencies"));
+  }
+  if (!QDir().mkpath(dependencyCachePath)) {
+    fail(QStringLiteral("Could not create the Studio dependency cache."));
+    return;
+  }
+  const QString mingwGcc = crossWindowsTarget ? findExecutable(QStringLiteral("x86_64-w64-mingw32-gcc")) : QString();
+  const QString mingwGxx = crossWindowsTarget ? findExecutable(QStringLiteral("x86_64-w64-mingw32-g++")) : QString();
+  const QString mingwWindres = crossWindowsTarget ? findExecutable(QStringLiteral("x86_64-w64-mingw32-windres")) : QString();
+  const QString mingwAr = crossWindowsTarget ? findExecutable(QStringLiteral("x86_64-w64-mingw32-ar")) : QString();
+  const QString mingwRanlib = crossWindowsTarget ? findExecutable(QStringLiteral("x86_64-w64-mingw32-ranlib")) : QString();
+  const QString mingwStrip = crossWindowsTarget ? findExecutable(QStringLiteral("x86_64-w64-mingw32-strip")) : QString();
+  const QString linuxGcc = crossLinuxTarget ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-gcc")) :
+                           nativeLinuxTarget ? findExecutable(QStringLiteral("gcc")) : QString();
+  const QString linuxGxx = crossLinuxTarget ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-g++")) :
+                           nativeLinuxTarget ? findExecutable(QStringLiteral("g++")) : QString();
+  const QString linuxAr = crossLinuxTarget ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-ar")) : QString();
+  const QString linuxRanlib = crossLinuxTarget ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-ranlib")) : QString();
+  const QString linuxStrip = crossLinuxTarget ? findExecutable(QStringLiteral("x86_64-unknown-linux-gnu-strip")) : QString();
+  if (crossWindowsTarget && (mingwGcc.isEmpty() || mingwGxx.isEmpty() || mingwWindres.isEmpty() ||
+                             mingwAr.isEmpty() || mingwRanlib.isEmpty() || mingwStrip.isEmpty())) {
+    fail(QStringLiteral("The MinGW-w64 cross toolchain is incomplete."));
+    return;
+  }
+  if ((crossLinuxTarget && (linuxGcc.isEmpty() || linuxGxx.isEmpty() || linuxAr.isEmpty() ||
+                            linuxRanlib.isEmpty() || linuxStrip.isEmpty())) ||
+      (nativeLinuxTarget && (linuxGcc.isEmpty() || linuxGxx.isEmpty()))) {
+    fail(QStringLiteral("The Linux C/C++ toolchain is incomplete."));
+    return;
+  }
+  const QString mingwToolchain = QDir(workspace).filePath(QStringLiteral("gba-mingw-toolchain.cmake"));
+  const QString linuxToolchain = QDir(workspace).filePath(QStringLiteral("gba-linux-toolchain.cmake"));
+  if (crossWindowsTarget && !writeText(mingwToolchain,
+      makeMingwToolchain(mingwGcc, mingwGxx, mingwWindres, mingwAr, mingwRanlib, mingwStrip), error)) {
+    fail(error); return;
+  }
+  if (crossLinuxTarget && !writeText(linuxToolchain,
+      makeLinuxToolchain(linuxGcc, linuxGxx, linuxAr, linuxRanlib, linuxStrip), error)) {
+    fail(error); return;
+  }
+
+  nextStage(crossWindowsTarget || crossLinuxTarget
+    ? QStringLiteral("Cross-compile %1 GBA app").arg(targetPlatformDisplayName(request.targetPlatform))
+    : QStringLiteral("Compile native GBA app"));
+  QStringList configure{ QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir };
+  if (nativeWindowsTarget) {
+    configure << QStringLiteral("-G") << QStringLiteral("Visual Studio 17 2022")
+              << QStringLiteral("-A") << QStringLiteral("x64");
+  } else {
+    configure << QStringLiteral("-G") << QStringLiteral("Ninja")
+              << QStringLiteral("-DCMAKE_BUILD_TYPE=Release");
+  }
+  configure << QStringLiteral("-DPSXRECOMP_DEPENDENCY_CACHE=%1").arg(dependencyCachePath);
+  if (crossWindowsTarget)
+    configure << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(mingwToolchain);
+  else if (crossLinuxTarget)
+    configure << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(linuxToolchain);
+  else if (nativeLinuxTarget)
+    configure << QStringLiteral("-DCMAKE_C_COMPILER=%1").arg(linuxGcc)
+              << QStringLiteral("-DCMAKE_CXX_COMPILER=%1").arg(linuxGxx);
+  QStringList build{ QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
+                     QStringLiteral("psx-runtime"), QStringLiteral("--parallel"),
+                     QString::number(std::max(1, QThread::idealThreadCount())) };
+  QStringList install{ QStringLiteral("--install"), buildDir,
+                       QStringLiteral("--prefix"), stageDir };
+  if (nativeWindowsTarget) {
+    build << QStringLiteral("--config") << QStringLiteral("Release");
+    install << QStringLiteral("--config") << QStringLiteral("Release");
+  }
+  if (!runCommand(cmake, configure, workspace, QStringLiteral("cmake -S <GBA project> -B <build>"),
+                  30 * 60 * 1000) ||
+      !runCommand(cmake, build, workspace, QStringLiteral("cmake --build <build> --target psx-runtime"),
+                  4 * 60 * 60 * 1000) ||
+      !runCommand(cmake, install, workspace, QStringLiteral("cmake --install <build> --prefix <stage>"),
+                  30 * 60 * 1000)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The %1 GBA app could not be built and staged.")
+                .arg(targetPlatformDisplayName(request.targetPlatform)));
+    return;
+  }
+
+  const QString stagedApp = directoryPackageTarget
+    ? stageDir : QDir(stageDir).filePath(bundleName + QStringLiteral(".app"));
+  const QString mainExecutable = directoryPackageTarget
+    ? QDir(stageDir).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()))
+    : QDir(stagedApp).filePath(QStringLiteral("Contents/MacOS/") + bundleName);
+  if (!QFileInfo(mainExecutable).isFile()) {
+    fail(QStringLiteral("The expected staged GBA executable is missing: %1").arg(mainExecutable));
+    return;
+  }
+
+  nextStage(QStringLiteral("Verify GBA package layout"));
+  if (macosTarget) {
+    const QString inspection = createMacosInspectionAlias(
+      mainExecutable, QDir(workspace).filePath(QStringLiteral("macos-inspection")), error);
+    if (inspection.isEmpty()) { fail(error); return; }
+    QByteArray deps;
+    if (!runCommand(QStringLiteral("/usr/bin/otool"), { QStringLiteral("-L"), inspection },
+                    workspace, QStringLiteral("otool -L <GBA executable>"), 30000, &deps)) {
+      fail(QStringLiteral("The staged GBA app dependencies could not be inspected."));
+      return;
+    }
+    const QString dependencyText = QString::fromUtf8(deps);
+    const QRegularExpression sdlPattern(
+      QStringLiteral(R"((?m)^\s+([^\s]*libSDL2[^\s]*\.dylib))"));
+    const auto match = sdlPattern.match(dependencyText);
+    if (match.hasMatch() && !match.captured(1).startsWith(QStringLiteral("@rpath/"))) {
+      const QString original = match.captured(1);
+      const QString source = QFileInfo(original).canonicalFilePath();
+      if (source.isEmpty()) {
+        fail(QStringLiteral("The linked SDL2 library could not be resolved: %1").arg(original));
+        return;
+      }
+      const QString frameworks = QDir(stagedApp).filePath(QStringLiteral("Contents/Frameworks"));
+      const QString bundled = QDir(frameworks).filePath(QStringLiteral("libSDL2-2.0.0.dylib"));
+      if (!QDir().mkpath(frameworks) || !copyFileReplacing(source, bundled, error) ||
+          !runCommand(QStringLiteral("/usr/bin/install_name_tool"),
+                      { QStringLiteral("-id"), QStringLiteral("@rpath/libSDL2-2.0.0.dylib"), bundled },
+                      workspace, QStringLiteral("install_name_tool -id <bundled SDL2>"), 30000) ||
+          !runCommand(QStringLiteral("/usr/bin/install_name_tool"),
+                      { QStringLiteral("-change"), original,
+                        QStringLiteral("@rpath/libSDL2-2.0.0.dylib"), mainExecutable },
+                      workspace, QStringLiteral("install_name_tool -change <SDL2> <GBA executable>"), 30000)) {
+        fail(error.isEmpty() ? QStringLiteral("SDL2 could not be embedded in the GBA app.") : error);
+        return;
+      }
+      QFile::setPermissions(bundled,
+        QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+        QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+        QFileDevice::ReadOther | QFileDevice::ExeOther);
+      if (source.contains(QStringLiteral("sdl2-compat"), Qt::CaseInsensitive)) {
+        QString sdl3;
+        for (const auto& candidate : {
+               QStringLiteral("/usr/local/opt/sdl3/lib/libSDL3.dylib"),
+               QStringLiteral("/opt/homebrew/opt/sdl3/lib/libSDL3.dylib"),
+               QStringLiteral("/usr/local/lib/libSDL3.dylib"),
+               QStringLiteral("/opt/homebrew/lib/libSDL3.dylib") }) {
+          const QString canonical = QFileInfo(candidate).canonicalFilePath();
+          if (!canonical.isEmpty()) { sdl3 = canonical; break; }
+        }
+        if (sdl3.isEmpty() ||
+            !copyFileReplacing(sdl3, QDir(frameworks).filePath(QStringLiteral("libSDL3.dylib")), error)) {
+          fail(QStringLiteral("SDL2-compat requires a bundled SDL3 runtime."));
+          return;
+        }
+      }
+    }
+  }
+  const QString resourceRoot = macosTarget
+    ? QDir(stagedApp).filePath(QStringLiteral("Contents/Resources")) : stageDir;
+  for (const auto& relative : { QStringLiteral("bios/gba_bios.bin"),
+                                QStringLiteral("game/game.gba"),
+                                QStringLiteral("game.toml"),
+                                QStringLiteral("PSXRecomp-Proof.zip"),
+                                QStringLiteral("licenses/GBARecomp-PolyForm-Noncommercial-1.0.0.txt") }) {
+    if (!QFileInfo(QDir(resourceRoot).filePath(relative)).isFile()) {
+      fail(QStringLiteral("The staged GBA package is missing %1.").arg(relative));
+      return;
+    }
+  }
+
+  nextStage(signingRequested ? QStringLiteral("Sign GBA app")
+                             : QStringLiteral("Seal GBA app"));
+  const QString preSignExecutableHash = sha256File(mainExecutable, error);
+  const QJsonObject buildProof{
+    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("platform"), targetPlatformDisplayName(request.targetPlatform) },
+    { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
+    { QStringLiteral("pre_sign_executable_sha256"), preSignExecutableHash },
+    { QStringLiteral("signing_mode"), signingRequested ? QStringLiteral("pfx")
+        : macosTarget ? QStringLiteral("ad-hoc") : QStringLiteral("none") },
+    { QStringLiteral("package_contract"), QStringLiteral("PSXRecomp Studio runtime-compatible outer layout") },
+  };
+  if (preSignExecutableHash.isEmpty() ||
+      !writeJson(QDir(proofDir).filePath(QStringLiteral("gba_build.json")), buildProof, error) ||
+      !createProofArchive(proofDir,
+                          QDir(packageResources).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
+                          error) ||
+      !copyFileReplacing(QDir(packageResources).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
+                         QDir(resourceRoot).filePath(QStringLiteral("PSXRecomp-Proof.zip")), error)) {
+    fail(error.isEmpty() ? QStringLiteral("The final GBA proof archive could not be embedded.") : error);
+    return;
+  }
+
+  if (macosTarget) {
+    if (signingRequested) {
+      const QString passwordPath = QDir(workspace).filePath(QStringLiteral("pfx-password.txt"));
+      QFile password(passwordPath);
+      const QByteArray bytes = request.certificatePassword.toUtf8();
+      if (!password.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+          !password.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
+          password.write(bytes) != bytes.size()) {
+        fail(QStringLiteral("Could not prepare the temporary signing password file."));
+        return;
+      }
+      password.close();
+      if (!runCommand(rcodesign,
+          { QStringLiteral("sign"), QStringLiteral("--p12-file"), request.certificatePath,
+            QStringLiteral("--p12-password-file"), passwordPath,
+            QStringLiteral("--code-signature-flags"), QStringLiteral("main:runtime"), stagedApp },
+          workspace, QStringLiteral("rcodesign sign --p12-file <certificate> <GBA app>"),
+          10 * 60 * 1000)) {
+        QFile::remove(passwordPath);
+        fail(QStringLiteral("The GBA app could not be signed with the selected PFX."));
+        return;
+      }
+      QFile::remove(passwordPath);
+    } else if (!runCommand(QStringLiteral("/usr/bin/codesign"),
+                           { QStringLiteral("--force"), QStringLiteral("--deep"),
+                             QStringLiteral("--sign"), QStringLiteral("-"), stagedApp },
+                           workspace, QStringLiteral("codesign --force --deep --sign - <GBA app>"),
+                           5 * 60 * 1000)) {
+      fail(QStringLiteral("The GBA app could not be ad-hoc signed."));
+      return;
+    }
+    if (!runCommand(QStringLiteral("/usr/bin/codesign"),
+                    { QStringLiteral("--verify"), QStringLiteral("--deep"),
+                      QStringLiteral("--strict"), stagedApp },
+                    workspace, QStringLiteral("codesign --verify --deep --strict <GBA app>"), 60000)) {
+      fail(QStringLiteral("The staged GBA app failed code-signature verification."));
+      return;
+    }
+  }
+  const QString sealedExecutableHash = sha256File(mainExecutable, error);
+  if (sealedExecutableHash.isEmpty()) {
+    fail(error);
+    return;
+  }
+  emit logLine(QStringLiteral("Verified staged GBA executable SHA-256: %1")
+                 .arg(sealedExecutableHash));
+
+  nextStage(QStringLiteral("Deliver GBA package"));
+  const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
+  bool delivered = false;
+  if (request.exportAsZip) {
+    if (macosTarget) {
+      const QString packageRoot = QDir(workspace).filePath(QStringLiteral("gba-macos-package"));
+      QDir(packageRoot).removeRecursively();
+      if (QDir().mkpath(packageRoot) &&
+          copyDirectoryTree(stagedApp,
+                            QDir(packageRoot).filePath(bundleName + QStringLiteral(".app")), error) &&
+          copyFileReplacing(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
+                            QDir(packageRoot).filePath(QStringLiteral("game.manifest.json")), error)) {
+        delivered = publishZip(packageRoot, {}, output);
+      }
+    } else {
+      delivered = publishZip(stageDir, {}, output);
+    }
+  } else if (macosTarget) {
+    delivered = publishDirectory(stagedApp, output);
+  } else {
+    delivered = publishDirectory(stageDir, output);
+  }
+  if (!delivered) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(error.isEmpty() ? QStringLiteral("The GBA package could not be delivered.") : error);
+    return;
+  }
+  if (!request.exportAsZip) {
+    const QString deliveredExecutable = macosTarget
+      ? QDir(output).filePath(QStringLiteral("Contents/MacOS/") + bundleName)
+      : QDir(output).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()));
+    const QString deliveredHash = sha256File(deliveredExecutable, error);
+    if (deliveredHash != sealedExecutableHash) {
+      fail(error.isEmpty() ? QStringLiteral("The delivered GBA executable changed during publication.") : error);
+      return;
+    }
+  }
+  emit logLine(QStringLiteral("GBA package created: %1").arg(output));
+  QDir(workspace).removeRecursively();
+  emit completed(output);
+}
+
 
 } // namespace psxstudio

@@ -4,6 +4,7 @@
 #include "debug_server.h"
 #include "crash_trace.h"   /* g_psx_fatal_reason */
 #include "cpu_state.h"     /* g_psx_bail_* call-contract counters */
+#include "dirty_ram_interp.h" /* bounded per-insn ring in starvation snapshots */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -140,6 +141,7 @@ static pthread_t s_thread;
 #define DUMP_CAP_RESTORE_TRACE 65536u
 #define DUMP_CAP_FN_ENTRY      65536u
 #define DUMP_CAP_DIRTY_BLOCK  262144u
+#define DUMP_CAP_DIRTY_INSN      8192u
 
 /* Pre-freeze history ring. Each entry = a snapshot taken at one heartbeat
  * tick (~100 ms). When the runtime freezes, all the "now" values stop
@@ -361,6 +363,42 @@ static int hb_format_cpu_scratchpad(char *out, size_t cap) {
     return n;
 }
 
+static void freeze_dump_dirty_insn_json(FILE *f, uint32_t max_entries)
+{
+    uint64_t total = g_dirty_ram_insn_log_seq;
+    uint64_t available = total < DIRTY_RAM_INSN_LOG_CAP
+        ? total : DIRTY_RAM_INSN_LOG_CAP;
+    uint64_t count = available < max_entries ? available : max_entries;
+    uint64_t start = total - count;
+    fputc('[', f);
+    int first = 1;
+    for (uint64_t seq = start; seq < total; ++seq) {
+        const DirtyRamInsnLogEntry *e =
+            &g_dirty_ram_insn_log[seq & (DIRTY_RAM_INSN_LOG_CAP - 1u)];
+        if (e->seq != seq) continue;
+        fprintf(f,
+            "%s{\"seq\":%llu,\"pc\":\"0x%08X\","
+            "\"insn\":\"0x%08X\",\"next_pc\":\"0x%08X\","
+            "\"target\":\"0x%08X\",\"sp\":\"0x%08X\","
+            "\"ra\":\"0x%08X\",\"v0\":\"0x%08X\","
+            "\"v1\":\"0x%08X\",\"a0\":\"0x%08X\","
+            "\"a1\":\"0x%08X\",\"a2\":\"0x%08X\","
+            "\"a3\":\"0x%08X\",\"t0\":\"0x%08X\","
+            "\"t1\":\"0x%08X\",\"t2\":\"0x%08X\","
+            "\"current_tcb\":\"0x%08X\",\"task_ptr\":\"0x%08X\","
+            "\"task_mode\":\"0x%08X\",\"task_submode\":\"0x%08X\","
+            "\"frame\":%u,\"transferred\":%u}",
+            first ? "" : ",", (unsigned long long)e->seq,
+            e->pc, e->insn, e->next_pc, e->target, e->sp, e->ra,
+            e->v0, e->v1, e->a0, e->a1, e->a2, e->a3,
+            e->t0, e->t1, e->t2, e->current_tcb, e->task_ptr,
+            e->task_mode, e->task_submode, e->frame,
+            (unsigned)e->transferred);
+        first = 0;
+    }
+    fputc(']', f);
+}
+
 static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
                               uint64_t exc_reentry, uint32_t cur_fn,
                               uint32_t last_store, uint32_t i_stat_v,
@@ -430,7 +468,7 @@ static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
         "  \"wedge_kind_name\":\"%s\",\n"
         "  \"caps\":{\"wtrace_all\":%u,\"wtrace\":%u,\"frames\":%u,"
                   "\"sio_pc\":%u,\"thread\":%u,\"restore\":%u,\"fn_entry\":%u,"
-                  "\"dirty_block\":%u},\n",
+                  "\"dirty_block\":%u,\"dirty_insn\":%u},\n",
         s_backend, wall,
         (unsigned long long)frame, (unsigned long long)cyc,
         cur_fn, last_store,
@@ -467,7 +505,8 @@ static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
         (unsigned)DUMP_CAP_THREAD_TRACE,
         (unsigned)DUMP_CAP_RESTORE_TRACE,
         (unsigned)DUMP_CAP_FN_ENTRY,
-        (unsigned)DUMP_CAP_DIRTY_BLOCK);
+        (unsigned)DUMP_CAP_DIRTY_BLOCK,
+        (unsigned)DUMP_CAP_DIRTY_INSN);
 
     fputs("  \"heartbeat_ring\":[\n", f);
     uint32_t avail = s_ring_count;
@@ -526,6 +565,10 @@ static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
 
     fputs("  \"dirty_block\":", f);
     debug_server_freeze_dump_dirty_block_json(f, DUMP_CAP_DIRTY_BLOCK);
+    fputs(",\n", f);
+
+    fputs("  \"dirty_insn\":", f);
+    freeze_dump_dirty_insn_json(f, DUMP_CAP_DIRTY_INSN);
     fputs(",\n", f);
 
 #ifdef _WIN32

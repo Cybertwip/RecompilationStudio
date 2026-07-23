@@ -102,6 +102,13 @@ def main() -> int:
             project,
         )
 
+    # codegen_audit locates the project root by walking for CMakeLists.txt,
+    # .gitignore, or .git. Install the project marker before auditing; the full
+    # diagnostic CMake project replaces this minimal marker below.
+    (project / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n", encoding="utf-8"
+    )
+
     audit_path = project / "codegen_audit.json"
     run(
         [

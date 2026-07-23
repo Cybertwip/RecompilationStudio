@@ -374,6 +374,17 @@ void overlay_loader_init(const std::string& cache_root,
         return;
     }
 
+#ifndef _WIN32
+    // The current overlay loader resolves PE DLLs with LoadLibrary. macOS/Linux
+    // cannot consume those artifacts, so do not spawn compilers or create cache
+    // diagnostics that can never be loaded; the exact interpreter bridge stays
+    // active and coverage remains reported.
+    s_active = false;
+    std::printf("self_heal_recompile=UNAVAILABLE host_loader=non_windows "
+                "interpreter_bridge=ENABLED\n");
+    return;
+#endif
+
     const char* root_env = std::getenv("GBARECOMP_HEAL_CACHE");
     const std::string root =
         (root_env && root_env[0]) ? root_env

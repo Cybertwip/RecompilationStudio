@@ -238,3 +238,8 @@ extern "C" uint32_t runtime_mul_cycles(uint32_t rs_value,
                                        uint32_t extra) {
     return armv4t::mul_wait_cycles(rs_value, signed_variant != 0u, extra);
 }
+
+extern "C" int runtime_bridge_interpret(uint32_t, bool, uint32_t,
+                                         unsigned long long) {
+    return 0;
+}

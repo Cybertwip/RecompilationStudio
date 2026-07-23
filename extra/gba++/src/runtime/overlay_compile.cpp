@@ -102,26 +102,26 @@ std::string overlay_include_flags() {
 }
 
 #ifdef _WIN32
-// Spawn a child process (NOT system()), redirect stdout+stderr to logpath,
-// block until exit, return the exit code (-1 on spawn failure).
-int run_process(const std::string& cmdline, const std::string& logpath,
-                std::string* err) {
+// Spawn a child process (NOT system()), discard compiler chatter, block until
+// exit, and return the exit code (-1 on spawn failure). Diagnostics remain in
+// the structured runtime status; no log files are created.
+int run_process(const std::string& cmdline, std::string* err) {
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
     sa.lpSecurityDescriptor = nullptr;
 
-    HANDLE hlog = CreateFileA(logpath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
-                              &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    HANDLE hin = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ, &sa,
-                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE hout = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE hin = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
     STARTUPINFOA si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput  = hin;
-    si.hStdOutput = hlog;
-    si.hStdError  = hlog;
+    si.hStdOutput = hout;
+    si.hStdError  = hout;
 
     PROCESS_INFORMATION pi{};
     std::vector<char> cl(cmdline.begin(), cmdline.end());
@@ -133,7 +133,7 @@ int run_process(const std::string& cmdline, const std::string& logpath,
     if (!ok) {
         if (err) *err = "CreateProcess(compiler) failed: " +
                         std::to_string(GetLastError());
-        if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
+        if (hout != INVALID_HANDLE_VALUE) CloseHandle(hout);
         if (hin  != INVALID_HANDLE_VALUE) CloseHandle(hin);
         return -1;
     }
@@ -142,7 +142,7 @@ int run_process(const std::string& cmdline, const std::string& logpath,
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
+    if (hout != INVALID_HANDLE_VALUE) CloseHandle(hout);
     if (hin  != INVALID_HANDLE_VALUE) CloseHandle(hin);
     return static_cast<int>(code);
 }
@@ -191,9 +191,8 @@ bool load_and_resolve(const std::string& dll, uint32_t pc,
     return true;
 }
 #else
-int run_process(const std::string& cmdline, const std::string& logpath,
-                std::string*) {
-    std::string c = cmdline + " > \"" + logpath + "\" 2>&1";
+int run_process(const std::string& cmdline, std::string*) {
+    std::string c = cmdline + " >/dev/null 2>&1";
     return std::system(c.c_str());
 }
 bool load_and_resolve(const std::string&, uint32_t, const GbaOverlayCallbacks*,
@@ -254,7 +253,6 @@ bool overlay_compile_one(const OverlayWorkItem& w,
         fs::create_directories(dir, ec);
 
         const fs::path cpath   = dir / (std::string(stem) + ".c");
-        const fs::path logpath = dir / (std::string(stem) + ".log");
         const fs::path dlltmp  = dir / (std::string(stem) + ".dll.tmp");
 
         {
@@ -292,12 +290,11 @@ bool overlay_compile_one(const OverlayWorkItem& w,
                 " -Wl,--export-all-symbols";
         }
 
-        const int rc = run_process(cmd, logpath.string(), err);
+        const int rc = run_process(cmd, err);
         if (rc != 0) {
             if (err) {
                 *err = std::string(heal_backend_name(backend)) + " exit " +
-                       std::to_string(rc) + " compiling " + cpath.string() +
-                       " — see " + logpath.string();
+                       std::to_string(rc) + " compiling " + cpath.string();
             }
             fs::remove(dlltmp, ec);
             return false;

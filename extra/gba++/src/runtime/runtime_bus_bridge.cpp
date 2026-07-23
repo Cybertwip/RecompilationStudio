@@ -244,7 +244,7 @@ gba::GbaPpu* active_ppu() {
 
 // Always-on hang watchdog capture. Called once when the watchdog trips;
 // snapshots the live MP2K channel state (the MC-HP-002 spin walks a
-// corrupt voice pointer) to stderr and hang_dump.log next to the runner.
+// corrupt voice pointer) to the structured diagnostic stream/TCP rings.
 // Pure observation — does not alter execution. See PRINCIPLES.md
 // "always-on ring first": the freeze documents itself, no attach timing.
 static void dump_hang_state(const char* reason) {
@@ -281,58 +281,11 @@ static void dump_hang_state(const char* reason) {
                  static_cast<unsigned long long>(g_runtime_cycles),
                  static_cast<unsigned long long>(g_runtime_vblank_starts),
                  regs, objbuf, m4a.c_str());
-    if (FILE* f = std::fopen("hang_dump.log", "w")) {
-        std::fprintf(f,
-                     "reason=%s\npc=0x%08X\ncpsr=0x%08X\ncycles=%llu\n"
-                     "vblank_starts=%llu\nregs=%s\n%s\nm4a=%s\n",
-                     reason, g_cpu.R[15], g_cpu.cpsr,
-                     static_cast<unsigned long long>(g_runtime_cycles),
-                     static_cast<unsigned long long>(g_runtime_vblank_starts),
-                     regs, objbuf, m4a.c_str());
-        std::fclose(f);
-    }
+    // Keep diagnostics in the always-on in-memory/TCP rings. Disk log files are
+    // forbidden by the host project; surface the recent structured ring on the
+    // existing diagnostic stream instead.
+    runtime_trace_dump_recent(160);
 
-    // Self-documenting execution history: dump the tail of the always-on
-    // per-instruction fingerprint ring so the PCs the game thread executed
-    // leading INTO the freeze are on disk (PRINCIPLES.md "always-on ring
-    // first" — query the ring for the window, never arm-then-capture). This
-    // is what distinguishes a native cart spin (a small cycling PC set) from a
-    // marching pointer walk (monotonic PC/addr) from an interp-bridge over RAM
-    // code (PCs in 0x02/0x03) WITHOUT a second run. Requires GBARECOMP_INSN_TRACE
-    // armed at launch; harmlessly writes 0 records if the ring is empty.
-    uint32_t fpn = runtime_fp_save_tail_csv("hang_fp_tail.csv", 16384);
-    std::fprintf(stderr, "[hang-watchdog] wrote hang_fp_tail.csv (%u records); "
-                 "arm GBARECOMP_INSN_TRACE=1 if 0.\n", fpn);
-
-    // Recent mem-write/branch trace ring (ALWAYS-ON — emitted unconditionally by
-    // codegen, independent of GBARECOMP_INSN_TRACE). A busy-spin freeze loop
-    // performs only reads, so this ring is FROZEN at the instant the spin began:
-    // it still holds the WRITES that produced the corrupt state the loop chokes
-    // on (e.g. whoever wrote the bad pointer being walked). Dumping it makes the
-    // writer of a wrong value attributable from the freeze alone — trace-the-
-    // writer without a second run (PRINCIPLES.md "find the first divergence").
-    {
-        static RuntimeTraceEntry tr[4096];
-        uint32_t ntr = runtime_trace_copy_recent(tr, 4096);
-        if (FILE* tf = std::fopen("hang_trace.csv", "w")) {
-            std::fprintf(tf, "seq,cycles,kind,pc,addr,value,aux,"
-                             "r0,r1,r2,r3,r4,r5,r12,sp,lr\n");
-            for (uint32_t i = 0; i < ntr; ++i) {
-                const RuntimeTraceEntry& e = tr[i];
-                std::fprintf(tf,
-                    "%u,%llu,%u,0x%08X,0x%08X,0x%08X,0x%X,"
-                    "0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X\n",
-                    e.seq, static_cast<unsigned long long>(e.cycles), e.kind,
-                    e.pc, e.addr, e.value, e.aux, e.r0, e.r1, e.r2, e.r3,
-                    e.r4, e.r5, e.r12, e.r13, e.r14);
-            }
-            std::fclose(tf);
-            std::fprintf(stderr,
-                "[hang-watchdog] wrote hang_trace.csv (%u mem-write/branch "
-                "records — frozen at spin onset; find the corrupt-value writer "
-                "here).\n", ntr);
-        }
-    }
 }
 
 }  // namespace gbarecomp
@@ -898,7 +851,7 @@ extern "C" bool runtime_should_yield(void) {
         static const long long wd_secs = [] {
             const char* e = std::getenv("GBARECOMP_HANG_SECONDS");
             long long s = e ? std::atoll(e) : 0;
-            return s > 0 ? s : 4;
+            return s > 0 ? s : (g_bios_hle_standalone ? 1 : 4);
         }();
         static bool tripped = false;
         static std::chrono::steady_clock::time_point last_halt =
@@ -913,6 +866,14 @@ extern "C" bool runtime_should_yield(void) {
                     "guest has not HALTed for several seconds — likely a busy-spin "
                     "freeze (MC-HP-002 class)");
                 tripped = true;
+                if (g_bios_hle_standalone && !g_force_interp) {
+                    std::fprintf(stderr,
+                        "[hang-watchdog] DEGRADED: switching this session from "
+                        "AOT dispatch to the reference interpreter; execution "
+                        "state is preserved and coverage is no longer fully static.\n");
+                    g_force_interp = 1;
+                    return true;  // unwind the current generated call chain
+                }
             }
         }
     }

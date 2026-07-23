@@ -177,7 +177,17 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
         }
         return false;
     };
-    auto decode_pointer = [&](uint32_t source,
+    auto thumb_has_entry_prologue = [&](uint32_t target) {
+        if (!in_rom(target, 2)) return false;
+        const uint16_t first = read16(target);
+        // PUSH {...,lr} / PUSH {...} and SUB sp,#imm are canonical Thumb
+        // function entries. Long callback bodies often do not reach a return
+        // within the local 64-instruction shape window, so the prologue is the
+        // stronger entry proof for those table records.
+        return (first & 0xFE00u) == 0xB400u ||
+               (first & 0xFF80u) == 0xB080u;
+    };
+    auto decode_pointer = [&](uint32_t source, bool require_strong_callable,
                               CallbackPointerEntry* out) -> bool {
         if (!in_rom(source, 4)) return false;
         const uint32_t raw = read32(source);
@@ -196,7 +206,9 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
             in_data_range(target) || !decode_run(target, mode)) {
             return false;
         }
-        if (mode == CpuMode::Thumb && !thumb_has_local_return(target))
+        if (require_strong_callable && mode == CpuMode::Thumb &&
+            !thumb_has_local_return(target) &&
+            !thumb_has_entry_prologue(target))
             return false;
         if (mode == CpuMode::Arm && !arm_prologue(target)) return false;
         *out = CallbackPointerEntry{source, raw, target, mode};
@@ -207,15 +219,17 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
     std::unordered_set<uint64_t> seen_tables;
     for (uint32_t source = rom_base;
          static_cast<uint64_t>(source - rom_base) + 4u <= rom.size();
-         source += 4u) {
+        source += 4u) {
         CallbackPointerEntry first;
-        if (!decode_pointer(source, &first)) continue;
+        if (!decode_pointer(source, /*require_strong_callable=*/true, &first))
+            continue;
 
         CallbackPointerTable best;
         for (uint32_t stride = 8u; stride <= 64u; stride += 4u) {
             CallbackPointerEntry previous;
             if (source >= rom_base + stride &&
-                decode_pointer(source - stride, &previous) &&
+                decode_pointer(source - stride, /*require_strong_callable=*/true,
+                               &previous) &&
                 previous.mode == first.mode) {
                 continue;  // canonicalize at the first record in the table
             }
@@ -227,7 +241,8 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
                                          static_cast<uint64_t>(index) * stride;
                 if (entry64 > UINT32_MAX) break;
                 CallbackPointerEntry entry;
-                if (!decode_pointer(static_cast<uint32_t>(entry64), &entry) ||
+                if (!decode_pointer(static_cast<uint32_t>(entry64),
+                                    /*require_strong_callable=*/true, &entry) ||
                     entry.mode != first.mode) {
                     break;
                 }
@@ -239,6 +254,59 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
             }
         }
         if (best.entries.size() < 3u) continue;
+        const uint64_t key = (static_cast<uint64_t>(best.source_addr) << 8) |
+                             best.stride;
+        if (seen_tables.insert(key).second) tables.push_back(std::move(best));
+    }
+
+    // Second pass: long structured callback tables can contain large dispatcher
+    // functions whose first local return is beyond the conservative 64-insn
+    // strong gate. Accept those weak entries only when at least six same-mode
+    // pointers occur at one record stride and at least three peers pass the
+    // strong callable-shape gate. This preserves the table-level proof while
+    // avoiding a ROM-wide "every pointer is code" sweep.
+    for (uint32_t source = rom_base;
+         static_cast<uint64_t>(source - rom_base) + 4u <= rom.size();
+         source += 4u) {
+        CallbackPointerEntry first;
+        if (!decode_pointer(source, /*require_strong_callable=*/false, &first))
+            continue;
+        CallbackPointerTable best;
+        for (uint32_t stride = 8u; stride <= 64u; stride += 4u) {
+            CallbackPointerEntry previous;
+            if (source >= rom_base + stride &&
+                decode_pointer(source - stride, /*require_strong_callable=*/false,
+                               &previous) &&
+                previous.mode == first.mode) {
+                continue;
+            }
+            CallbackPointerTable candidate;
+            candidate.source_addr = source;
+            candidate.stride = stride;
+            uint32_t strong_entries = 0;
+            for (uint32_t index = 0; index < 256u; ++index) {
+                const uint64_t entry64 = static_cast<uint64_t>(source) +
+                                         static_cast<uint64_t>(index) * stride;
+                if (entry64 > UINT32_MAX) break;
+                CallbackPointerEntry entry;
+                if (!decode_pointer(static_cast<uint32_t>(entry64),
+                                    /*require_strong_callable=*/false, &entry) ||
+                    entry.mode != first.mode) {
+                    break;
+                }
+                CallbackPointerEntry strong;
+                if (decode_pointer(static_cast<uint32_t>(entry64),
+                                   /*require_strong_callable=*/true, &strong)) {
+                    ++strong_entries;
+                }
+                candidate.entries.push_back(entry);
+            }
+            if (candidate.entries.size() >= 6u && strong_entries >= 3u &&
+                candidate.entries.size() > best.entries.size()) {
+                best = std::move(candidate);
+            }
+        }
+        if (best.entries.size() < 6u) continue;
         const uint64_t key = (static_cast<uint64_t>(best.source_addr) << 8) |
                              best.stride;
         if (seen_tables.insert(key).second) tables.push_back(std::move(best));

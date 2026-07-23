@@ -24,7 +24,7 @@ struct RuntimeTraceEntry;
 
 namespace armv4t {
 struct CPUState;
-class  Bus;
+struct Bus;
 }
 
 namespace gba {

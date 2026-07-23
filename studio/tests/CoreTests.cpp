@@ -109,7 +109,10 @@ int main(int argc, char** argv) {
     psxstudio::PipelineRequest request;
     request.system = psxstudio::SystemKind::GameBoyAdvance;
     request.targetPlatform = psxstudio::hostTargetPlatform();
-    request.exportMode = QString::fromLocal8Bit(argv[5]) == QStringLiteral("source")
+    if (argc >= 7) {
+      request.targetPlatform = psxstudio::targetPlatformFromKey(QString::fromLocal8Bit(argv[6]));
+    }
+    request.exportMode = QString::fromLocal8Bit(argv[5]).startsWith(QStringLiteral("source"))
       ? psxstudio::ExportMode::Source : psxstudio::ExportMode::Build;
     request.romPath = QString::fromLocal8Bit(argv[2]);
     request.biosPath = QString::fromLocal8Bit(argv[3]);
@@ -117,7 +120,7 @@ int main(int argc, char** argv) {
     request.frameworkRoot = QDir::cleanPath(
       QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("../..")));
     request.windowTitle = QStringLiteral("GBA Studio Smoke");
-    request.exportAsZip = false;
+    request.exportAsZip = QString::fromLocal8Bit(argv[5]).endsWith(QStringLiteral("zip"));
     request.overwriteOutput = true;
     psxstudio::PipelineWorker worker;
     bool ok = false;

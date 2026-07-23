@@ -14,7 +14,7 @@ must:
 | Library | Use | License | Where |
 |---------|-----|---------|-------|
 | `fmt` | text formatting in tools | MIT | likely `third_party/fmt/` |
-| `toml++` v3.4.0 | `game.toml` parsing | MIT | optional ignored checkout at `third_party/tomlpp/`; otherwise CMake FetchContent at pinned commit `30172438` |
+| `toml++` v3.4.0 | `game.toml` parsing | MIT | pinned amalgamated header at `third_party/tomlpp/` (commit `30172438`) |
 | `cxxopts` | CLI parsing in tools | MIT | likely `third_party/cxxopts/` |
 | `nlohmann/json` | debug TCP responses | MIT | likely `third_party/json/` |
 

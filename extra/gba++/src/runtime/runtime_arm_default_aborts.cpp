@@ -39,6 +39,7 @@
 #include "arm_ir.h"
 
 #include "../gba/gba_bus.h"
+#include "../gba/gba_ppu.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -423,6 +424,27 @@ extern "C" const char* g_tick_ctx;
 // corrupting mainline frames; this keeps the self-heal bridge from bailing early.
 extern "C" uint32_t g_irq_nest_depth;
 
+namespace {
+
+void bridge_idle_step(gba::GbaBus& bus) {
+    gba::GbaPpu* ppu = gbarecomp::active_ppu();
+    if (!ppu) {
+        runtime_tick(1u);
+        return;
+    }
+    uint32_t chunk = ppu->cycles_until_next_event();
+    const uint32_t timer = bus.io().cycles_until_next_timer_event();
+    const uint32_t sample = bus.audio().cycles_until_next_sample();
+    const uint32_t sio = bus.io().cycles_until_next_sio_event();
+    if (timer < chunk) chunk = timer;
+    if (sample < chunk) chunk = sample;
+    if (sio < chunk) chunk = sio;
+    if (chunk == 0u || chunk == 0xFFFFFFFFu) chunk = 1u;
+    runtime_tick(chunk);
+}
+
+}  // namespace
+
 // runtime_bridge_interpret — the interpret-the-missed-subtree core, factored out
 // of runtime_dispatch_miss so the P6 sljit differential gate can reuse it as its
 // "interpreter pass": the kept, correct result a healed shard is validated
@@ -527,6 +549,37 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         const bool was_thumb = cpu.thumb;
         g_cpu.R[15] = pc;  // store_interp already set this; explicit for clarity
         bus->set_bios_access_enabled(pc < 0x00004000u);
+
+        // Match the Rust reference Machine::step contract: a halted CPU does
+        // not fetch/execute the next instruction. Advance only to the next
+        // hardware event until an enabled IRQ wakes it, keeping the live CPU
+        // state synchronized around IRQ delivery. The old bridge interpreted
+        // straight through SWI Halt, which could consume the whole program
+        // inside one miss and starve the host window/audio path.
+        if (bus->io().halted()) {
+            bridge_idle_step(*bus);
+            gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
+            if (runtime_frame_present_hook_active()) {
+                (void)runtime_should_yield();
+                if (runtime_frame_present_quit_requested()) {
+                    gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+                    return 1;
+                }
+            }
+            continue;
+        }
+
+        // Generated functions run runtime_should_yield() at every instruction
+        // prologue. A long interpreter bridge must preserve the same in-place
+        // VBlank presentation/input/audio checkpoint; otherwise guest frames
+        // continue while the SDL window and audio producer freeze. Headless
+        // bridges retain their existing command-driven behavior.
+        if (runtime_frame_present_hook_active()) {
+            if (runtime_should_yield() &&
+                runtime_frame_present_quit_requested()) {
+                return 1;
+            }
+        }
         if (g_runtime_insn_trace) runtime_insn_fp();
 
         // Fetch + decode at the current PC.

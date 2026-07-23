@@ -119,7 +119,8 @@ int main(int argc, char** argv) {
     request.outputDirectory = QString::fromLocal8Bit(argv[4]);
     request.frameworkRoot = QDir::cleanPath(
       QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("../..")));
-    request.windowTitle = QStringLiteral("GBA Studio Smoke");
+    request.windowTitle = argc >= 8 ? QString::fromLocal8Bit(argv[7])
+                                    : QStringLiteral("GBA Studio Smoke");
     request.exportAsZip = QString::fromLocal8Bit(argv[5]).endsWith(QStringLiteral("zip"));
     request.overwriteOutput = true;
     psxstudio::PipelineWorker worker;

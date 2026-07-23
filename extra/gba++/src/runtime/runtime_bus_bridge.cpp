@@ -10,7 +10,6 @@
 #include "../armv4t/symbol_lookup.h"
 #include "../gba/gba_bus.h"
 #include "../gba/gba_irq.h"
-#include "../gba/gba_m4a.h"
 #include "../gba/gba_ppu.h"
 
 #ifdef GBA_COSIM
@@ -240,52 +239,6 @@ gba::GbaBus* active_bus() {
 
 gba::GbaPpu* active_ppu() {
     return g_active_ppu;
-}
-
-// Always-on hang watchdog capture. Called once when the watchdog trips;
-// snapshots the live MP2K channel state (the MC-HP-002 spin walks a
-// corrupt voice pointer) to the structured diagnostic stream/TCP rings.
-// Pure observation — does not alter execution. See PRINCIPLES.md
-// "always-on ring first": the freeze documents itself, no attach timing.
-static void dump_hang_state(const char* reason) {
-    if (!g_active_bus) return;
-    std::string m4a;
-    gba::mp2k_dump_live(*g_active_bus, m4a);
-
-    // Full CPU register snapshot — the hang is a busy loop, so r0..r15 pin the
-    // object/pointer it is walking (MC-HP-002: UpdateAnimationVariableFrames
-    // walks a corrupt frame-list pointer r1 = *(animObj+0x5c)). Also dump the
-    // candidate animation object (r0) and the word it loads at +0x5c so the
-    // corrupt value is attributable without a second run.
-    char regs[512];
-    int n = 0;
-    for (int i = 0; i < 16; ++i) {
-        n += std::snprintf(regs + n, sizeof(regs) - n, "r%d=0x%08X ",
-                           i, g_cpu.R[i]);
-    }
-    uint32_t r0 = g_cpu.R[0];
-    uint32_t cmdptr = g_active_bus->read32(r0 + 0x5cu);
-    char objbuf[256];
-    int m = std::snprintf(objbuf, sizeof(objbuf),
-                          "obj@r0=0x%08X  *(r0+0x5c)=0x%08X  obj[0x00..0x60]:",
-                          r0, cmdptr);
-    for (uint32_t off = 0; off < 0x60u && m < (int)sizeof(objbuf) - 4; off += 4) {
-        m += std::snprintf(objbuf + m, sizeof(objbuf) - m, " %08X",
-                           g_active_bus->read32(r0 + off));
-    }
-
-    std::fprintf(stderr,
-                 "\n[hang-watchdog] %s\n  pc=0x%08X cpsr=0x%08X cycles=%llu "
-                 "vblank_starts=%llu\n  %s\n  %s\n  m4a=%s\n",
-                 reason, g_cpu.R[15], g_cpu.cpsr,
-                 static_cast<unsigned long long>(g_runtime_cycles),
-                 static_cast<unsigned long long>(g_runtime_vblank_starts),
-                 regs, objbuf, m4a.c_str());
-    // Keep diagnostics in the always-on in-memory/TCP rings. Disk log files are
-    // forbidden by the host project; surface the recent structured ring on the
-    // existing diagnostic stream instead.
-    runtime_trace_dump_recent(160);
-
 }
 
 }  // namespace gbarecomp
@@ -832,49 +785,6 @@ extern "C" bool runtime_should_yield(void) {
                 return quit;
             }
             return true;
-        }
-    }
-
-    // ── Always-on hang watchdog ──────────────────────────────────────
-    // A healthy GBA game HALTs (VBlankIntrWait) ~60x/sec; the MC-HP-002
-    // freeze is a busy-spin in the M4A mixer that NEVER halts (the PPU
-    // still ticks, so frame counters keep advancing — "no frames" is the
-    // wrong signal; "no HALT" is the right one). If we go many seconds of
-    // wall-clock with no HALT, snapshot the live M4A state ONCE and keep
-    // running (observation, not a fix). Disable with
-    // GBARECOMP_HANG_WATCHDOG=0; tune seconds with GBARECOMP_HANG_SECONDS.
-    static const bool wd_on = [] {
-        const char* e = std::getenv("GBARECOMP_HANG_WATCHDOG");
-        return !(e && e[0] == '0' && e[1] == '\0');
-    }();
-    if (wd_on) {
-        static const long long wd_secs = [] {
-            const char* e = std::getenv("GBARECOMP_HANG_SECONDS");
-            long long s = e ? std::atoll(e) : 0;
-            return s > 0 ? s : (g_bios_hle_standalone ? 1 : 4);
-        }();
-        static bool tripped = false;
-        static std::chrono::steady_clock::time_point last_halt =
-            std::chrono::steady_clock::now();
-        static unsigned long long calls = 0;
-        if (halted) {
-            last_halt = std::chrono::steady_clock::now();
-        } else if (!tripped && (++calls & 0xFFFFFull) == 0) {
-            auto idle = std::chrono::steady_clock::now() - last_halt;
-            if (std::chrono::duration_cast<std::chrono::seconds>(idle).count() >= wd_secs) {
-                gbarecomp::dump_hang_state(
-                    "guest has not HALTed for several seconds — likely a busy-spin "
-                    "freeze (MC-HP-002 class)");
-                tripped = true;
-                if (g_bios_hle_standalone && !g_force_interp) {
-                    std::fprintf(stderr,
-                        "[hang-watchdog] DEGRADED: switching this session from "
-                        "AOT dispatch to the reference interpreter; execution "
-                        "state is preserved and coverage is no longer fully static.\n");
-                    g_force_interp = 1;
-                    return true;  // unwind the current generated call chain
-                }
-            }
         }
     }
 

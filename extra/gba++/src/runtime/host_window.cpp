@@ -81,6 +81,7 @@ struct PresentSample {
 
 constexpr int kCadenceRingSize     = 16384;  // ~4.5 min at 60 presents/s
 constexpr int kCadenceSummaryEvery = 360;    // ~6 s between stderr summaries
+constexpr std::size_t kHostAudioCaptureSize = 1u << 19;  // ~8 s at 65.536 kHz
 
 struct PresentCadence {
     std::vector<PresentSample> ring;
@@ -265,6 +266,9 @@ struct Backend {
     rab_bridge    bridge{};
     bool          bridge_ready = false;
     SDL_mutex*    audio_mtx = nullptr;
+    std::vector<int16_t> host_audio_capture;
+    uint64_t      host_audio_head = 0;
+    uint32_t      host_audio_rate = 0;
     // Present-time screen-color simulation. Built once from
     // GBARECOMP_SCREEN; default Raw = exact passthrough (no copy, no
     // grading), so default behavior is byte-identical to upstream.
@@ -451,7 +455,16 @@ void gba_audio_callback(void* userdata, Uint8* stream, int len) {
     int frames = len / static_cast<int>(sizeof(int16_t)); // mono
     if (b && b->bridge_ready) {
         SDL_LockMutex(b->audio_mtx);
-        rab_pull(&b->bridge, reinterpret_cast<int16_t*>(stream), frames);
+        auto* output = reinterpret_cast<int16_t*>(stream);
+        rab_pull(&b->bridge, output, frames);
+        if (!b->host_audio_capture.empty()) {
+            for (int i = 0; i < frames; ++i) {
+                b->host_audio_capture[
+                    (b->host_audio_head + static_cast<uint64_t>(i)) %
+                    b->host_audio_capture.size()] = output[i];
+            }
+            b->host_audio_head += static_cast<uint64_t>(frames);
+        }
         SDL_UnlockMutex(b->audio_mtx);
     } else {
         SDL_memset(stream, 0, len);
@@ -633,7 +646,11 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
         cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
                                                     // recomp warm-up hitch (drains to target)
-        if (rab_init(&b->bridge, &cfg) == 0) b->bridge_ready = true;
+        if (rab_init(&b->bridge, &cfg) == 0) {
+            b->bridge_ready = true;
+            b->host_audio_capture.assign(kHostAudioCaptureSize, 0);
+            b->host_audio_rate = static_cast<uint32_t>(got.freq);
+        }
         SDL_PauseAudioDevice(b->audio_dev, 0);      // start the callback
     }
 
@@ -935,6 +952,41 @@ bool HostWindow::audio_debug_state(AudioDebugState& out) const {
     return true;
 }
 
+bool HostWindow::capture_host_audio(uint64_t start, std::size_t count,
+                                    std::vector<int16_t>& samples,
+                                    uint64_t& first, uint64_t& head,
+                                    uint32_t& rate) const {
+    samples.clear();
+    first = 0;
+    head = 0;
+    rate = 0;
+    if (!open_ || !impl_) return false;
+    auto* b = static_cast<Backend*>(impl_);
+    if (!b->bridge_ready || b->host_audio_capture.empty() || !b->audio_mtx)
+        return false;
+
+    SDL_LockMutex(b->audio_mtx);
+    head = b->host_audio_head;
+    rate = b->host_audio_rate;
+    const uint64_t capacity = b->host_audio_capture.size();
+    const uint64_t oldest = head > capacity ? head - capacity : 0;
+    if (count > capacity) count = static_cast<std::size_t>(capacity);
+    if (start == ~uint64_t{0})
+        start = head > count ? head - count : oldest;
+    if (start < oldest) start = oldest;
+    if (start > head) start = head;
+    const uint64_t available = head - start;
+    if (count > available) count = static_cast<std::size_t>(available);
+    first = start;
+    samples.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        samples[i] = b->host_audio_capture[
+            (start + static_cast<uint64_t>(i)) % capacity];
+    }
+    SDL_UnlockMutex(b->audio_mtx);
+    return true;
+}
+
 bool HostWindow::presentation_debug_state(PresentationDebugState& out) const {
     out = {};
     if (!open_ || !impl_) return false;
@@ -1100,6 +1152,15 @@ void HostWindow::set_fps_readout(bool /*on*/) {}
 bool HostWindow::fps_readout() const { return false; }
 bool HostWindow::audio_debug_state(AudioDebugState& out) const {
     out = {};
+    return false;
+}
+bool HostWindow::capture_host_audio(uint64_t /*start*/, std::size_t /*count*/,
+                                    std::vector<int16_t>& samples,
+                                    uint64_t& first, uint64_t& head,
+                                    uint32_t& rate) const {
+    samples.clear();
+    first = head = 0;
+    rate = 0;
     return false;
 }
 bool HostWindow::presentation_debug_state(PresentationDebugState& out) const {

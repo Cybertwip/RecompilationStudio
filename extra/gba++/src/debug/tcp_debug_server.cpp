@@ -971,6 +971,48 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         out += "}";
         return;
     }
+    if (contains("\"host_audio_cap\"")) {
+        if (!ctx.host_audio_capture) {
+            emit_error(out, "host audio capture unavailable");
+            return;
+        }
+        uint64_t count = 65536;
+        uint64_t parsed = 0;
+        if (extract_uint(req, "\"count\"", parsed) ||
+            extract_uint(req, "\"max\"", parsed)) {
+            count = parsed;
+        }
+        if (count > (1u << 19)) count = 1u << 19;
+        uint64_t start = ~uint64_t{0};
+        if (extract_uint(req, "\"start\"", parsed)) start = parsed;
+        std::vector<int16_t> samples;
+        uint64_t first = 0;
+        uint64_t head = 0;
+        uint32_t rate = 0;
+        if (!ctx.host_audio_capture(start, static_cast<std::size_t>(count),
+                                    samples, first, head, rate)) {
+            emit_error(out, "host audio capture unavailable");
+            return;
+        }
+        char header[192];
+        std::snprintf(header, sizeof(header),
+                      "{\"ok\":true,\"rate\":%u,\"count\":%llu,"
+                      "\"first\":%llu,\"head\":%llu,\"pcm_s16le\":",
+                      static_cast<unsigned>(rate),
+                      static_cast<unsigned long long>(samples.size()),
+                      static_cast<unsigned long long>(first),
+                      static_cast<unsigned long long>(head));
+        out = header;
+        std::vector<uint8_t> bytes(samples.size() * 2u);
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            const uint16_t value = static_cast<uint16_t>(samples[i]);
+            bytes[i * 2u] = static_cast<uint8_t>(value & 0xFFu);
+            bytes[i * 2u + 1u] = static_cast<uint8_t>(value >> 8);
+        }
+        json_emit_hex(out, bytes.data(), bytes.size());
+        out += "}";
+        return;
+    }
     if (contains("\"host_audio_state\"")) {
         out = ctx.host_audio_query
             ? ctx.host_audio_query()

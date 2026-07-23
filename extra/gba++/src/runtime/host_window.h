@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace gbarecomp {
 
@@ -117,6 +118,10 @@ public:
     // the actual host output path (SDL callback bridge and presented frames),
     // complementing the emulated GBA-side audio/PPU state.
     bool audio_debug_state(AudioDebugState& out) const;
+    bool capture_host_audio(uint64_t start, std::size_t count,
+                            std::vector<int16_t>& samples,
+                            uint64_t& first, uint64_t& head,
+                            uint32_t& rate) const;
     bool presentation_debug_state(PresentationDebugState& out) const;
 
     // Upload one base_w x base_h RGB888 frame (the dimensions passed to open())

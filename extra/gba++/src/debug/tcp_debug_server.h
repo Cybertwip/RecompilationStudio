@@ -16,9 +16,11 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 struct ArmCpuState;
 struct RuntimeTraceEntry;
@@ -53,6 +55,9 @@ public:
     // file in the shared GFP1 format. Returns the number of records written.
     // Wired to runtime_fp_save_file (recomp) / the interp oracle's mirror.
     using FpSaveFn = std::function<uint32_t(const std::string& path)>;
+    using HostAudioCaptureFn = std::function<bool(
+        uint64_t start, std::size_t count, std::vector<int16_t>& samples,
+        uint64_t& first, uint64_t& head, uint32_t& rate)>;
 
     struct Context {
         armv4t::CPUState* cpu = nullptr;
@@ -91,6 +96,7 @@ public:
         std::function<void()>        pause;        // park at frame boundary
         std::function<std::string()> run_status;   // JSON: run-state/parked/pc
         std::function<std::string()> host_audio_query;
+        HostAudioCaptureFn          host_audio_capture;
         std::function<std::string()> presentation_query;
         std::function<void()>        request_quit;
     };

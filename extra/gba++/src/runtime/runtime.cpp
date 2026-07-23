@@ -2383,6 +2383,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 static_cast<unsigned long long>(state.game_thread_compile_ns));
             return std::string(response);
         };
+        window_debug_context.host_audio_capture =
+            [&](uint64_t start, std::size_t count,
+                std::vector<int16_t>& samples, uint64_t& first,
+                uint64_t& head, uint32_t& rate) {
+                return win.capture_host_audio(start, count, samples,
+                                              first, head, rate);
+            };
         window_debug_context.presentation_query = [&]() -> std::string {
             HostWindow::PresentationDebugState state;
             if (!win.presentation_debug_state(state))

@@ -197,6 +197,8 @@ int main(int argc, char** argv) {
     QString(40, QLatin1Char('b')), 0x87654321u, false);
   check(gbaToml.contains(QStringLiteral("path = \"bios/gba_bios.bin\"")) &&
           gbaToml.contains(QStringLiteral("path = \"game/game.gba\"")) &&
+          gbaToml.contains(QStringLiteral("window_title = \"Studio Test Advance\"")) &&
+          !gbaToml.contains(QStringLiteral("debug_port")) &&
           gbaToml.contains(QStringLiteral("hle = false")) &&
           gbaToml.contains(QStringLiteral("shadow = false")) &&
           gbaToml.contains(QStringLiteral("entry_point = \"0X080000C0\"")),
@@ -214,6 +216,8 @@ int main(int argc, char** argv) {
           gbaCmake.contains(QStringLiteral("MACOSX_BUNDLE")) &&
           gbaCmake.contains(QStringLiteral("TARGET_BUNDLE_CONTENT_DIR:psx-runtime")) &&
           gbaCmake.contains(QStringLiteral("steganos-package/psx-runtime")) &&
+          gbaCmake.contains(QStringLiteral("GBARECOMP_WINDOW_TITLE=\"Studio Test Advance\"")) &&
+          gbaCmake.contains(QStringLiteral("$<$<CONFIG:Debug>:GBARECOMP_DEFAULT_DEBUG_PORT=4371>")) &&
           gbaCmake.contains(QStringLiteral("add_executable(psx-runtime MACOSX_BUNDLE")),
         QStringLiteral("generated GBA CMake follows Studio app and CI package structure"));
 

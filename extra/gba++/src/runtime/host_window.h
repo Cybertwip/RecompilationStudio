@@ -19,6 +19,41 @@ namespace gbarecomp {
 
 class HostWindow {
 public:
+    struct AudioDebugState {
+        bool available = false;
+        bool device_open = false;
+        bool bridge_ready = false;
+        bool primed = false;
+        int source_rate = 0;
+        int host_rate = 0;
+        int volume = 100;
+        uint64_t pushed_frames = 0;
+        uint64_t pulled_frames = 0;
+        uint64_t underrun_events = 0;
+        uint64_t overflow_drops = 0;
+        uint64_t stretch_frames = 0;
+        uint64_t stretch_events = 0;
+        uint64_t game_thread_compile_ns = 0;
+        double fill_ms = 0.0;
+        double correction = 0.0;
+    };
+
+    struct PresentationDebugState {
+        bool available = false;
+        uint64_t total_presents = 0;
+        uint32_t sample_count = 0;
+        uint32_t latest_gap_us = 0;
+        uint32_t latest_block_us = 0;
+        uint32_t gap_p50_us = 0;
+        uint32_t gap_p95_us = 0;
+        uint32_t gap_max_us = 0;
+        uint32_t block_p50_us = 0;
+        uint32_t block_p95_us = 0;
+        uint32_t block_max_us = 0;
+        double fps = 0.0;
+        int fullscreen = 0;
+    };
+
     HostWindow();
     ~HostWindow();
 
@@ -77,6 +112,12 @@ public:
     int  volume() const;
     void set_fps_readout(bool on);      // presents-per-second in the title bar
     bool fps_readout() const;
+
+    // Non-destructive live telemetry for the TCP debug surface. These report
+    // the actual host output path (SDL callback bridge and presented frames),
+    // complementing the emulated GBA-side audio/PPU state.
+    bool audio_debug_state(AudioDebugState& out) const;
+    bool presentation_debug_state(PresentationDebugState& out) const;
 
     // Upload one base_w x base_h RGB888 frame (the dimensions passed to open())
     // and present.

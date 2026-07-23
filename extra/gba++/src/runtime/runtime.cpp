@@ -56,6 +56,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -94,6 +95,7 @@ constexpr std::size_t kMaxRomSize = 32u * 1024u * 1024u;
 struct Args {
     std::string config = GBARECOMP_DEFAULT_GAME_CONFIG;
     std::string game_short_name;
+    std::string window_title = GBARECOMP_WINDOW_TITLE;
     std::string bios;
     std::string bios_sha1 = gba::GbaBios::kExpectedSha1;
     // SHA-1 is the gate (40 hex chars, way stronger than a 32-bit
@@ -109,9 +111,10 @@ struct Args {
     int steps = 16;
     int frames = -1;
     int scale = 3;
-    int tcp_port = 0;
+    int tcp_port = GBARECOMP_DEFAULT_DEBUG_PORT;
     bool steps_set = false;
     bool frames_set = false;
+    bool tcp_set = false;
     bool window_set = false;
     bool quiet = false;
     bool window = false;
@@ -466,7 +469,9 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
         std::string val = unquote(line.substr(eq + 1));
         if (val == "TBD") val.clear();
 
-        if (section == "game" && key == "short_name") {
+        if (section == "game" && key == "name") {
+            args->window_title = val;
+        } else if (section == "game" && key == "short_name") {
             args->game_short_name = val;
         } else if (section == "game" && key == "default_region") {
             if (default_region) *default_region = val;
@@ -492,6 +497,15 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
                 return false;
             }
             args->save_size = static_cast<std::size_t>(n);
+        } else if (section == "runtime" && key == "window_title") {
+            args->window_title = val;
+        } else if (section == "runtime" && key == "debug_port") {
+            int port = 0;
+            if (!parse_int(val.c_str(), &port) || port < 0 || port > 65535) {
+                if (err) *err = "invalid [runtime].debug_port value in " + path.string();
+                return false;
+            }
+            args->tcp_port = port;
         } else if (section == "video" && key == "screen") {
             args->screen = val;
         } else if (section == "video" && key == "view_width") {
@@ -526,7 +540,8 @@ void find_config_arg(int argc, char** argv, Args* args) {
         }
         if ((s == "--bios" || s == "--rom" || s == "--bios-sha1" ||
              s == "--rom-sha1" || s == "--steps" || s == "--frames" ||
-             s == "--scale" || s == "--tcp" || s == "--dump-bmp" ||
+             s == "--scale" || s == "--tcp" || s == "--window-title" ||
+             s == "--dump-bmp" ||
              s == "--dump-png" || s == "--load-state" ||
              s == "--view-width" || s == "--widescreen" ||
              s == "--save" || s == "--save-path") &&
@@ -655,7 +670,14 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
                 if (err) *err = "invalid --tcp value";
                 return false;
             }
+            args->tcp_set = true;
             args->quiet = true;
+            continue;
+        }
+        if (s == "--window-title") {
+            const char* v = need_value("--window-title");
+            if (!v) return false;
+            args->window_title = v;
             continue;
         }
         if (s == "--dump-bmp") {
@@ -947,16 +969,20 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         args.rom = r.path;
     }
 
-    if (!args.steps_set && !args.frames_set && args.tcp_port <= 0) {
+    if (!args.steps_set && !args.frames_set) {
         // Auto-window when nothing was specified and SDL is built in.
-        if (!args.window_set && HostWindow::is_available()) {
+        // An explicit CLI --tcp retains the historical command-driven/headless
+        // behavior unless paired with --window. A compiled/configured debug
+        // port, however, augments the normal interactive app instead of
+        // suppressing its window.
+        if (!args.window_set && !args.tcp_set && HostWindow::is_available()) {
             args.window = true;
             args.quiet = true;
         }
         // Headless fallback: one frame is enough to validate the runtime
         // came up. Explicit --window runs stay open-ended (let the user
         // close the window).
-        if (!args.window) {
+        if (!args.window && args.tcp_port <= 0) {
             args.frames = 1;
             args.frames_set = true;
         }
@@ -1635,7 +1661,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fflush(wram_trace_log);
     };
 
-    if (args.tcp_port > 0) {
+    if (args.tcp_port > 0 && !args.window) {
         // ── Free-run threading model ───────────────────────────────────────
         // The game CORE runs on a dedicated thread; the TCP server runs on THIS
         // (main) thread. Synchronous `step` (oracle lockstep) signals the game
@@ -1948,7 +1974,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return 1;
         }
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
-                      GBARECOMP_WINDOW_TITLE,
+                      args.window_title.empty() ? GBARECOMP_WINDOW_TITLE
+                                                : args.window_title.c_str(),
                       args.screen.empty() ? nullptr : args.screen.c_str(),
                       args.linear_filter, resize_view_enabled)) {
             gbarecomp::overlay_loader_shutdown();
@@ -2155,6 +2182,266 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
 
+    // Interactive debug mode keeps SDL/window ownership on the main thread and
+    // runs the JSON-over-newline server in the background. Control requests are
+    // acknowledged only at clean generated-dispatch/frame boundaries; live
+    // observation remains intentionally lock-free, matching the established
+    // headless free-run debugger so a spinning core is still inspectable.
+    enum WindowDebugState {
+        WDS_RUNNING = 0,
+        WDS_PAUSED = 1,
+        WDS_STEP_FRAME = 2,
+        WDS_STEP_DISPATCH = 3,
+        WDS_QUIT = 4,
+    };
+    const bool window_debug_enabled = args.window && args.tcp_port > 0;
+    std::mutex window_debug_m;
+    std::condition_variable window_debug_cv;
+    int window_debug_state = WDS_RUNNING;
+    bool window_debug_parked = false;
+    bool window_debug_step_done = false;
+    bool window_debug_step_ok = true;
+    bool window_debug_mutating = false;
+    std::unique_ptr<debug::TcpDebugServer> window_debug_server;
+    std::thread window_debug_thread;
+
+    auto window_debug_checkpoint = [&](bool frame_boundary,
+                                       bool dispatch_boundary) {
+        if (!window_debug_enabled) return;
+        std::unique_lock<std::mutex> lock(window_debug_m);
+        const bool completes_step =
+            (window_debug_state == WDS_STEP_FRAME && frame_boundary) ||
+            (window_debug_state == WDS_STEP_DISPATCH && dispatch_boundary);
+        if (completes_step) {
+            window_debug_state = WDS_PAUSED;
+            window_debug_step_done = true;
+            window_debug_step_ok = true;
+            window_debug_cv.notify_all();
+        }
+        if (window_debug_state == WDS_QUIT) {
+            host_quit = true;
+            window_debug_cv.notify_all();
+            return;
+        }
+        if (window_debug_state != WDS_PAUSED) return;
+
+        window_debug_parked = true;
+        window_debug_cv.notify_all();
+        while (window_debug_state == WDS_PAUSED && !host_quit) {
+            const bool mutating = window_debug_mutating;
+            lock.unlock();
+            if (!mutating) pump_host_input();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            lock.lock();
+        }
+        window_debug_parked = false;
+        if (window_debug_state == WDS_QUIT) host_quit = true;
+        window_debug_cv.notify_all();
+    };
+
+    auto window_debug_park = [&](int timeout_ms) -> bool {
+        if (!window_debug_enabled) return false;
+        std::unique_lock<std::mutex> lock(window_debug_m);
+        if (window_debug_state == WDS_QUIT || host_quit) return false;
+        window_debug_state = WDS_PAUSED;
+        window_debug_cv.notify_all();
+        return window_debug_cv.wait_for(
+            lock, std::chrono::milliseconds(timeout_ms),
+            [&] { return window_debug_parked || host_quit ||
+                         window_debug_state == WDS_QUIT; }) &&
+               window_debug_parked;
+    };
+
+    auto window_debug_request_step = [&](int requested_state) -> bool {
+        if (!window_debug_park(2000)) return false;
+        std::unique_lock<std::mutex> lock(window_debug_m);
+        window_debug_step_done = false;
+        window_debug_step_ok = true;
+        window_debug_state = requested_state;
+        window_debug_cv.notify_all();
+        window_debug_cv.wait(lock, [&] {
+            return window_debug_step_done || host_quit ||
+                   window_debug_state == WDS_QUIT;
+        });
+        return window_debug_step_done && window_debug_step_ok;
+    };
+
+    debug::TcpDebugServer::Context window_debug_context;
+    if (window_debug_enabled) {
+        window_debug_context.cpu = nullptr;
+        window_debug_context.recomp_cpu = &g_cpu;
+        window_debug_context.runtime_trace_copy = runtime_trace_copy_recent;
+        window_debug_context.bus = &bus;
+        window_debug_context.ppu = &ppu;
+        window_debug_context.step = [&]() {
+            return window_debug_request_step(WDS_STEP_FRAME);
+        };
+        window_debug_context.step_inst = [&]() {
+            return window_debug_request_step(WDS_STEP_DISPATCH);
+        };
+        window_debug_context.savestate_save =
+            [&](const std::string& path, std::string& save_error) -> bool {
+                if (!window_debug_park(2000)) {
+                    save_error = "core not parked (running/wedged) — pause first";
+                    return false;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(window_debug_m);
+                    window_debug_mutating = true;
+                }
+                const bool ok = do_savestate_save(path, save_error);
+                {
+                    std::lock_guard<std::mutex> lock(window_debug_m);
+                    window_debug_mutating = false;
+                    window_debug_cv.notify_all();
+                }
+                return ok;
+            };
+        window_debug_context.savestate_load =
+            [&](const std::string& path, std::string& load_error) -> bool {
+                if (!window_debug_park(2000)) {
+                    load_error = "core not parked (running/wedged) — pause first";
+                    return false;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(window_debug_m);
+                    window_debug_mutating = true;
+                }
+                const bool ok = do_savestate_load(path, load_error);
+                {
+                    std::lock_guard<std::mutex> lock(window_debug_m);
+                    window_debug_mutating = false;
+                    window_debug_cv.notify_all();
+                }
+                return ok;
+            };
+        window_debug_context.fp_save = [](const std::string& path) {
+            return runtime_fp_save_file(path.c_str());
+        };
+        window_debug_context.misses_query = []() {
+            return gbarecomp::self_heal_misses_json();
+        };
+        window_debug_context.resume = [&]() {
+            std::lock_guard<std::mutex> lock(window_debug_m);
+            if (window_debug_state != WDS_QUIT)
+                window_debug_state = WDS_RUNNING;
+            window_debug_cv.notify_all();
+        };
+        window_debug_context.pause = [&]() { window_debug_park(2000); };
+        window_debug_context.run_status = [&]() -> std::string {
+            int state = WDS_RUNNING;
+            bool parked = false;
+            {
+                std::lock_guard<std::mutex> lock(window_debug_m);
+                state = window_debug_state;
+                parked = window_debug_parked;
+            }
+            const char* name = state == WDS_RUNNING ? "running"
+                             : state == WDS_PAUSED ? "paused"
+                             : state == WDS_STEP_FRAME ? "step_frame"
+                             : state == WDS_STEP_DISPATCH ? "step_dispatch"
+                             : "quit";
+            char response[224];
+            std::snprintf(
+                response, sizeof(response),
+                "{\"ok\":true,\"run\":\"%s\",\"parked\":%s,"
+                "\"pc\":\"0x%08X\",\"cpsr\":\"0x%08X\","
+                "\"frame\":%llu,\"vblank_starts\":%llu}",
+                name, parked ? "true" : "false",
+                static_cast<unsigned>(g_cpu.R[15]),
+                static_cast<unsigned>(g_cpu.cpsr),
+                static_cast<unsigned long long>(ppu.frame_count()),
+                static_cast<unsigned long long>(g_runtime_vblank_starts));
+            return std::string(response);
+        };
+        window_debug_context.host_audio_query = [&]() -> std::string {
+            HostWindow::AudioDebugState state;
+            if (!win.audio_debug_state(state))
+                return "{\"ok\":false,\"error\":\"host audio unavailable\"}";
+            char response[768];
+            std::snprintf(
+                response, sizeof(response),
+                "{\"ok\":true,\"available\":%s,\"device_open\":%s,"
+                "\"bridge_ready\":%s,\"primed\":%s,\"source_rate\":%d,"
+                "\"host_rate\":%d,\"volume\":%d,\"pushed_frames\":%llu,"
+                "\"pulled_frames\":%llu,\"underrun_events\":%llu,"
+                "\"overflow_drops\":%llu,\"stretch_frames\":%llu,"
+                "\"stretch_events\":%llu,\"fill_ms\":%.6f,"
+                "\"correction\":%.9f,\"game_thread_compile_ns\":%llu}",
+                state.available ? "true" : "false",
+                state.device_open ? "true" : "false",
+                state.bridge_ready ? "true" : "false",
+                state.primed ? "true" : "false", state.source_rate,
+                state.host_rate, state.volume,
+                static_cast<unsigned long long>(state.pushed_frames),
+                static_cast<unsigned long long>(state.pulled_frames),
+                static_cast<unsigned long long>(state.underrun_events),
+                static_cast<unsigned long long>(state.overflow_drops),
+                static_cast<unsigned long long>(state.stretch_frames),
+                static_cast<unsigned long long>(state.stretch_events),
+                state.fill_ms, state.correction,
+                static_cast<unsigned long long>(state.game_thread_compile_ns));
+            return std::string(response);
+        };
+        window_debug_context.presentation_query = [&]() -> std::string {
+            HostWindow::PresentationDebugState state;
+            if (!win.presentation_debug_state(state))
+                return "{\"ok\":false,\"error\":\"presentation telemetry unavailable\"}";
+            char response[640];
+            std::snprintf(
+                response, sizeof(response),
+                "{\"ok\":true,\"available\":%s,\"total_presents\":%llu,"
+                "\"sample_count\":%u,\"latest_gap_us\":%u,"
+                "\"latest_block_us\":%u,\"gap_p50_us\":%u,"
+                "\"gap_p95_us\":%u,\"gap_max_us\":%u,"
+                "\"block_p50_us\":%u,\"block_p95_us\":%u,"
+                "\"block_max_us\":%u,\"fps\":%.6f,\"fullscreen\":%d}",
+                state.available ? "true" : "false",
+                static_cast<unsigned long long>(state.total_presents),
+                state.sample_count, state.latest_gap_us,
+                state.latest_block_us, state.gap_p50_us, state.gap_p95_us,
+                state.gap_max_us, state.block_p50_us, state.block_p95_us,
+                state.block_max_us, state.fps, state.fullscreen);
+            return std::string(response);
+        };
+        window_debug_context.request_quit = [&]() {
+            std::lock_guard<std::mutex> lock(window_debug_m);
+            window_debug_state = WDS_QUIT;
+            window_debug_cv.notify_all();
+        };
+        (void)irq_entries;
+        window_debug_context.irq_entries =
+            reinterpret_cast<uint64_t*>(&g_runtime_irq_entries);
+        window_debug_context.swi_entries = &swi_entries;
+        window_debug_context.halt_steps = &halt_steps;
+        window_debug_context.vblank_irqs_raised = &vblank_irqs_raised;
+        window_debug_context.steps = &taken;
+        window_debug_context.cycles_elapsed =
+            reinterpret_cast<uint64_t*>(&g_runtime_cycles);
+        window_debug_context.last_step_cycles = &last_step_cycles;
+        window_debug_context.sync_frames = &vblank_count;
+
+        window_debug_server = std::make_unique<debug::TcpDebugServer>();
+        window_debug_thread = std::thread([&]() {
+            if (!window_debug_server->run(args.tcp_port,
+                                          window_debug_context)) {
+                std::lock_guard<std::mutex> lock(window_debug_m);
+                window_debug_state = WDS_QUIT;
+                window_debug_cv.notify_all();
+            }
+        });
+    }
+    auto shutdown_window_debug = [&]() {
+        if (!window_debug_enabled) return;
+        {
+            std::lock_guard<std::mutex> lock(window_debug_m);
+            window_debug_state = WDS_QUIT;
+            window_debug_cv.notify_all();
+        }
+        if (window_debug_server) window_debug_server->request_stop();
+        if (window_debug_thread.joinable()) window_debug_thread.join();
+    };
+
     // Present-in-place (structural fix for frame-boundary resume dispatch-misses).
     // When windowed, register a hook so the per-VBlank frame-present yield presents
     // the frame from INSIDE runtime_should_yield and resumes the guest in place —
@@ -2203,6 +2490,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3, fp_t4,
                                    FramePhaseRing::now_ns());
             }
+            window_debug_checkpoint(true, false);
             return host_quit;
         });
     }
@@ -2229,6 +2517,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             std::fprintf(stderr,
                          "[gbarecomp:runtime] --load-state \"%s\" failed: %s\n",
                          args.load_state.c_str(), e.c_str());
+            shutdown_window_debug();
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
@@ -2438,6 +2727,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     uint64_t save_last_flush_frame = ppu.frame_count();
     if (input_replay_requested) apply_input_replay();
     if (args.window) pump_host_input();
+    window_debug_checkpoint(false, true);
 
     for (int i = 0; i < step_budget && !host_quit; ++i) {
         // Paused: hold the guest still, keep the window alive (input pump,
@@ -2445,10 +2735,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         while (host_paused && !host_quit && args.window) {
             pump_host_input();
             win.present(live_fb.data());
+            window_debug_checkpoint(false, true);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (host_quit) break;
         if (!step_once()) break;
+        window_debug_checkpoint(false, true);
+        if (host_quit) break;
         if (input_replay_requested) {
             apply_input_replay();
         } else if (demo_input) {
@@ -2547,6 +2840,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (pacer) pacer->wait_for_next_frame();
                 frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3, fp_t4,
                                    FramePhaseRing::now_ns());
+                window_debug_checkpoint(true, false);
             }
         }
         // Differential-oracle WRAM trace fires on frame advance in BOTH windowed
@@ -2580,6 +2874,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             break;
         }
     }
+    shutdown_window_debug();
     // Drop the present-in-place hook before the captured runner locals (win,
     // pacer, live_fb, …) go out of scope at function return.
     runtime_set_frame_present_hook(nullptr);

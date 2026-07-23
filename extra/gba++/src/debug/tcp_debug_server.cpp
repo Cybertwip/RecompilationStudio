@@ -971,6 +971,18 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         out += "}";
         return;
     }
+    if (contains("\"host_audio_state\"")) {
+        out = ctx.host_audio_query
+            ? ctx.host_audio_query()
+            : std::string("{\"ok\":false,\"error\":\"host audio unavailable\"}");
+        return;
+    }
+    if (contains("\"presentation_state\"")) {
+        out = ctx.presentation_query
+            ? ctx.presentation_query()
+            : std::string("{\"ok\":false,\"error\":\"presentation telemetry unavailable\"}");
+        return;
+    }
     if (contains("\"audio_samples\"")) {
         if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
         cmd_audio_samples(*ctx.bus, req, out);
@@ -1154,6 +1166,7 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
     }
     if (contains("\"quit\"")) {
         out = "{\"ok\":true,\"bye\":true}";
+        if (ctx.request_quit) ctx.request_quit();
         want_quit = true;
         return;
     }
@@ -1164,9 +1177,36 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
 }  // namespace
 
 TcpDebugServer::TcpDebugServer()  = default;
-TcpDebugServer::~TcpDebugServer() = default;
+TcpDebugServer::~TcpDebugServer() { request_stop(); }
+
+void TcpDebugServer::request_stop() {
+    stop_requested_.store(true, std::memory_order_release);
+
+    const std::intptr_t active = client_socket_.load(std::memory_order_acquire);
+    if (active >= 0) {
+#ifdef _WIN32
+        ::shutdown(static_cast<SOCKET>(active), SD_BOTH);
+#else
+        ::shutdown(static_cast<int>(active), SHUT_RDWR);
+#endif
+    }
+
+    const int port = listen_port_.load(std::memory_order_acquire);
+    if (port <= 0) return;
+    socket_t wake = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (wake == INVALID_SOCKET) return;
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(static_cast<uint16_t>(port));
+    ::connect(wake, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+    CLOSESOCK(wake);
+}
 
 bool TcpDebugServer::run(int port, const Context& ctx) {
+    stop_requested_.store(false, std::memory_order_release);
+    listen_port_.store(port, std::memory_order_release);
+    client_socket_.store(-1, std::memory_order_release);
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -1203,18 +1243,26 @@ bool TcpDebugServer::run(int port, const Context& ctx) {
     std::fflush(stdout);
 
     bool quit_server = false;
-    while (!quit_server) {
+    while (!quit_server && !stop_requested_.load(std::memory_order_acquire)) {
         sockaddr_in cli{};
         socklen_t clen = sizeof(cli);
         socket_t c = ::accept(srv, reinterpret_cast<sockaddr*>(&cli), &clen);
         if (c == INVALID_SOCKET) continue;
+        client_socket_.store(static_cast<std::intptr_t>(c),
+                             std::memory_order_release);
+        if (stop_requested_.load(std::memory_order_acquire)) {
+            CLOSESOCK(c);
+            client_socket_.store(-1, std::memory_order_release);
+            break;
+        }
 
         std::string inbuf;
         std::string resp;
         char rbuf[4096];
         bool client_done = false;
         bool step_failed = false;
-        while (!client_done) {
+        while (!client_done &&
+               !stop_requested_.load(std::memory_order_acquire)) {
             int n = ::recv(c, rbuf, sizeof(rbuf), 0);
             if (n <= 0) break;
             inbuf.append(rbuf, rbuf + n);
@@ -1249,9 +1297,12 @@ bool TcpDebugServer::run(int port, const Context& ctx) {
             }
         }
         CLOSESOCK(c);
+        client_socket_.store(-1, std::memory_order_release);
     }
 
     CLOSESOCK(srv);
+    client_socket_.store(-1, std::memory_order_release);
+    listen_port_.store(0, std::memory_order_release);
 #ifdef _WIN32
     WSACleanup();
 #endif

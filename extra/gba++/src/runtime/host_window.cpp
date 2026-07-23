@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -291,6 +292,7 @@ struct Backend {
     int          fps_presents = 0;
     // MC-WS-002: always-on per-present timing/scanout ring (see above).
     PresentCadence cadence;
+    mutable std::mutex cadence_mtx;
 };
 
 // GBA KEYINPUT bit order: 0=A 1=B 2=Sel 3=Sta 4=Right 5=Left 6=Up 7=Down 8=R 9=L.
@@ -672,45 +674,15 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     rab_push(&b->bridge, samples, static_cast<int>(count)); // mono: count == frames
     SDL_UnlockMutex(b->audio_mtx);
 
-    // ── NES-mode crackle probe (measure step) ──────────────────────────
-    // GBARECOMP_AUDIO_PROBE=1 reports the BRIDGE's underrun/overflow counters
-    // (the post-fix equivalent of SDL queue underruns) so a before/after is
-    // directly comparable. Expect ~0 underruns once primed.
-    static int s_probe = -1;
-    if (s_probe < 0) { const char* e = std::getenv("GBARECOMP_AUDIO_PROBE"); s_probe = (e && *e && *e != '0') ? 1 : 0; }
-    if (s_probe) {
-        static unsigned long long s_pushes = 0, s_samples = 0;
-        s_pushes++; s_samples += count;
-        if ((s_pushes % 120ULL) == 0ULL) {
-            rab_stats st; rab_get_stats(&b->bridge, &st);
-            double secs = static_cast<double>(s_samples) / 65536.0;
-            double stretch_ms = st.stretch_frames * 1000.0
-                              / static_cast<double>(b->bridge.cfg.host_rate);
-            // Game-thread codegen time: cumulative + this-window delta. The delta
-            // is the smoking gun — async play holds it at 0; sync play grows it.
-            static unsigned long long s_prev_cc_ns = 0;
-            unsigned long long cc_ns = overlay_game_thread_compile_ns();
-            double gt_ms      = cc_ns / 1e6;
-            double gt_dms     = (cc_ns - s_prev_cc_ns) / 1e6;
-            s_prev_cc_ns = cc_ns;
-            std::fprintf(stderr,
-                "[gba-audio-probe] pushes=%llu audio=%.1fs bridge_underrun=%llu(%.2f/s) "
-                "stretch=%.0fms(ev=%llu) overflow_drops=%llu fill_ms=%.1f corr=%+.3f%% "
-                "gt_compile=%.1fms(+%.1fms)\n",
-                s_pushes, secs, (unsigned long long)st.underrun_events,
-                secs > 0 ? st.underrun_events / secs : 0.0,
-                stretch_ms, (unsigned long long)st.stretch_events,
-                (unsigned long long)st.overflow_drops, rab_fill_ms(&b->bridge),
-                st.last_correction * 100.0, gt_ms, gt_dms);
-            std::fflush(stderr);
-        }
-    }
 }
 
 void HostWindow::close() {
     if (!impl_) { open_ = false; return; }
     auto* b = static_cast<Backend*>(impl_);
-    b->cadence.dump();  // MC-WS-002: flush the cadence ring (verbose only)
+    {
+        std::lock_guard<std::mutex> lock(b->cadence_mtx);
+        b->cadence.dump();  // MC-WS-002: flush the cadence ring (verbose only)
+    }
     if (b->audio_dev) SDL_CloseAudioDevice(b->audio_dev);  // stops the callback first
     if (b->bridge_ready) rab_free(&b->bridge);
     if (b->audio_mtx) SDL_DestroyMutex(b->audio_mtx);
@@ -818,7 +790,10 @@ void HostWindow::present(const uint8_t* rgb888) {
     // and stamp the DWM refresh counter into the always-on cadence ring.
     const uint64_t cad_qpc0 = SDL_GetPerformanceCounter();
     SDL_RenderPresent(b->renderer);
-    b->cadence.record(cad_qpc0, SDL_GetPerformanceCounter(), b->fullscreen);
+    {
+        std::lock_guard<std::mutex> lock(b->cadence_mtx);
+        b->cadence.record(cad_qpc0, SDL_GetPerformanceCounter(), b->fullscreen);
+    }
 
     // FPS readout (DisplayPerf hotkey): presents/sec, refreshed twice a
     // second in the title bar; the base title is restored when toggled off.
@@ -931,6 +906,88 @@ bool HostWindow::fps_readout() const {
     return static_cast<const Backend*>(impl_)->fps_readout;
 }
 
+bool HostWindow::audio_debug_state(AudioDebugState& out) const {
+    out = {};
+    if (!open_ || !impl_) return false;
+    auto* b = static_cast<Backend*>(impl_);
+    out.available = true;
+    out.device_open = b->audio_dev != 0;
+    out.bridge_ready = b->bridge_ready;
+    out.volume = b->volume;
+    out.game_thread_compile_ns = overlay_game_thread_compile_ns();
+    if (!b->bridge_ready) return true;
+
+    if (b->audio_mtx) SDL_LockMutex(b->audio_mtx);
+    rab_stats stats{};
+    rab_get_stats(&b->bridge, &stats);
+    out.primed = b->bridge.primed != 0;
+    out.source_rate = static_cast<int>(b->bridge.cfg.source_rate);
+    out.host_rate = static_cast<int>(b->bridge.cfg.host_rate);
+    out.pushed_frames = stats.pushed_frames;
+    out.pulled_frames = stats.pulled_frames;
+    out.underrun_events = stats.underrun_events;
+    out.overflow_drops = stats.overflow_drops;
+    out.stretch_frames = stats.stretch_frames;
+    out.stretch_events = stats.stretch_events;
+    out.fill_ms = rab_fill_ms(&b->bridge);
+    out.correction = stats.last_correction;
+    if (b->audio_mtx) SDL_UnlockMutex(b->audio_mtx);
+    return true;
+}
+
+bool HostWindow::presentation_debug_state(PresentationDebugState& out) const {
+    out = {};
+    if (!open_ || !impl_) return false;
+    const auto* b = static_cast<const Backend*>(impl_);
+    std::lock_guard<std::mutex> lock(b->cadence_mtx);
+    const PresentCadence& cadence = b->cadence;
+    out.available = true;
+    out.total_presents = cadence.total;
+    out.fullscreen = b->fullscreen;
+    if (cadence.total == 0 || cadence.ring.empty()) return true;
+
+    const uint64_t count = std::min<uint64_t>(cadence.total, 240u);
+    out.sample_count = static_cast<uint32_t>(count);
+    const PresentSample& latest =
+        cadence.ring[(cadence.total - 1u) % kCadenceRingSize];
+    out.latest_gap_us = latest.gap_us;
+    out.latest_block_us = latest.block_us;
+
+    std::vector<uint32_t> gaps;
+    std::vector<uint32_t> blocks;
+    gaps.reserve(static_cast<std::size_t>(count));
+    blocks.reserve(static_cast<std::size_t>(count));
+    uint64_t gap_sum = 0;
+    for (uint64_t i = 0; i < count; ++i) {
+        const PresentSample& sample =
+            cadence.ring[(cadence.total - count + i) % kCadenceRingSize];
+        blocks.push_back(sample.block_us);
+        if (sample.gap_us != 0) {
+            gaps.push_back(sample.gap_us);
+            gap_sum += sample.gap_us;
+        }
+    }
+    auto percentile = [](std::vector<uint32_t> values, double p) -> uint32_t {
+        if (values.empty()) return 0;
+        const std::size_t index = static_cast<std::size_t>(
+            p * static_cast<double>(values.size() - 1u));
+        std::nth_element(values.begin(), values.begin() + index, values.end());
+        return values[index];
+    };
+    out.gap_p50_us = percentile(gaps, 0.50);
+    out.gap_p95_us = percentile(gaps, 0.95);
+    out.block_p50_us = percentile(blocks, 0.50);
+    out.block_p95_us = percentile(blocks, 0.95);
+    if (!gaps.empty())
+        out.gap_max_us = *std::max_element(gaps.begin(), gaps.end());
+    if (!blocks.empty())
+        out.block_max_us = *std::max_element(blocks.begin(), blocks.end());
+    if (gap_sum != 0)
+        out.fps = static_cast<double>(gaps.size()) * 1000000.0 /
+                  static_cast<double>(gap_sum);
+    return true;
+}
+
 HostWindow::Events HostWindow::pump() {
     Events ev{};
     if (!open_) { ev.quit = true; return ev; }
@@ -1041,6 +1098,14 @@ void HostWindow::set_volume(int /*pct*/) {}
 int  HostWindow::volume() const { return 100; }
 void HostWindow::set_fps_readout(bool /*on*/) {}
 bool HostWindow::fps_readout() const { return false; }
+bool HostWindow::audio_debug_state(AudioDebugState& out) const {
+    out = {};
+    return false;
+}
+bool HostWindow::presentation_debug_state(PresentationDebugState& out) const {
+    out = {};
+    return false;
+}
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}

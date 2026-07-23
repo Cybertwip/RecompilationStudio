@@ -361,7 +361,7 @@ QString generatedGbaGameToml(const PipelineRequest& request,
   text += QStringLiteral("[recompiler]\nentry_point = %1\nout_dir = \"generated\"\nstrict = false\n\n")
             .arg(tomlQuoted(gbaHex32(game.entryTarget)));
   text += QStringLiteral("[save]\ntype = %1\n\n").arg(tomlQuoted(game.saveType));
-  text += QStringLiteral("[runtime]\nwindow_title = %1\ndebug_port = 4371\n\n")
+  text += QStringLiteral("[runtime]\nwindow_title = %1\n\n")
             .arg(tomlQuoted(request.windowTitle));
   text += QStringLiteral("[video]\nscreen = \"frontlit\"\nresize_view = false\n\n");
   text += QStringLiteral("[audio]\nshadow = false\n");
@@ -436,8 +436,8 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
       : QStringLiteral("add_executable(psx-runtime src/main.cpp ${_GBA_SHARDS} generated/dispatch_table.cpp)\n");
   cmake += QStringLiteral("if(EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/generated/symbol_map.cpp\")\n  target_sources(psx-runtime PRIVATE generated/symbol_map.cpp)\nendif()\n");
   cmake += QStringLiteral("target_include_directories(psx-runtime PRIVATE gba++/src/armv4t gba++/src/gba gba++/src/runtime gba++/src/debug generated)\n");
-  cmake += QStringLiteral("target_compile_definitions(psx-runtime PRIVATE GBARECOMP_WINDOW_TITLE=%1 GBARECOMP_DEFAULT_DEBUG_PORT=4371)\n")
-             .arg(cmakeQuoted(bundleName));
+  cmake += QStringLiteral("target_compile_definitions(psx-runtime PRIVATE GBARECOMP_WINDOW_TITLE=%1 $<$<CONFIG:Debug>:GBARECOMP_DEFAULT_DEBUG_PORT=4371>)\n")
+             .arg(cmakeQuoted(request.windowTitle));
   cmake += QStringLiteral("if(MINGW)\n  target_link_libraries(psx-runtime PRIVATE -Wl,--start-group gbarecomp_runtime gbarecomp_debug gbarecomp_gba gbarecomp_armv4t gbarecomp_recompile_core gbarecomp_heal_gate -Wl,--end-group)\nelse()\n  target_link_libraries(psx-runtime PRIVATE gbarecomp_runtime gbarecomp_debug gbarecomp_gba gbarecomp_armv4t gbarecomp_recompile_core gbarecomp_heal_gate)\nendif()\n");
   cmake += QStringLiteral("set(_GBA_RESOURCES \"${CMAKE_CURRENT_SOURCE_DIR}/package_resources\")\nset(_GBA_STEGANOS_PACKAGE_DIR \"${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/$<CONFIG>\")\n");
   if (windows) {

@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -89,6 +90,9 @@ public:
         std::function<void()>        resume;       // free-run (continue)
         std::function<void()>        pause;        // park at frame boundary
         std::function<std::string()> run_status;   // JSON: run-state/parked/pc
+        std::function<std::string()> host_audio_query;
+        std::function<std::string()> presentation_query;
+        std::function<void()>        request_quit;
     };
 
     TcpDebugServer();
@@ -98,6 +102,16 @@ public:
     // the client closes or sends `quit`. Blocking. Returns once done.
     // Returns true on clean exit, false if listen/bind/accept failed.
     bool run(int port, const Context& ctx);
+
+    // Stop a run() call from another thread. This wakes both accept() and a
+    // client-blocked recv(), allowing an interactive window to shut down its
+    // background diagnostic listener cleanly.
+    void request_stop();
+
+private:
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<int> listen_port_{0};
+    std::atomic<std::intptr_t> client_socket_{-1};
 };
 
 }  // namespace gbarecomp::debug

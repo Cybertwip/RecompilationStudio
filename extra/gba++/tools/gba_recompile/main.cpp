@@ -187,7 +187,7 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
         return (first & 0xFE00u) == 0xB400u ||
                (first & 0xFF80u) == 0xB080u;
     };
-    auto decode_pointer = [&](uint32_t source, bool require_strong_callable,
+    auto decode_pointer = [&](uint32_t source, bool require_local_return,
                               CallbackPointerEntry* out) -> bool {
         if (!in_rom(source, 4)) return false;
         const uint32_t raw = read32(source);
@@ -206,9 +206,8 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
             in_data_range(target) || !decode_run(target, mode)) {
             return false;
         }
-        if (require_strong_callable && mode == CpuMode::Thumb &&
-            !thumb_has_local_return(target) &&
-            !thumb_has_entry_prologue(target))
+        if (require_local_return && mode == CpuMode::Thumb &&
+            !thumb_has_local_return(target))
             return false;
         if (mode == CpuMode::Arm && !arm_prologue(target)) return false;
         *out = CallbackPointerEntry{source, raw, target, mode};
@@ -221,14 +220,14 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
          static_cast<uint64_t>(source - rom_base) + 4u <= rom.size();
         source += 4u) {
         CallbackPointerEntry first;
-        if (!decode_pointer(source, /*require_strong_callable=*/true, &first))
+        if (!decode_pointer(source, /*require_local_return=*/true, &first))
             continue;
 
         CallbackPointerTable best;
         for (uint32_t stride = 8u; stride <= 64u; stride += 4u) {
             CallbackPointerEntry previous;
             if (source >= rom_base + stride &&
-                decode_pointer(source - stride, /*require_strong_callable=*/true,
+                decode_pointer(source - stride, /*require_local_return=*/true,
                                &previous) &&
                 previous.mode == first.mode) {
                 continue;  // canonicalize at the first record in the table
@@ -242,7 +241,7 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
                 if (entry64 > UINT32_MAX) break;
                 CallbackPointerEntry entry;
                 if (!decode_pointer(static_cast<uint32_t>(entry64),
-                                    /*require_strong_callable=*/true, &entry) ||
+                                    /*require_local_return=*/true, &entry) ||
                     entry.mode != first.mode) {
                     break;
                 }
@@ -269,13 +268,13 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
          static_cast<uint64_t>(source - rom_base) + 4u <= rom.size();
          source += 4u) {
         CallbackPointerEntry first;
-        if (!decode_pointer(source, /*require_strong_callable=*/false, &first))
+        if (!decode_pointer(source, /*require_local_return=*/false, &first))
             continue;
         CallbackPointerTable best;
         for (uint32_t stride = 8u; stride <= 64u; stride += 4u) {
             CallbackPointerEntry previous;
             if (source >= rom_base + stride &&
-                decode_pointer(source - stride, /*require_strong_callable=*/false,
+                decode_pointer(source - stride, /*require_local_return=*/false,
                                &previous) &&
                 previous.mode == first.mode) {
                 continue;
@@ -290,18 +289,19 @@ std::vector<CallbackPointerTable> discover_callback_pointer_tables(
                 if (entry64 > UINT32_MAX) break;
                 CallbackPointerEntry entry;
                 if (!decode_pointer(static_cast<uint32_t>(entry64),
-                                    /*require_strong_callable=*/false, &entry) ||
+                                    /*require_local_return=*/false, &entry) ||
                     entry.mode != first.mode) {
                     break;
                 }
-                CallbackPointerEntry strong;
-                if (decode_pointer(static_cast<uint32_t>(entry64),
-                                   /*require_strong_callable=*/true, &strong)) {
+                if (entry.mode == CpuMode::Arm ||
+                    thumb_has_local_return(entry.target_addr) ||
+                    thumb_has_entry_prologue(entry.target_addr)) {
                     ++strong_entries;
                 }
                 candidate.entries.push_back(entry);
             }
-            if (candidate.entries.size() >= 6u && strong_entries >= 3u &&
+            if (candidate.entries.size() >= 6u &&
+                strong_entries == candidate.entries.size() &&
                 candidate.entries.size() > best.entries.size()) {
                 best = std::move(candidate);
             }

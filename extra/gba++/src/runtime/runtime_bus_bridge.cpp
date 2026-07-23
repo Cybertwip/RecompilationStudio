@@ -746,6 +746,14 @@ void runtime_set_frame_present_hook(std::function<bool()> h) {
     g_frame_present_quit = false;
 }
 
+extern "C" int runtime_frame_present_hook_active(void) {
+    return g_frame_present_hook ? 1 : 0;
+}
+
+extern "C" int runtime_frame_present_quit_requested(void) {
+    return g_frame_present_quit ? 1 : 0;
+}
+
 extern "C" bool runtime_should_yield(void) {
     auto* bus = gbarecomp::g_active_bus;
 

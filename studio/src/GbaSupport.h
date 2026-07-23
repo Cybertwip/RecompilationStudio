@@ -40,7 +40,8 @@ QString generatedGbaGameToml(const PipelineRequest& request,
                              const QString& romSha1,
                              quint32 romCrc32,
                              const QString& biosSha1,
-                             quint32 biosCrc32);
+                             quint32 biosCrc32,
+                             bool biosHle);
 QString generatedGbaProjectCMake(const PipelineRequest& request,
                                  const GbaDescription& game,
                                  const QString& bundleName,

@@ -35,8 +35,11 @@ read-only for this work.
    - `game.manifest.json` at archive root;
    - optional unpacked delivery, overwrite-safe staging, proof archive, and
      platform-specific icon handling.
-6. User ROM and BIOS inputs are copied only into the private build workspace;
-   final packages contain hashes/configuration, not proprietary images.
+6. Studio follows its existing personal-export contract: the selected ROM and
+   BIOS are copied into the generated source workspace and final app resources,
+   hash-pinned in `game.toml`, and never added to this repository. This differs
+   deliberately from `gba-pack`'s redistributable/no-ROM package policy so GBA
+   apps match the current PSX Studio app structure.
 
 ## Implementation phases
 
@@ -54,7 +57,8 @@ read-only for this work.
   runtime with Studio-provided title/hash defaults.
 - Add a reusable CMake function that consumes generated shards plus the GBA
   runtime and produces a platform-native GUI executable/app target.
-- Keep the ROM and BIOS external at runtime and enforce their hashes.
+- Resolve the packaged ROM/BIOS relative to the executable, enforce their
+  hashes, and redirect saves/caches to a per-user writable data directory.
 
 ### 3. Extend Studio's request model and UI
 
@@ -83,9 +87,8 @@ read-only for this work.
   validation, generated CMake, and package layout.
 - Exercise a source export without proprietary inputs using a synthetic valid
   GBA fixture.
-- Build a representative native macOS app from a local user ROM/BIOS only if
-  such inputs are explicitly available; otherwise stop at deterministic
-  source/tool/package-structure verification and record that limitation.
+- Build a representative native macOS app from locally available private test
+  inputs, inspect its bundle/resources/dependencies, and verify its signature.
 - Confirm `git diff -- runtime/` contains no task changes.
 
 ## Deliverables

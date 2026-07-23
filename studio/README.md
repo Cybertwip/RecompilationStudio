@@ -1,14 +1,34 @@
 # PSXRecomp Studio
 
 PSXRecomp Studio is the Qt front end for producing self-contained macOS,
-Windows, or Linux PlayStation recompilation apps without creating a permanent
-per-title repository. A Windows Studio build exports Windows packages and a
-Linux Studio build exports Linux packages. macOS can select macOS, Windows,
-Linux, or **All**; All queues every available target into one output directory.
+Windows, or Linux PlayStation **and Game Boy Advance** recompilation apps without
+creating a permanent per-title repository. A Windows Studio build exports
+Windows packages and a Linux Studio build exports Linux packages. macOS can
+select macOS, Windows, Linux, or **All**; All queues every available target into
+one output directory.
 
 It uses Qt 6 Widgets, Oclero Qlementine, Qlementine Icons,
 QtAppInstanceManager, and QuaZip. Work happens in a temporary directory; the
 selected output directory receives only the final platform package.
+
+## Game Boy Advance flow
+
+Choose **Game Boy Advance** in the System selector, then provide one `.gba`
+cartridge image and one 16 KiB GBA BIOS image. GBA builds are self-contained and
+do not invoke Ghidra. Batch mode scans recursively for `.gba` files. Studio
+builds the isolated C++ platform core under `extra/gba++`, emits sharded
+ARM/THUMB C++, and reuses the same platform, source/build, ZIP, signing, CI,
+proof, and delivery controls as PlayStation exports.
+
+Studio personal exports mirror the existing PlayStation package policy: the
+selected ROM and BIOS are embedded in the generated app/source repository and
+hash-pinned in `game.toml`. Saves and runtime caches are redirected to a
+per-user writable data directory. Do not redistribute generated packages with
+copyrighted input data unless you have permission.
+
+The GBA C++ core is licensed under PolyForm Noncommercial 1.0.0, with ported
+JRickey components retaining their MIT OR Apache-2.0 terms. License and
+attribution files are embedded in every GBA build.
 
 ## Required inputs
 
@@ -61,8 +81,9 @@ executable name, and `platform` set to `macOS`, `Windows`, or `Linux`.
 
 ## Host tools
 
-Every export requires CMake, Python 3, Ghidra 11.3.2, and OpenJDK 21. Non-Windows
-hosts also require Ninja. On macOS, Studio detects both registered JDK bundles
+Every export requires CMake; non-Windows hosts also require Ninja. PlayStation
+exports additionally require Python 3, Ghidra 11.3.2, and OpenJDK 21. GBA
+exports do not use Ghidra or Java. On macOS, Studio detects both registered JDK bundles
 and keg-only Homebrew `openjdk@21` installations, then passes that exact
 `JAVA_HOME` to Ghidra.
 macOS exports additionally require:

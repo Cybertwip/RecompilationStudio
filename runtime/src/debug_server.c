@@ -11375,6 +11375,41 @@ void debug_server_freeze_dump_wtrace_json(FILE *f, uint32_t max_count)
     fputc(']', f);
 }
 
+void debug_server_freeze_dump_rtrace_json(FILE *f, uint32_t max_count)
+{
+    if (!f) return;
+    if (!s_mmio_rtrace) { fputs("[]", f); return; }
+
+    uint64_t total = s_mmio_rtrace_seq;
+    uint32_t head = s_mmio_rtrace_head;
+    uint32_t avail = (total < MMIO_TRACE_CAP) ? (uint32_t)total : MMIO_TRACE_CAP;
+    if (max_count > avail) max_count = avail;
+    if (max_count == 0) { fputs("[]", f); return; }
+    uint32_t start = (total < MMIO_TRACE_CAP)
+        ? (avail - max_count)
+        : (head + (MMIO_TRACE_CAP - max_count)) % MMIO_TRACE_CAP;
+
+    fputc('[', f);
+    int first = 1;
+    for (uint32_t i = 0; i < max_count; ++i) {
+        uint32_t idx = (start + i) % MMIO_TRACE_CAP;
+        const MmioTraceEntry *e = &s_mmio_rtrace[idx];
+        fprintf(f,
+            "%s{\"seq\":%llu,\"addr\":\"0x%08X\",\"val\":\"0x%08X\","
+            "\"func\":\"0x%08X\",\"pc\":\"0x%08X\",\"cpu_pc\":\"0x%08X\","
+            "\"ra\":\"0x%08X\",\"sp\":\"0x%08X\","
+            "\"sr\":\"0x%08X\",\"epc\":\"0x%08X\","
+            "\"i_stat\":\"0x%08X\",\"i_mask\":\"0x%08X\","
+            "\"frame\":%u,\"w\":%u}",
+            first ? "" : ",", (unsigned long long)e->seq,
+            e->addr, e->val, e->func_addr, e->pc, e->cpu_pc,
+            e->ra, e->sp, e->sr, e->epc, e->istat, e->imask,
+            e->frame, (unsigned)e->width);
+        first = 0;
+    }
+    fputc(']', f);
+}
+
 void debug_server_freeze_dump_frame_history_json(FILE *f, uint32_t max_count)
 {
     if (!f) return;

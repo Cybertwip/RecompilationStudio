@@ -3310,6 +3310,10 @@ void PipelineWorker::run(PipelineRequest request) {
 }
 
 void PipelineWorker::runGba(const PipelineRequest& request) {
+  constexpr auto kCanonicalGbaBiosSha1 = "300c20df6731a33952ded8c436f7f186d25d3492";
+  constexpr auto kHlePlaceholderSha1 = "897256b6709e1a4da9daba92b6bde39ccfccd8c1";
+  constexpr auto kHlePlaceholderSha256 = "4fe7b59af6de3b665b67788cc2f99892ab827efae3a467342b3bb4e3bc8e5bfe";
+  constexpr quint32 kHlePlaceholderCrc32 = 0xab54d286u;
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
@@ -3359,8 +3363,9 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     return;
   }
   if (!game.warning.isEmpty()) emit logLine(QStringLiteral("Warning: %1").arg(game.warning));
-  if (QFileInfo(request.biosPath).size() != 16 * 1024) {
-    fail(QStringLiteral("The GBA BIOS must be exactly 16,384 bytes."));
+  const bool biosProvided = !request.biosPath.trimmed().isEmpty();
+  if (biosProvided && QFileInfo(request.biosPath).size() != 16 * 1024) {
+    fail(QStringLiteral("The GBA BIOS must be exactly 16,384 bytes, or left blank to use standalone BIOS HLE."));
     return;
   }
   const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
@@ -3412,9 +3417,14 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const QString romSha1 = sha1File(request.romPath, error);
   const QString romSha256 = sha256File(request.romPath, error);
   const quint32 romCrc32 = crc32File(request.romPath, error);
-  const QString biosSha1 = sha1File(request.biosPath, error);
-  const QString biosSha256 = sha256File(request.biosPath, error);
-  const quint32 biosCrc32 = crc32File(request.biosPath, error);
+  const QString biosSha1 = biosProvided ? sha1File(request.biosPath, error)
+                                        : QString::fromLatin1(kHlePlaceholderSha1);
+  const QString biosSha256 = biosProvided ? sha256File(request.biosPath, error)
+                                          : QString::fromLatin1(kHlePlaceholderSha256);
+  const quint32 biosCrc32 = biosProvided ? crc32File(request.biosPath, error)
+                                         : kHlePlaceholderCrc32;
+  const bool standaloneBiosHle =
+    biosSha1.compare(QString::fromLatin1(kCanonicalGbaBiosSha1), Qt::CaseInsensitive) != 0;
   if (romSha1.isEmpty() || romSha256.isEmpty() || biosSha1.isEmpty() || biosSha256.isEmpty()) {
     fail(error.isEmpty() ? QStringLiteral("The GBA inputs could not be hashed.") : error);
     return;
@@ -3422,7 +3432,11 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · entry %4")
     .arg(game.title, game.gameCode).arg(game.romSize)
     .arg(QStringLiteral("0x%1").arg(game.entryTarget, 8, 16, QLatin1Char('0'))));
-  emit logLine(QStringLiteral("GBA BIOS: 16 KiB · SHA-1 %1").arg(biosSha1));
+  emit logLine(standaloneBiosHle
+    ? QStringLiteral("GBA BIOS: standalone HLE (%1)")
+        .arg(biosProvided ? QStringLiteral("selected image is not the canonical dump")
+                          : QStringLiteral("no BIOS selected"))
+    : QStringLiteral("GBA BIOS: canonical 16 KiB image · SHA-1 %1").arg(biosSha1));
 
   nextStage(QStringLiteral("Prepare GBA source workspace"));
   const QString preferredWorkspaceRoot =
@@ -3467,9 +3481,13 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   }
   if (!copyDirectoryTree(gbaRoot, QDir(projectDir).filePath(QStringLiteral("gba++")), error) ||
       !copyFileReplacing(request.romPath,
-                         QDir(packageGame).filePath(QStringLiteral("game.gba")), error) ||
-      !copyFileReplacing(request.biosPath,
-                         QDir(packageBios).filePath(QStringLiteral("gba_bios.bin")), error)) {
+                         QDir(packageGame).filePath(QStringLiteral("game.gba")), error)) {
+    fail(error);
+    return;
+  }
+  const QString packagedBiosPath = QDir(packageBios).filePath(QStringLiteral("gba_bios.bin"));
+  if ((biosProvided && !copyFileReplacing(request.biosPath, packagedBiosPath, error)) ||
+      (!biosProvided && !writeBytes(packagedBiosPath, QByteArray(16 * 1024, 0), error))) {
     fail(error);
     return;
   }
@@ -3502,7 +3520,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
                  generatedGbaMainCpp(bundleName, romSha1, romCrc32), error) ||
       !writeText(QDir(packageResources).filePath(QStringLiteral("game.toml")),
                  generatedGbaGameToml(request, game, romSha1, romCrc32,
-                                      biosSha1, biosCrc32), error) ||
+                                      biosSha1, biosCrc32, standaloneBiosHle), error) ||
       !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
                  gameManifestForRequest(request), error) ||
       !writeText(QDir(projectDir).filePath(QStringLiteral(".gitignore")),
@@ -3547,6 +3565,9 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("bios_sha1"), biosSha1 },
     { QStringLiteral("bios_sha256"), biosSha256 },
     { QStringLiteral("bios_crc32"), QStringLiteral("%1").arg(biosCrc32, 8, 16, QLatin1Char('0')) },
+    { QStringLiteral("bios_mode"), standaloneBiosHle ? QStringLiteral("standalone_hle")
+                                                       : QStringLiteral("canonical_lle") },
+    { QStringLiteral("bios_provided"), biosProvided },
     { QStringLiteral("cpp_port_commit"), QStringLiteral("13cae89f9dba719454c283e330bf9e131af68c8c") },
     { QStringLiteral("rust_reference_tests"), 168 },
   };

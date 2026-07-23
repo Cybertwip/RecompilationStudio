@@ -44,3 +44,17 @@ engine-agnostic pieces originally authored by Jrickey in
 - The tap plumbing in `runtime/src/spu.c` and `runtime/include/spu.h`.
 
 All reuse keeps the original copyright and dual MIT/Apache-2.0 license.
+
+## mstan / gbarecomp — C++ GBA platform core
+
+`extra/gba++/` is imported from
+[mstan/gbarecomp](https://github.com/mstan/gbarecomp) at commit
+`13cae89f9dba719454c283e330bf9e131af68c8c` (2026-07-20). The project-level
+license is **PolyForm Noncommercial 1.0.0**; the complete text remains at
+`extra/gba++/LICENSE`. Its own third-party and JRickey port attributions remain
+at `extra/gba++/THIRD_PARTY_ATTRIBUTION.md` and travel in Studio-generated GBA
+packages.
+
+The pinned toml++ v3.4.0 amalgamated header at
+`extra/gba++/third_party/tomlpp/` is MIT-licensed; its license and provenance
+README are stored beside the header.

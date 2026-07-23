@@ -234,6 +234,8 @@ uint32_t runtime_fp_save_tail_csv(const char* path, uint32_t n);
 // per-instruction (pc,cycle) source); returns 0 when the ring is empty.
 uint32_t runtime_fp_query_pc(uint32_t pc, uint32_t max_hits,
                              unsigned long long* out_cycles);
+uint32_t runtime_fp_query_entries(uint32_t pc, uint32_t max_hits,
+                                  RuntimeFpEntry* out_entries);
 
 // Current recompiled-CPU guest PC (g_cpu.R[15]). Read-only accessor exposed so
 // always-on observability taps outside the armv4t lib (e.g. the gba_io MMIO
@@ -369,6 +371,7 @@ void runtime_irq(uint32_t return_address);
 // remains the verification oracle; HLE never becomes the oracle. This is the
 // PRINCIPLES.md "verified-enhancement HLE" carve-out: opt-in, reverts to LLE.
 extern int (*g_bios_hle_hook)(uint32_t swi_num);
+extern unsigned g_bios_hle_standalone;
 
 // ── PSR transfer ───────────────────────────────────────────────────
 // MRS/MSR helpers. Routing through the runtime lets us validate mode

@@ -229,6 +229,7 @@ void debug_server_send_fmt(const char *fmt, ...);
  * stable. */
 void debug_server_freeze_dump_wtrace_all_json(FILE *f, uint32_t max_count);
 void debug_server_freeze_dump_wtrace_json(FILE *f, uint32_t max_count);
+void debug_server_freeze_dump_rtrace_json(FILE *f, uint32_t max_count);
 void debug_server_freeze_dump_mmio_json(FILE *f, uint32_t max_count);
 void debug_server_freeze_dump_frame_history_json(FILE *f, uint32_t max_count);
 void debug_server_freeze_dump_sio_pc_json(FILE *f, uint32_t max_count);

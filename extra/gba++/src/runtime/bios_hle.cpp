@@ -33,6 +33,7 @@ namespace gba {
 namespace {
 
 BiosHleMode g_mode = BiosHleMode::Off;
+bool g_intr_wait_armed = false;
 
 // ── register / memory shorthands ───────────────────────────────────────────
 inline uint32_t  R(int i)               { return g_cpu.R[i]; }
@@ -82,6 +83,55 @@ enum : uint32_t {
 constexpr uint32_t GBA_BIOS_CHECKSUM = 0xBAAE187Fu;
 constexpr uint32_t SIZE_BIOS         = 0x4000u;
 constexpr uint32_t REG_SOUNDBIAS     = 0x04000088u;
+
+// ── boot / wait SWIs ───────────────────────────────────────────────────────
+void do_register_ram_reset() {
+    const uint32_t flags = R(0);
+    if (flags & 0x01u) {
+        for (uint32_t a = 0x02000000u; a < 0x02040000u; a += 4u) wr32(a, 0);
+    }
+    if (flags & 0x02u) {
+        // Preserve the BIOS work area / IRQ pointer in the final 0x200 bytes.
+        for (uint32_t a = 0x03000000u; a < 0x03007E00u; a += 4u) wr32(a, 0);
+    }
+    if (flags & 0x04u) {
+        for (uint32_t a = 0x05000000u; a < 0x05000400u; a += 4u) wr32(a, 0);
+    }
+    if (flags & 0x08u) {
+        for (uint32_t a = 0x06000000u; a < 0x06018000u; a += 4u) wr32(a, 0);
+    }
+    if (flags & 0x10u) {
+        for (uint32_t a = 0x07000000u; a < 0x07000400u; a += 4u) wr32(a, 0);
+    }
+    if (flags & 0x80u) wr16(0x04000000u, 0x0080u);  // forced blank
+}
+
+void do_halt(bool stop) {
+    wr8(0x04000301u, stop ? 0x80u : 0x00u);
+}
+
+void do_intr_wait(bool vblank) {
+    const bool discard = vblank || R(0) != 0;
+    const uint16_t mask = vblank ? 1u : static_cast<uint16_t>(R(1));
+    if (!g_intr_wait_armed) {
+        if (discard) {
+            const uint16_t flags = rd16(0x03007FF8u);
+            wr16(0x03007FF8u, static_cast<uint16_t>(flags & ~mask));
+        }
+        g_intr_wait_armed = true;
+    }
+    const uint16_t flags = rd16(0x03007FF8u);
+    if ((flags & mask) != 0) {
+        wr16(0x03007FF8u, static_cast<uint16_t>(flags & ~mask));
+        g_intr_wait_armed = false;
+        return;
+    }
+    // The BIOS wait loop forces IME on, halts, then re-checks this SWI after
+    // the IRQ handler has ORed its source into 0x03007FF8.
+    wr16(0x04000208u, 1u);
+    do_halt(false);
+    g_cpu.R[15] -= (g_cpu.cpsr & CPSR_T_BIT) ? 2u : 4u;
+}
 
 // ── arithmetic SWIs ─────────────────────────────────────────────────────────
 
@@ -462,6 +512,24 @@ void do_midi_key_2_freq() {
 int dispatch(uint32_t swi) {
     uint32_t cost = 45;  // nominal SWI overhead for the non-stall cases
     switch (swi) {
+    case SWI_SOFT_RESET:
+        bios_hle_boot_skip(rd8(0x03007FFAu) ? 0x02000000u : 0x08000000u);
+        break;
+    case SWI_REGISTER_RAM_RESET:
+        do_register_ram_reset();
+        break;
+    case SWI_HALT:
+        do_halt(false);
+        break;
+    case SWI_STOP:
+        do_halt(true);
+        break;
+    case SWI_INTR_WAIT:
+        do_intr_wait(false);
+        break;
+    case SWI_VBLANK_INTR_WAIT:
+        do_intr_wait(true);
+        break;
     case SWI_DIV:              cost = do_div(static_cast<int32_t>(R(0)), static_cast<int32_t>(R(1))); break;
     case SWI_DIV_ARM:          cost = do_div(static_cast<int32_t>(R(1)), static_cast<int32_t>(R(0))); break;
     case SWI_SQRT: {
@@ -497,6 +565,12 @@ int dispatch(uint32_t swi) {
     case SWI_SOUND_BIAS:       wr16(REG_SOUNDBIAS, static_cast<uint16_t>(R(0) ? 0x200 : 0)); break;
     case SWI_MIDI_KEY_2_FREQ:  do_midi_key_2_freq(); break;
     default:
+        if (g_mode == BiosHleMode::Standalone) {
+            // Match the Rust no-BIOS path: an unsupported call is recorded by
+            // coverage tooling but must never vector into a zero placeholder.
+            runtime_tick(3u);
+            return 1;
+        }
         return 0;  // fall through to the recompiled LLE BIOS
     }
     runtime_tick(cost);
@@ -507,7 +581,9 @@ int dispatch(uint32_t swi) {
 
 void bios_hle_set_mode(BiosHleMode mode) {
     g_mode = mode;
-    g_bios_hle_hook = (mode == BiosHleMode::On) ? &dispatch : nullptr;
+    g_intr_wait_armed = false;
+    g_bios_hle_standalone = (mode == BiosHleMode::Standalone) ? 1u : 0u;
+    g_bios_hle_hook = (mode == BiosHleMode::Off) ? nullptr : &dispatch;
 }
 
 void bios_hle_boot_skip(uint32_t cart_entry) {
@@ -539,7 +615,8 @@ BiosHleMode bios_hle_mode() { return g_mode; }
 const char* bios_hle_mode_name(BiosHleMode mode) {
     switch (mode) {
     case BiosHleMode::Off: return "LLE (recompiled BIOS)";
-    case BiosHleMode::On:  return "HLE (with LLE fallback)";
+    case BiosHleMode::On:         return "HLE (with LLE fallback)";
+    case BiosHleMode::Standalone: return "HLE (standalone, no BIOS execution)";
     }
     return "unknown";
 }

@@ -619,7 +619,8 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         // native so the recompiled intr_main can run its iret (which sets
         // g_irq_iret_depth via runtime_exception_return) and terminate
         // runtime_irq()'s drive loop.
-        if ((irq_cont || top_level) && (cpu.R[15] & ~1u) != entry_pc &&
+        if (forced_stop_pc == 0u && (irq_cont || top_level) &&
+            (cpu.R[15] & ~1u) != entry_pc &&
             runtime_has_static_entry(cpu.R[15], cpu.thumb ? 1 : 0)) {
             break;
         }
@@ -850,7 +851,25 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     }
     record_and_log_miss(entry_pc, entry_thumb);
     gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
-    runtime_bridge_interpret(entry_pc, entry_thumb, /*forced_stop_pc=*/0u,
+
+    // Runtime-installed IWRAM/EWRAM functions are commonly reached by an
+    // indirect call when the host call-return stack is empty. Their guest LR is
+    // nevertheless the exact return contract. The generic top-level bridge
+    // stops as soon as it re-enters any static ROM function; that is safe for a
+    // vector/resume miss but WRONG for RAM code that calls ROM helpers, because
+    // it skips the remainder of the RAM routine after the helper returns. Force
+    // the bridge to the guest LR for RAM entries so the whole installed routine
+    // (and its call subtree) executes before native dispatch resumes.
+    uint32_t forced_stop = 0u;
+    const bool ram_entry = entry_pc >= 0x02000000u && entry_pc < 0x04000000u;
+    if (ram_entry && runtime_call_stack_depth() == 0u) {
+        const uint32_t lr = g_cpu.R[14] & ~1u;
+        const bool plausible_lr =
+            (lr >= 0x02000000u && lr < 0x04000000u) ||
+            (lr >= 0x08000000u && lr < 0x0E000000u);
+        if (plausible_lr && lr != entry_pc) forced_stop = lr;
+    }
+    runtime_bridge_interpret(entry_pc, entry_thumb, forced_stop,
                              /*max_instrs=*/0u);
 }
 

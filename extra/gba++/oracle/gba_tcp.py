@@ -125,6 +125,18 @@ def main():
     sub.add_parser("cont")        # free-run (game thread); server stays live
     sub.add_parser("pause")
     sub.add_parser("rstatus")     # run-state / parked / pc / vblank_starts
+    p = sub.add_parser("mmio")
+    p.add_argument("addr")
+    p.add_argument("--count", type=int, default=262144)
+    p.add_argument("--start", type=int, default=0)
+    p = sub.add_parser("tracepc")
+    p.add_argument("pc")
+    p.add_argument("--count", type=int, default=4096)
+    p = sub.add_parser("watchmem")
+    p.add_argument("addr")
+    p.add_argument("--len", type=int, default=16)
+    p.add_argument("--frames", type=int, default=30)
+    p.add_argument("--region", choices=["iwram", "ewram", "io"], default="iwram")
     # freerun: set keys, continue, then poll run_status while the game free-runs
     # and report the moment guest progress STALLS (vblank_starts stops advancing)
     # — the freeze, observed LIVE on the hung core. Reports frozen pc + regs.
@@ -170,7 +182,7 @@ def main():
         print(json.dumps({"ok": True, "path": args.path, "w": s.get("w"),
                           "h": s.get("h")}))
     elif args.cmd == "regs":
-        print(json.dumps(c.call(cmd="get_registers"), indent=0))
+        print(json.dumps(c.call(cmd="registers"), indent=0))
     elif args.cmd == "sym":
         print(json.dumps(c.call(cmd="symbol", addr=args.addr)))
     elif args.cmd == "misses":
@@ -204,6 +216,54 @@ def main():
         print(json.dumps(c.call(cmd="pause")))
     elif args.cmd == "rstatus":
         print(json.dumps(c.call(cmd="run_status")))
+    elif args.cmd == "tracepc":
+        pc = int(args.pc, 0)
+        r = c.call(cmd="runtime_trace", count=args.count, timeout=5.0)
+        rows = []
+        for row in r.get("entries", []):
+            value = row.get("pc", 0)
+            if isinstance(value, str): value = int(value, 0)
+            if value == pc: rows.append(row)
+        print(json.dumps({"ok": True, "pc": hex(pc), "matches": rows,
+                          "scanned": len(r.get("entries", []))}))
+    elif args.cmd == "watchmem":
+        addr = int(args.addr, 0)
+        cmd = "read_" + args.region
+        rows = []
+        for frame in range(args.frames + 1):
+            r = c.call(cmd=cmd, addr=hex(addr), len=args.len, timeout=5.0)
+            st = c.call(cmd="run_status", timeout=5.0)
+            rows.append({"step": frame, "frame": st.get("frame"),
+                         "pc": st.get("pc"), "data": r.get("data")})
+            if frame != args.frames:
+                c.call(cmd="step", timeout=10.0)
+        print(json.dumps({"ok": True, "addr": hex(addr), "rows": rows}))
+    elif args.cmd == "mmio":
+        wanted = int(args.addr, 0)
+        cursor = args.start
+        remaining = args.count
+        matches = []
+        total = None
+        while remaining > 0:
+            take = min(4096, remaining)
+            r = c.call(cmd="mmio_cap", start=cursor, count=take, timeout=5.0)
+            total = r.get("total", total)
+            rows = r.get("entries", [])
+            for row in rows:
+                addr = row.get("addr", 0)
+                if isinstance(addr, str):
+                    addr = int(addr, 0)
+                if addr == wanted:
+                    matches.append(row)
+            got = len(rows)
+            if got == 0:
+                break
+            cursor += got
+            remaining -= got
+            if total is not None and cursor >= total:
+                break
+        print(json.dumps({"ok": True, "addr": hex(wanted), "matches": matches,
+                          "scanned": cursor - args.start, "total": total}))
     elif args.cmd == "freerun":
         if args.keys is not None:
             c.call(cmd="set_keyinput", value=keyinput_from(args.keys))

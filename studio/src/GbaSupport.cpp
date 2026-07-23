@@ -339,15 +339,17 @@ QString generatedGbaGameToml(const PipelineRequest& request,
                              const QString& romSha1,
                              quint32 romCrc32,
                              const QString& biosSha1,
-                             quint32 biosCrc32) {
+                             quint32 biosCrc32,
+                             bool biosHle) {
   QString text;
   text += QStringLiteral("[game]\n");
   text += QStringLiteral("name = %1\n").arg(tomlQuoted(request.windowTitle));
   text += QStringLiteral("short_name = %1\n").arg(tomlQuoted(sanitizedFileStem(request.windowTitle)));
   text += QStringLiteral("game_code = %1\n\n").arg(tomlQuoted(game.gameCode));
   text += QStringLiteral("[bios]\npath = \"bios/gba_bios.bin\"\n");
-  text += QStringLiteral("sha1 = %1\ncrc32 = %2\nhle = false\n\n")
-            .arg(tomlQuoted(biosSha1), tomlQuoted(gbaHex32(biosCrc32)));
+  text += QStringLiteral("sha1 = %1\ncrc32 = %2\nhle = %3\nhle_keep_intro = false\n\n")
+            .arg(tomlQuoted(biosSha1), tomlQuoted(gbaHex32(biosCrc32)),
+                 biosHle ? QStringLiteral("true") : QStringLiteral("false"));
   text += QStringLiteral("[rom]\npath = \"game/game.gba\"\n");
   text += QStringLiteral("sha1 = %1\ncrc32 = %2\n\n")
             .arg(tomlQuoted(romSha1), tomlQuoted(gbaHex32(romCrc32)));

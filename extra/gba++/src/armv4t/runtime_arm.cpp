@@ -307,6 +307,7 @@ extern "C" uint32_t g_runtime_resume_pc = 0u;
 // SVC-mode exception entry; a return of 1 means the SWI was serviced in HLE and
 // the guest resumes at LR with no BIOS dispatch. 0 falls through to LLE.
 extern "C" int (*g_bios_hle_hook)(uint32_t swi_num) = nullptr;
+extern "C" unsigned g_bios_hle_standalone = 0;
 
 namespace {
 // ~8M instructions of history (~60+ PPU-frames). The recomp runs several frames
@@ -403,6 +404,18 @@ extern "C" uint32_t runtime_fp_query_pc(uint32_t pc, uint32_t max_hits,
     for (uint32_t i = 0; i < g_fp_count && found < max_hits; ++i) {
         const RuntimeFpEntry& e = g_fp[(start + i) % kFpSize];
         if (e.pc == pc) out_cycles[found++] = e.cycles;
+    }
+    return found;
+}
+
+extern "C" uint32_t runtime_fp_query_entries(uint32_t pc, uint32_t max_hits,
+                                              RuntimeFpEntry* out_entries) {
+    if (!g_fp || g_fp_count == 0 || !out_entries || max_hits == 0) return 0;
+    uint32_t start = (g_fp_write + kFpSize - g_fp_count) % kFpSize;
+    uint32_t found = 0;
+    for (uint32_t i = 0; i < g_fp_count && found < max_hits; ++i) {
+        const RuntimeFpEntry& e = g_fp[(start + i) % kFpSize];
+        if (e.pc == pc) out_entries[found++] = e;
     }
     return found;
 }
@@ -1169,6 +1182,83 @@ extern "C" unsigned long long g_runtime_irq_max_depth = 0;
 // spins its drive-to-completion loop until it equals the IRQ's own depth.
 extern "C" uint32_t      g_irq_iret_depth = 0;
 
+namespace {
+
+void runtime_irq_standalone_hle(uint32_t return_address,
+                                uint32_t irq_src,
+                                uint32_t saved_cpsr) {
+    const uint16_t saved_ie = bus_read_u16(0x04000200u);
+    const uint32_t new_cpsr =
+        (saved_cpsr & ~(0x1Fu | CPSR_T_BIT)) | 0x12u | CPSR_I_BIT;
+    const unsigned old_bank = mode_to_bank(saved_cpsr);
+    const unsigned irq_bank = mode_to_bank(new_cpsr);
+    if (old_bank != irq_bank) {
+        bank_out(old_bank, saved_cpsr);
+        bank_in(irq_bank, new_cpsr);
+    }
+    g_cpu.cpsr = new_cpsr;
+    g_cpu.banked_spsr[irq_bank] = saved_cpsr;
+
+    // Match the BIOS IRQ dispatcher contract used by the Rust reference:
+    // push r0-r3/r12/lr_irq, pass 0x04000000 in r0, call the user handler,
+    // OR the serviced source into the BIOS IntrWait flags, then restore and
+    // exception-return to the interrupted PC.
+    const uint32_t return_lr = return_address + 4u;
+    const uint32_t sp = g_cpu.R[13] - 24u;
+    g_cpu.R[13] = sp;
+    const uint32_t saved_regs[6] = {
+        g_cpu.R[0], g_cpu.R[1], g_cpu.R[2], g_cpu.R[3], g_cpu.R[12], return_lr
+    };
+    for (unsigned i = 0; i < 6; ++i) bus_write_u32(sp + i * 4u, saved_regs[i]);
+
+    const uint32_t handler = bus_read_u32(0x03007FFCu) & ~3u;
+    if (handler != 0u) {
+        constexpr uint32_t kHleIrqReturn = 0x00000138u;
+        g_cpu.R[0] = 0x04000000u;
+        g_cpu.R[14] = kHleIrqReturn;
+        g_cpu.R[15] = handler;
+        const uint32_t saved_floor = g_call_return_floor;
+        g_call_return_floor = g_call_return_depth;
+        if (runtime_has_static_entry(handler, 0)) {
+            runtime_call_push_return(kHleIrqReturn);
+            runtime_dispatch(handler);
+            constexpr uint32_t kMaxHleIrqDispatches = 4'000'000u;
+            uint32_t guard = 0;
+            while (g_cpu.R[15] != kHleIrqReturn && ++guard < kMaxHleIrqDispatches) {
+                runtime_dispatch(g_cpu.R[15]);
+            }
+        } else {
+            // Runtime-installed IRQ masters live in IWRAM and are not part of
+            // the static table. Force the interpreter bridge to the BIOS return
+            // sentinel; the generic in-IRQ bridge intentionally ignores LR and
+            // would otherwise run past 0x138 looking for a static continuation.
+            runtime_bridge_interpret(handler, false, kHleIrqReturn, 200'000'000u);
+        }
+        g_call_return_floor = saved_floor;
+    }
+
+    const uint16_t flags = bus_read_u16(0x03007FF8u);
+    bus_write_u16(0x03007FF8u, static_cast<uint16_t>(flags | irq_src));
+    // The installed master normally restores IE and acknowledges IF in its
+    // tail. Make that BIOS contract explicit in standalone mode as well; this
+    // is idempotent when the guest tail completed and prevents an interrupted
+    // bridge from leaving the active source permanently masked.
+    bus_write_u16(0x04000202u, static_cast<uint16_t>(irq_src));
+    bus_write_u16(0x04000200u, saved_ie);
+    for (unsigned i = 0; i < 6; ++i) g_cpu.R[i < 4 ? i : (i == 4 ? 12 : 14)] =
+        bus_read_u32(sp + i * 4u);
+    g_cpu.R[13] = sp + 24u;
+
+    if (old_bank != irq_bank) {
+        bank_out(irq_bank, g_cpu.cpsr);
+        bank_in(old_bank, saved_cpsr);
+    }
+    g_cpu.cpsr = saved_cpsr;
+    g_cpu.R[15] = return_address;
+}
+
+}  // namespace
+
 extern "C" void runtime_irq(uint32_t return_address) {
     ++g_runtime_irq_entries;
     ++g_irq_nest_depth;
@@ -1201,6 +1291,12 @@ extern "C" void runtime_irq(uint32_t return_address) {
     runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, irq_src, saved_cpsr,
                         g_irq_nest_depth);
     runtime_irq_log_record(irq_src, return_address, saved_cpsr);
+
+    if (g_bios_hle_standalone) {
+        runtime_irq_standalone_hle(return_address, irq_src, saved_cpsr);
+        --g_irq_nest_depth;
+        return;
+    }
 
     uint32_t new_cpsr =
         (saved_cpsr & ~(0x1Fu | CPSR_T_BIT))

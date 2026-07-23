@@ -192,7 +192,7 @@ int main(int argc, char** argv) {
         QStringLiteral("generated GBA entry point resolves packaged resources and writable saves"));
   const QString gbaToml = psxstudio::generatedGbaGameToml(
     gbaRequest, gbaDescription, QString(40, QLatin1Char('a')), 0x12345678u,
-    QString(40, QLatin1Char('b')), 0x87654321u);
+    QString(40, QLatin1Char('b')), 0x87654321u, false);
   check(gbaToml.contains(QStringLiteral("path = \"bios/gba_bios.bin\"")) &&
           gbaToml.contains(QStringLiteral("path = \"game/game.gba\"")) &&
           gbaToml.contains(QStringLiteral("hle = false")) &&

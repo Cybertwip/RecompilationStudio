@@ -1026,8 +1026,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         args.bios_hle = (e[0] && e[0] != '0');
     if (const char* e = std::getenv("GBARECOMP_BIOS_HLE_KEEP_INTRO"))
         args.bios_hle_keep_intro = (e[0] && e[0] != '0');
-    gba::bios_hle_set_mode(args.bios_hle ? gba::BiosHleMode::On
-                                         : gba::BiosHleMode::Off);
+    const bool canonical_bios =
+        lower_ascii(bios.sha1_hex()) == lower_ascii(gba::GbaBios::kExpectedSha1);
+    gba::bios_hle_set_mode(!args.bios_hle ? gba::BiosHleMode::Off
+        : canonical_bios ? gba::BiosHleMode::On
+                         : gba::BiosHleMode::Standalone);
     if (!args.quiet)
         std::printf("bios_backend=%s\n",
                     gba::bios_hle_mode_name(gba::bios_hle_mode()));

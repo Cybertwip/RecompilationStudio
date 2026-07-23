@@ -475,6 +475,44 @@ void cmd_cyc_anchor(std::string_view req, std::string& out) {
     out += "]}";
 }
 
+// Full architectural fingerprints for a selected PC. This is the focused
+// companion to cyc_anchor when a divergence requires register context.
+void cmd_fp_state(std::string_view req, std::string& out) {
+    uint64_t pc = 0;
+    if (!extract_uint(req, "\"pc\"", pc)) { emit_error(out, "missing pc"); return; }
+    uint64_t hits = 64, parsed = 0;
+    if (extract_uint(req, "\"hits\"", parsed) ||
+        extract_uint(req, "\"count\"", parsed)) hits = parsed;
+    if (hits > 1024) hits = 1024;
+    std::vector<RuntimeFpEntry> entries(static_cast<std::size_t>(hits));
+    uint32_t n = runtime_fp_query_entries(static_cast<uint32_t>(pc),
+                                          static_cast<uint32_t>(hits),
+                                          entries.data());
+    char hdr[160];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"pc\":%llu,\"armed\":%u,\"count\":%u,\"entries\":[",
+                  static_cast<unsigned long long>(pc),
+                  g_runtime_insn_trace ? 1u : 0u, n);
+    out = hdr;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (i) out += ',';
+        const RuntimeFpEntry& e = entries[i];
+        char head[160];
+        std::snprintf(head, sizeof(head),
+                      "{\"cycles\":%llu,\"cpsr\":%u,\"r\":[",
+                      e.cycles, e.cpsr);
+        out += head;
+        for (unsigned r = 0; r < 16; ++r) {
+            if (r) out += ',';
+            char value[24];
+            std::snprintf(value, sizeof(value), "%u", e.r[r]);
+            out += value;
+        }
+        out += "]}";
+    }
+    out += "]}";
+}
+
 // ── IRQ raise/take ring query (Axis 3) ─────────────────────────────────
 // {"cmd":"irq_cap","count":C} -> {ok,total,count,entries:[{cycle,src,ret,cpsr,
 // from_halt}...]}. Dumps the most recent N IRQ vectorings (TAKE-time) from the
@@ -959,6 +997,10 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
     }
     if (contains("\"cyc_anchor\"")) {
         cmd_cyc_anchor(req, out);
+        return;
+    }
+    if (contains("\"fp_state\"")) {
+        cmd_fp_state(req, out);
         return;
     }
     if (contains("\"irq_cap\"")) {

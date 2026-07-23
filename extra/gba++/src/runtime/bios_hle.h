@@ -26,7 +26,8 @@ namespace gba {
 
 enum class BiosHleMode {
     Off,   // pure LLE — recompiled BIOS services every SWI (default)
-    On,    // HLE where implemented, LLE fallback otherwise
+    On,          // HLE where implemented, LLE fallback otherwise
+    Standalone,  // no usable BIOS: HLE boot/IRQ/SWIs, no LLE fallback
 };
 
 // Install or clear the runtime_swi HLE hook. Off clears g_bios_hle_hook back to

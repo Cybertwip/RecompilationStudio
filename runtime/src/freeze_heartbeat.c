@@ -135,6 +135,7 @@ static pthread_t s_thread;
  * dump a window that covers minutes, at the cost of a ~50-80 MB JSON. */
 #define DUMP_CAP_WTRACE_ALL   262144u
 #define DUMP_CAP_WTRACE        65536u
+#define DUMP_CAP_RTRACE          8192u
 #define DUMP_CAP_FRAME_HISTORY  3600u
 #define DUMP_CAP_SIO_PC        65536u
 #define DUMP_CAP_THREAD_TRACE  65536u
@@ -466,7 +467,7 @@ static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
         "  \"present_vsync_disabled\":%d,\n"
         "  \"wedge_kind\":%u,\n"
         "  \"wedge_kind_name\":\"%s\",\n"
-        "  \"caps\":{\"wtrace_all\":%u,\"wtrace\":%u,\"frames\":%u,"
+        "  \"caps\":{\"wtrace_all\":%u,\"wtrace\":%u,\"rtrace\":%u,\"frames\":%u,"
                   "\"sio_pc\":%u,\"thread\":%u,\"restore\":%u,\"fn_entry\":%u,"
                   "\"dirty_block\":%u,\"dirty_insn\":%u},\n",
         s_backend, wall,
@@ -500,6 +501,7 @@ static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
         (wedge_kind == 5) ? "spin_freeze" : "unknown",
         (unsigned)DUMP_CAP_WTRACE_ALL,
         (unsigned)DUMP_CAP_WTRACE,
+        (unsigned)DUMP_CAP_RTRACE,
         (unsigned)DUMP_CAP_FRAME_HISTORY,
         (unsigned)DUMP_CAP_SIO_PC,
         (unsigned)DUMP_CAP_THREAD_TRACE,
@@ -541,6 +543,10 @@ static void freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
 
     fputs("  \"wtrace\":", f);
     debug_server_freeze_dump_wtrace_json(f, DUMP_CAP_WTRACE);
+    fputs(",\n", f);
+
+    fputs("  \"rtrace\":", f);
+    debug_server_freeze_dump_rtrace_json(f, DUMP_CAP_RTRACE);
     fputs(",\n", f);
 
     fputs("  \"frame_history\":", f);

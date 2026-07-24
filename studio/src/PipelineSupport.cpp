@@ -1074,8 +1074,14 @@ QString findExecutable(const QString& name) {
   if (!found.isEmpty()) {
     return found;
   }
-  for (const auto& prefix : { QStringLiteral("/usr/local/bin"), QStringLiteral("/opt/homebrew/bin"),
-                              QStringLiteral("/usr/bin"), QStringLiteral("/bin") }) {
+  QStringList prefixes;
+  const QString cargoHome = qEnvironmentVariable("CARGO_HOME");
+  if (!cargoHome.isEmpty()) prefixes << QDir(cargoHome).filePath(QStringLiteral("bin"));
+  if (!QDir::homePath().isEmpty())
+    prefixes << QDir(QDir::homePath()).filePath(QStringLiteral(".cargo/bin"));
+  prefixes << QStringLiteral("/usr/local/bin") << QStringLiteral("/opt/homebrew/bin")
+           << QStringLiteral("/usr/bin") << QStringLiteral("/bin");
+  for (const auto& prefix : prefixes) {
     const QString path = QDir(prefix).filePath(name);
     if (QFileInfo(path).isExecutable()) {
       return path;

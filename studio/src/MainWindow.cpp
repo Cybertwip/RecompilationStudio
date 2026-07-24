@@ -1170,8 +1170,8 @@ void MainWindow::updateSystemControls() {
   if (discLabel_) discLabel_->setText(gba ? QStringLiteral("GBA ROM") : QStringLiteral("Disc BIN/CUE"));
   discEdit_->setPlaceholderText(gba ? QStringLiteral("One .gba cartridge image")
                                     : QStringLiteral("One .cue and all referenced .bin files"));
-  if (biosLabel_) biosLabel_->setText(gba ? QStringLiteral("GBA BIOS (optional)") : QStringLiteral("PlayStation BIOS"));
-  biosEdit_->setPlaceholderText(gba ? QStringLiteral("Canonical 16 KiB dump; blank or noncanonical uses BIOS HLE")
+  if (biosLabel_) biosLabel_->setText(gba ? QStringLiteral("GBA BIOS (required)") : QStringLiteral("PlayStation BIOS"));
+  biosEdit_->setPlaceholderText(gba ? QStringLiteral("16 KiB GBA BIOS used and hash-pinned by the Rust packager")
                                     : QStringLiteral("Canonical SCPH1001.BIN only"));
   batchCheck_->setToolTip(gba
     ? QStringLiteral("Scan a directory recursively and queue one export for every .gba image.")
@@ -1189,9 +1189,9 @@ void MainWindow::updateSystemControls() {
   brandingCard_->setVisible(!gba);
   skipBiosBoot_->setVisible(!gba);
   padPolicyLabel_->setVisible(!gba);
-  macosGipGamepad_->setVisible(!gba &&
-    (targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::MacOS ||
-     targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::All));
+  macosGipGamepad_->setVisible(
+    targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::MacOS ||
+     targetPlatformFromKey(platformCombo_->currentData().toString()) == TargetPlatform::All);
   if (gba) biosPatchEnabled_->setChecked(false);
   updateBatchMode();
   updatePlatformControls();
@@ -1230,7 +1230,7 @@ void MainWindow::updateExportMode() {
 void MainWindow::chooseBios() {
   const bool gba = currentSystem_ == SystemKind::GameBoyAdvance;
   const auto path = QFileDialog::getOpenFileName(
-    this, gba ? QStringLiteral("Select canonical 16 KiB GBA BIOS (optional)")
+    this, gba ? QStringLiteral("Select 16 KiB GBA BIOS (required)")
               : QStringLiteral("Select SCPH1001.BIN"),
     QFileInfo(biosEdit_->text()).absolutePath(),
     gba ? QStringLiteral("GBA BIOS (*.bin *.BIN);;All files (*)")
@@ -1323,8 +1323,7 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   request.biosRemoveStockPsGlyph = biosRemovePsGlyph_->isChecked();
   request.skipBiosBoot = request.system == SystemKind::PlayStation &&
                          skipBiosBoot_->isChecked();
-  request.macosGipGamepad = request.system == SystemKind::PlayStation &&
-                           macosGipGamepad_->isChecked();
+  request.macosGipGamepad = macosGipGamepad_->isChecked();
   request.exportAsZip = exportAsZip_->isChecked();
   request.overwriteOutput = overwrite;
   return request;
@@ -1794,9 +1793,8 @@ void MainWindow::updatePlatformControls() {
   certificatePasswordEdit_->parentWidget()->setVisible(signingRequested);
   certificateEdit_->parentWidget()->setEnabled(signingRequested && !busy);
   certificatePasswordEdit_->parentWidget()->setEnabled(signingRequested && !busy);
-  const bool playStation = currentSystem_ == SystemKind::PlayStation;
-  macosGipGamepad_->setVisible(playStation && includesMacos);
-  macosGipGamepad_->setEnabled(playStation && includesMacos && !busy);
+  macosGipGamepad_->setVisible(includesMacos);
+  macosGipGamepad_->setEnabled(includesMacos && !busy);
   useCi_->setEnabled(buildMode && !busy);
   exportAsZip_->setText(exportMode == ExportMode::Source
     ? QStringLiteral("Export source as zip") : QStringLiteral("Export as zip"));
@@ -1865,13 +1863,14 @@ void MainWindow::updateBuildButton() {
   const auto selectedTargets = concreteTargetPlatforms(selectedPlatform);
   const bool localPlatformReady = !buildMode || useCi_->isChecked() ||
     std::all_of(selectedTargets.cbegin(), selectedTargets.cend(),
-                [](TargetPlatform platform) {
+                [this](TargetPlatform platform) {
+                  if (currentSystem_ == SystemKind::GameBoyAdvance)
+                    return platform == hostTargetPlatform();
                   return targetPlatformSupportedOnHost(platform);
                 });
   const bool analysisReady = currentSystem_ == SystemKind::GameBoyAdvance ||
                              !ghidraEdit_->text().isEmpty();
-  const bool biosReady = currentSystem_ == SystemKind::GameBoyAdvance ||
-                         !biosEdit_->text().isEmpty();
+  const bool biosReady = !biosEdit_->text().isEmpty();
   const bool ready = gameReady && biosReady &&
                      !outputEdit_->text().isEmpty() && analysisReady &&
                      signingReady && brandingReady && ciReady && localPlatformReady;

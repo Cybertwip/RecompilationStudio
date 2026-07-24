@@ -426,7 +426,8 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   QString cmake;
   cmake += QStringLiteral("cmake_minimum_required(VERSION 3.20)\n");
   cmake += QStringLiteral("project(GeneratedGbaRustPackage NONE)\n");
-  cmake += QStringLiteral("find_program(GBA_CARGO cargo REQUIRED)\n");
+  cmake += QStringLiteral("find_program(GBA_CARGO NAMES cargo HINTS \"$ENV{CARGO_HOME}/bin\" \"$ENV{HOME}/.cargo/bin\" /usr/local/bin /opt/homebrew/bin /usr/bin /bin)\n");
+  cmake += QStringLiteral("if(NOT GBA_CARGO)\n  message(FATAL_ERROR \"Cargo was not found. Install Rust with rustup or set CARGO_HOME.\")\nendif()\n");
   cmake += QStringLiteral("set(_GBA_RUST_ROOT \"${CMAKE_CURRENT_SOURCE_DIR}/gba-rust\")\n");
   cmake += QStringLiteral("set(_GBA_GAMEPAD_ROOT \"${CMAKE_CURRENT_SOURCE_DIR}/recomp_gamepad\")\n");
   cmake += QStringLiteral("set(_GBA_CARGO_TARGET \"${CMAKE_BINARY_DIR}/cargo-target\")\n");

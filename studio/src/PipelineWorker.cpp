@@ -654,6 +654,7 @@ bool copySourceDirectory(const QString& sourceDirectory,
     const QStringList components = relative.split('/', Qt::SkipEmptyParts);
     if (components.contains(QStringLiteral(".git")) ||
         components.contains(QStringLiteral("build")) ||
+        components.contains(QStringLiteral("target")) ||
         components.contains(QStringLiteral(".cache")) ||
         QFileInfo(sourcePath).fileName() == QStringLiteral(".DS_Store")) {
       continue;
@@ -698,6 +699,7 @@ bool replicateFrameworkSources(const QString& frameworkRoot,
     { QStringLiteral("lib/sljit"), QStringLiteral("lib/sljit") },
     { QStringLiteral("lib/RmlUi"), QStringLiteral("lib/RmlUi") },
     { QStringLiteral("lib/freetype"), QStringLiteral("lib/freetype") },
+    { QStringLiteral("lib/recomp_gamepad"), QStringLiteral("lib/recomp_gamepad") },
   };
   for (const auto& directory : directories) {
     const QString source = QDir(frameworkRoot).filePath(directory.first);

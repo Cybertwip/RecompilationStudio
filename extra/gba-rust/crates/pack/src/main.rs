@@ -465,36 +465,48 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
 
     // Per-platform icon embedding + desktop integration, and a top-level
     // README that explains where the end user drops their own dumps.
-    let bios_instruction = if cfg.runtime.skip_bios {
-        String::new()
+    let readme = if cfg.output.embed_inputs {
+        match host {
+            Platform::Macos => format!(
+                "{name} — a statically recompiled game (macOS .app bundle).\n\n\
+The selected cartridge and canonical GBA BIOS are embedded in\n\
+{name}.app/Contents/Resources. BIOS execution is skipped through HLE by default;\n\
+the packaged BIOS remains available for explicit real-BIOS runs. Open the app to\n\
+play. The first launch creates the native translation in the user cache.\n"
+            ),
+            _ => format!(
+                "{name} — a statically recompiled game.\n\n\
+The selected cartridge and canonical GBA BIOS are packaged beside the executable.\n\
+BIOS execution is skipped through HLE by default. The first launch creates the\n\
+native translation in the user cache.\n"
+            ),
+        }
     } else {
-        format!(
-            "  2. your BIOS image as gba_bios.bin, sha256 {}\n",
-            cfg.image.bios_sha256.as_deref().unwrap_or("<missing>")
-        )
-    };
-    let readme = match host {
-        Platform::Macos => format!(
-            "{name} — a statically recompiled game (macOS .app bundle).\n\n\
-This package contains NO game data. To play, place your own cartridge dump\n\
-inside the bundle next to the executable, or in your config directory:\n\n\
-  {name}.app/Contents/MacOS/   (or ~/Library/Application Support/gba-recomp/)\n\n\
+        let bios_instruction = if cfg.runtime.skip_bios {
+            String::new()
+        } else {
+            format!(
+                "  2. your BIOS image as gba_bios.bin, sha256 {}\n",
+                cfg.image.bios_sha256.as_deref().unwrap_or("<missing>")
+            )
+        };
+        match host {
+            Platform::Macos => format!(
+                "{name} — a statically recompiled game (macOS .app bundle).\n\n\
+This package contains NO game data. Place your cartridge dump in the app Resources\n\
+directory or the shared gba-recomp config directory:\n\n\
   1. your cartridge image (.gba), sha256 {rom}\n\
-{bios_instruction}\n\
-Then open {name}.app. The default package skips the BIOS through the runtime's\n\
-HLE boot path. The bundle is ad-hoc signed; on first launch macOS may ask you\n\
-to confirm in System Settings > Privacy & Security.\n",
-            name = name,
-            rom = cfg.image.rom_sha256,
-        ),
-        _ => format!(
-            "{name} — a statically recompiled game.\n\n\
-This package contains NO game data. To play, place your own cartridge dump\n\
-next to the executable:\n\n  1. your cartridge image (.gba), sha256 {rom}\n\
+{bios_instruction}\nThen open {name}.app.\n",
+                rom = cfg.image.rom_sha256,
+            ),
+            _ => format!(
+                "{name} — a statically recompiled game.\n\n\
+Place your cartridge dump next to the executable:\n\n\
+  1. your cartridge image (.gba), sha256 {rom}\n\
 {bios_instruction}\nThen run ./{name}\n",
-            name = name,
-            rom = cfg.image.rom_sha256,
-        ),
+                rom = cfg.image.rom_sha256,
+            ),
+        }
     };
     std::fs::write(pkg.join("README.txt"), readme).map_err(|e| e.to_string())?;
 
@@ -571,7 +583,9 @@ next to the executable:\n\n  1. your cartridge image (.gba), sha256 {rom}\n\
         },
         cfg.runtime.interpreter
     );
-    if cfg.runtime.skip_bios {
+    if cfg.output.embed_inputs {
+        println!("  embedded resources: ROM + BIOS (BIOS execution skipped by default)");
+    } else if cfg.runtime.skip_bios {
         println!(
             "  end user supplies: ROM {}… (BIOS skipped)",
             &cfg.image.rom_sha256[..12]

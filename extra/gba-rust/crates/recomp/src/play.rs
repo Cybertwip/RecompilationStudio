@@ -1160,10 +1160,11 @@ image hashes to {}…",
         } else if sha != input_config::BIOS_SHA256 {
             eprintln!("bios: image is not the canonical dump (sha256 {sha}) — trying it as-is");
         }
-    } else if let Some((m, want)) = manifest
-        .as_ref()
-        .and_then(|m| m.bios_sha256.as_ref().map(|want| (m, want)))
-    {
+    } else if let Some((m, want)) = manifest.as_ref().and_then(|m| {
+        (!m.skip_bios)
+            .then_some(())
+            .and_then(|_| m.bios_sha256.as_ref().map(|want| (m, want)))
+    }) {
         return Err(format!(
             "this package requires a BIOS image (sha256 {}…) and none is installed.\n\
 Place your own dump as gba_bios.bin next to the executable:\n  {}",

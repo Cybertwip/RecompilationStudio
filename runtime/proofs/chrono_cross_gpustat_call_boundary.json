@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "game": "Chrono Cross",
+  "game_id": "SLUS-01041",
+  "failure": "Vibration Function selection loops after an interpreted overlay calls the compiled GPUSTAT accessor",
+  "static_evidence": {
+    "accessor": "0x80013450",
+    "instructions": [
+      "lui v0,0x8006",
+      "lw v0,0x3ee8(v0)",
+      "nop",
+      "lw v0,0(v0)",
+      "jr ra",
+      "nop"
+    ],
+    "pointer_address": "0x80063EE8",
+    "pointer_value": "0x1F801814"
+  },
+  "runtime_evidence": {
+    "overlay_call_pc": "0x801D2CB0",
+    "compiled_target": "0x80013450",
+    "return_pc": "0x801D2CB8",
+    "v0_before_call": "0x80013450",
+    "v0_at_return_continuation_before_fix": "0x00000000",
+    "gpu_status_samples": [
+      "0x564E021F",
+      "0x1482060A"
+    ],
+    "gpu_status_zero_observed": false,
+    "source_capture": "/private/tmp/chrono-cross-debug/run5/psx_freeze_dump_psx-runtime_1784774802.json"
+  },
+  "root_cause": {
+    "component": "runtime/src/dirty_ram_interp.c interpreted-to-compiled JAL/JALR boundary",
+    "description": "A directly invoked compiled callee returns normally with cpu->pc equal to the guest return address. The interpreter treated every nonzero cpu->pc as a nonlocal transfer before applying the call contract, so the normal return escaped through the generic transfer path. The compiled call was also not bracketed as an atomic call unit, allowing scheduler delivery between producing and consuming the return value."
+  },
+  "fix": {
+    "normal_return_rule": "Normalize cpu->pc == return_pc to the dispatch convention pc=0 after call-contract validation.",
+    "atomicity_rule": "Bracket interpreted/JIT calls into statically compiled code with g_call_unit_depth.",
+    "generated_code_modified": false
+  },
+  "regression": {
+    "test": "runtime/tests/call_return_boundary_test.c",
+    "assertions": [
+      "normal compiled return PC is consumed",
+      "GPUSTAT-like v0 value is preserved",
+      "real nonlocal PC remains visible",
+      "bail resolution still precedes normalization"
+    ]
+  }
+}

@@ -146,6 +146,12 @@ if(BUILD_TESTING)
     target_include_directories(tcb_status_restore_test PRIVATE include)
     add_test(NAME tcb_status_restore COMMAND tcb_status_restore_test)
 
+    add_executable(call_return_boundary_test
+        tests/call_return_boundary_test.c
+    )
+    target_include_directories(call_return_boundary_test PRIVATE include)
+    add_test(NAME call_return_boundary COMMAND call_return_boundary_test)
+
     add_executable(main_ram_mirror_test
         tests/main_ram_mirror_test.c
     )

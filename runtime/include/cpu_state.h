@@ -316,6 +316,17 @@ static inline int psx_call_contract(CPUState* cpu, uint32_t site_ra,
     return 0;
 }
 
+/* A directly-invoked compiled/JIT callee reports an ordinary guest return by
+ * leaving cpu->pc at the call site's return address. Dispatch trampolines
+ * normally consume that address and publish pc=0; interpreter/JIT call helpers
+ * bypass the trampoline and must perform the same normalization themselves.
+ * Returns 1 only for a genuine nonlocal transfer that the caller must surface. */
+static inline int psx_call_result_is_transfer(CPUState* cpu, uint32_t site_ra) {
+    if (cpu->pc != 0u && ((cpu->pc ^ site_ra) & 0x1FFFFFFFu) == 0u)
+        cpu->pc = 0u;
+    return cpu->pc != 0u;
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -442,7 +442,7 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("if(GBA_CLEAN_CARGO_TARGET)\n  set(_GBA_CARGO_CLEAN_COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_CARGO_TARGET}\")\nelse()\n  set(_GBA_CARGO_CLEAN_COMMAND ${CMAKE_COMMAND} -E true)\nendif()\n");
   cmake += QStringLiteral("set(_GBA_ENV CARGO_TARGET_DIR=${_GBA_CARGO_TARGET} RECOMP_GAMEPAD_ROOT=${_GBA_GAMEPAD_ROOT} CARGO_INCREMENTAL=0 CARGO_PROFILE_DIST_LTO=thin CARGO_PROFILE_DIST_CODEGEN_UNITS=8)\n");
   cmake += requireGip
-    ? QStringLiteral("list(APPEND _GBA_ENV RECOMP_REQUIRE_GIP=1 RECOMP_EXPORT_GIP_SYMBOLS=1)\n")
+    ? QStringLiteral("list(APPEND _GBA_ENV RECOMP_REQUIRE_GIP=1 RECOMP_EXPORT_GIP_SYMBOLS=1 CARGO_PROFILE_DIST_STRIP=none)\n")
     : QStringLiteral("list(APPEND _GBA_ENV RECOMP_DISABLE_GIP=1)\n");
   cmake += QStringLiteral("file(GLOB_RECURSE _GBA_RUST_SOURCES \"${_GBA_RUST_ROOT}/*.rs\" \"${_GBA_RUST_ROOT}/*.toml\" \"${_GBA_RUST_ROOT}/Cargo.lock\")\n");
   cmake += QStringLiteral("file(GLOB_RECURSE _GBA_GAMEPAD_SOURCES \"${_GBA_GAMEPAD_ROOT}/*\")\n");

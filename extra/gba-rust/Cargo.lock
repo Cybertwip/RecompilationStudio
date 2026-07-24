@@ -1466,6 +1466,7 @@ dependencies = [
  "flate2",
  "gilrs",
  "input-config",
+ "native-gamepad",
  "rfd",
  "screen",
  "sha2",
@@ -2325,6 +2326,14 @@ dependencies = [
  "spirv 0.4.0+sdk-1.4.341.0",
  "thiserror 2.0.18",
  "unicode-ident",
+]
+
+[[package]]
+name = "native-gamepad"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]
@@ -3188,6 +3197,7 @@ dependencies = [
  "input-config",
  "libloading",
  "menu",
+ "native-gamepad",
  "recomp-core",
  "screen",
  "sha2",

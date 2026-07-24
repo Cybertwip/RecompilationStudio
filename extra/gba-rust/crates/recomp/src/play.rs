@@ -141,7 +141,11 @@ fn native_button_pressed(state: &native_gamepad::State, name: &str, deadzone: f3
         input_config::PadBinding::Stick(token) => {
             let value = native_axis(state, token);
             let positive = token.axis().1;
-            if positive { value > deadzone } else { value < -deadzone }
+            if positive {
+                value > deadzone
+            } else {
+                value < -deadzone
+            }
         }
         input_config::PadBinding::Button(name) => match name {
             "South" => state.buttons & b::A != 0,
@@ -185,7 +189,11 @@ fn native_pad_active(
     };
     token.is_some_and(|token| {
         let value = native_axis(state, token);
-        if token.axis().1 { value > deadzone } else { value < -deadzone }
+        if token.axis().1 {
+            value > deadzone
+        } else {
+            value < -deadzone
+        }
     })
 }
 
@@ -429,7 +437,11 @@ impl PlayApp {
             }
         }
         if !physical_pad {
-            if let Some(state) = self.gip_pad.as_ref().and_then(native_gamepad::Gamepad::state) {
+            if let Some(state) = self
+                .gip_pad
+                .as_ref()
+                .and_then(native_gamepad::Gamepad::state)
+            {
                 let dz = self.icfg.stick_deadzone;
                 for button in input_config::Button::ALL {
                     if native_pad_active(
@@ -1244,14 +1256,10 @@ Place your own dump as gba_bios.bin next to the executable:\n  {}",
         })
         .collect();
     let (pad, gip_pad) = match icfg.device {
-        input_config::Device::Gamepad if icfg.gamepad_id.starts_with("gip:") => (
-            None,
-            native_gamepad::Gamepad::open(&icfg.gamepad_id),
-        ),
-        input_config::Device::Gamepad => (
-            build_gilrs(),
-            native_gamepad::Gamepad::open("gip:auto"),
-        ),
+        input_config::Device::Gamepad if icfg.gamepad_id.starts_with("gip:") => {
+            (None, native_gamepad::Gamepad::open(&icfg.gamepad_id))
+        }
+        input_config::Device::Gamepad => (build_gilrs(), native_gamepad::Gamepad::open("gip:auto")),
         input_config::Device::Keyboard => (None, None),
     };
 

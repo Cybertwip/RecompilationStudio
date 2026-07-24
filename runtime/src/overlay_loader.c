@@ -3204,7 +3204,7 @@ static int psx_sljit_call_inner(CPUState *cpu, uint32_t target, uint32_t return_
         g_exec_phase = prev_phase;
         if (_gc) {
             if (g_psx_call_bail) return 1;
-            if (psx_call_result_is_transfer(cpu, return_pc)) return 1;
+            if (cpu->pc != 0) return 1;
             if (check_contract && psx_call_contract(cpu, return_pc, site_sp)) return 1;
             return 0;
         }
@@ -3213,7 +3213,7 @@ static int psx_sljit_call_inner(CPUState *cpu, uint32_t target, uint32_t return_
     cpu->pc = 0;
     if (overlay_loader_call_native(cpu, target)) {
         if (g_psx_call_bail) return 1;
-        if (psx_call_result_is_transfer(cpu, return_pc)) return 1;
+        if (cpu->pc != 0) return 1;
         if (check_contract && psx_call_contract(cpu, return_pc, site_sp)) return 1;
         return 0;
     }

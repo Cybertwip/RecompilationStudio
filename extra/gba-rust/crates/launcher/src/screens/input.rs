@@ -52,8 +52,8 @@ impl InputScreen {
         let mut pad_presses: Vec<String> = Vec::new();
         let mut pads: Vec<String> = Vec::new();
         let direct_devices = native_gamepad::enumerate();
-        if self.cfg.gamepad_id.starts_with("gip:") &&
-            self.direct.as_ref().map(native_gamepad::Gamepad::selector)
+        if self.cfg.gamepad_id.starts_with("gip:")
+            && self.direct.as_ref().map(native_gamepad::Gamepad::selector)
                 != Some(self.cfg.gamepad_id.as_str())
         {
             self.direct = native_gamepad::Gamepad::open(&self.cfg.gamepad_id);
@@ -62,15 +62,19 @@ impl InputScreen {
             while let Some(ev) = g.next_event() {
                 match ev.event {
                     gilrs::EventType::ButtonPressed(btn, _) => {
-                        pad_presses.push(format!("{btn:?}"));
+                        if !self.cfg.gamepad_id.starts_with("gip:") {
+                            pad_presses.push(format!("{btn:?}"));
+                        }
                     }
                     // An axis pushed well past a usable deadzone is a
                     // bindable source (lets the user map any GBA button to
                     // a stick direction). Use a firm threshold so resting
                     // drift never captures.
                     gilrs::EventType::AxisChanged(axis, value, _) => {
-                        if let Some(tok) = stick_token_from_axis(axis, value) {
-                            pad_presses.push(tok.name().to_string());
+                        if !self.cfg.gamepad_id.starts_with("gip:") {
+                            if let Some(tok) = stick_token_from_axis(axis, value) {
+                                pad_presses.push(tok.name().to_string());
+                            }
                         }
                     }
                     _ => {}
@@ -79,7 +83,11 @@ impl InputScreen {
             pads = g.gamepads().map(|(_, gp)| gp.name().to_string()).collect();
         }
         if self.cfg.gamepad_id.starts_with("gip:") {
-            if let Some(state) = self.direct.as_ref().and_then(native_gamepad::Gamepad::state) {
+            if let Some(state) = self
+                .direct
+                .as_ref()
+                .and_then(native_gamepad::Gamepad::state)
+            {
                 pad_presses.extend(native_capture_sources(&state));
             }
         }
@@ -327,7 +335,26 @@ impl InputScreen {
     /// the pad state directly — gilrs keeps it updated as events pump.
     fn input_monitor(&mut self, ui: &mut Ui) {
         let dz = self.cfg.stick_deadzone;
-        let active: Vec<bool> = {
+        let active: Vec<bool> = if self.cfg.gamepad_id.starts_with("gip:") {
+            let state = self
+                .direct
+                .as_ref()
+                .and_then(native_gamepad::Gamepad::state);
+            Button::ALL
+                .iter()
+                .map(|b| {
+                    state.as_ref().is_some_and(|state| {
+                        native_pad_active(
+                            state,
+                            &self.cfg.pads[b.index()],
+                            self.cfg.dpad_source,
+                            dz,
+                            *b,
+                        )
+                    })
+                })
+                .collect()
+        } else {
             let gp = self.gilrs.as_ref().and_then(|g| {
                 g.gamepads()
                     .find(|(_, gp)| gp.name() == self.cfg.gamepad_name)
@@ -379,6 +406,118 @@ impl InputScreen {
             Err(e) => format!("save failed: {e}"),
         };
     }
+}
+
+fn native_axis(state: &native_gamepad::State, token: StickToken) -> f32 {
+    let raw = match (token.left(), token.axis().0) {
+        (true, true) => state.left_x,
+        (true, false) => state.left_y.saturating_neg(),
+        (false, true) => state.right_x,
+        (false, false) => state.right_y.saturating_neg(),
+    };
+    raw as f32 / 32767.0
+}
+
+fn native_binding_active(state: &native_gamepad::State, name: &str, deadzone: f32) -> bool {
+    use native_gamepad::button as b;
+    match input_config::pad_binding(name) {
+        input_config::PadBinding::Stick(token) => {
+            let value = native_axis(state, token);
+            if token.axis().1 {
+                value > deadzone
+            } else {
+                value < -deadzone
+            }
+        }
+        input_config::PadBinding::Button(name) => match name {
+            "South" => state.buttons & b::A != 0,
+            "East" => state.buttons & b::B != 0,
+            "West" => state.buttons & b::X != 0,
+            "North" => state.buttons & b::Y != 0,
+            "LeftTrigger" => state.buttons & b::LEFT_BUMPER != 0,
+            "LeftTrigger2" => state.left_trigger >= 256,
+            "RightTrigger" => state.buttons & b::RIGHT_BUMPER != 0,
+            "RightTrigger2" => state.right_trigger >= 256,
+            "Select" => state.buttons & b::VIEW != 0,
+            "Start" => state.buttons & b::MENU != 0,
+            "Mode" => state.guide,
+            "LeftThumb" => state.buttons & b::LEFT_STICK != 0,
+            "RightThumb" => state.buttons & b::RIGHT_STICK != 0,
+            "DPadUp" => state.buttons & b::DPAD_UP != 0,
+            "DPadDown" => state.buttons & b::DPAD_DOWN != 0,
+            "DPadLeft" => state.buttons & b::DPAD_LEFT != 0,
+            "DPadRight" => state.buttons & b::DPAD_RIGHT != 0,
+            _ => false,
+        },
+    }
+}
+
+fn native_pad_active(
+    state: &native_gamepad::State,
+    name: &str,
+    source: DpadSource,
+    deadzone: f32,
+    button: Button,
+) -> bool {
+    if native_binding_active(state, name, deadzone) {
+        return true;
+    }
+    let token = match button {
+        Button::Right => StickToken::dir(source, true, true),
+        Button::Left => StickToken::dir(source, true, false),
+        Button::Up => StickToken::dir(source, false, true),
+        Button::Down => StickToken::dir(source, false, false),
+        _ => None,
+    };
+    token.is_some_and(|token| {
+        let value = native_axis(state, token);
+        if token.axis().1 {
+            value > deadzone
+        } else {
+            value < -deadzone
+        }
+    })
+}
+
+fn native_capture_sources(state: &native_gamepad::State) -> Vec<String> {
+    use native_gamepad::button as b;
+    let mut result = Vec::new();
+    for (mask, name) in [
+        (b::A, "South"),
+        (b::B, "East"),
+        (b::X, "West"),
+        (b::Y, "North"),
+        (b::LEFT_BUMPER, "LeftTrigger"),
+        (b::RIGHT_BUMPER, "RightTrigger"),
+        (b::VIEW, "Select"),
+        (b::MENU, "Start"),
+        (b::LEFT_STICK, "LeftThumb"),
+        (b::RIGHT_STICK, "RightThumb"),
+        (b::DPAD_UP, "DPadUp"),
+        (b::DPAD_DOWN, "DPadDown"),
+        (b::DPAD_LEFT, "DPadLeft"),
+        (b::DPAD_RIGHT, "DPadRight"),
+    ] {
+        if state.buttons & mask != 0 {
+            result.push(name.to_string());
+        }
+    }
+    if state.guide {
+        result.push("Mode".into());
+    }
+    if state.left_trigger >= 700 {
+        result.push("LeftTrigger2".into());
+    }
+    if state.right_trigger >= 700 {
+        result.push("RightTrigger2".into());
+    }
+    for token in StickToken::ALL {
+        let value = native_axis(state, token);
+        if (token.axis().1 && value > 0.7) || (!token.axis().1 && value < -0.7) {
+            result.push(token.name().to_string());
+        }
+    }
+    result
 }
 
 /// Map an `AxisChanged` event past a firm capture threshold to the stick

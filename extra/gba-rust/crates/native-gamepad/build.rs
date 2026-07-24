@@ -4,8 +4,11 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(recomp_native_gip)");
     println!("cargo:rerun-if-env-changed=RECOMP_GAMEPAD_ROOT");
     println!("cargo:rerun-if-env-changed=RECOMP_REQUIRE_GIP");
+    println!("cargo:rerun-if-env-changed=RECOMP_DISABLE_GIP");
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+    if std::env::var_os("RECOMP_DISABLE_GIP").is_some()
+        || std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
         return;
     }
 
@@ -17,14 +20,19 @@ fn main() {
     let source = root.join("src/gip_gamepad.cpp");
     let include = root.join("include");
     println!("cargo:rerun-if-changed={}", source.display());
-    println!("cargo:rerun-if-changed={}", include.join("recomp_gamepad/gip_gamepad.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        include.join("recomp_gamepad/gip_gamepad.h").display()
+    );
 
     let required = std::env::var_os("RECOMP_REQUIRE_GIP").is_some();
     if !source.is_file() || !include.is_dir() {
         if required {
             panic!("recomp_gamepad source is missing at {}", root.display());
         }
-        println!("cargo:warning=recomp_gamepad source unavailable; macOS direct-USB input disabled");
+        println!(
+            "cargo:warning=recomp_gamepad source unavailable; macOS direct-USB input disabled"
+        );
         return;
     }
 
@@ -38,7 +46,9 @@ fn main() {
             if required {
                 panic!("libusb-1.0 is required for macOS direct-USB input: {error}");
             }
-            println!("cargo:warning=libusb-1.0 unavailable; macOS direct-USB input disabled ({error})");
+            println!(
+                "cargo:warning=libusb-1.0 unavailable; macOS direct-USB input disabled ({error})"
+            );
             return;
         }
     };

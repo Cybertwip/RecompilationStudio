@@ -250,7 +250,10 @@ impl Default for InputConfig {
     fn default() -> Self {
         let s = |v: &str| v.to_string();
         Self {
-            device: Device::Keyboard,
+            // Automatic gamepad-first routing; keyboard bindings are always
+            // merged by the play runtime, so a machine with no pad retains
+            // complete keyboard control.
+            device: Device::Gamepad,
             gamepad_name: String::new(),
             gamepad_id: String::new(),
             // the historical play-command mapping

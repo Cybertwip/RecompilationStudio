@@ -368,6 +368,35 @@ QString generatedGbaGameToml(const PipelineRequest& request,
   return text;
 }
 
+QString generatedGbaPackToml(const PipelineRequest& request,
+                             const QString& bundleName,
+                             const QString& romSha256,
+                             const QString& biosSha256) {
+  const QString platform = request.targetPlatform == TargetPlatform::Windows
+    ? QStringLiteral("windows")
+    : request.targetPlatform == TargetPlatform::Linux
+      ? QStringLiteral("linux") : QStringLiteral("macos");
+  QString text;
+  text += QStringLiteral("[package]\n");
+  text += QStringLiteral("name = %1\n").arg(tomlQuoted(bundleName));
+  text += QStringLiteral("version = \"1.0.0\"\n");
+  text += QStringLiteral("platforms = [%1]\n").arg(tomlQuoted(platform));
+  text += QStringLiteral("icon = \"AppIcon.png\"\n\n");
+  text += QStringLiteral("[image]\n");
+  text += QStringLiteral("rom-sha256 = %1\n").arg(tomlQuoted(romSha256));
+  text += QStringLiteral("bios-sha256 = %1\n\n").arg(tomlQuoted(biosSha256));
+  text += QStringLiteral("[runtime]\n");
+  text += QStringLiteral("menu = true\n");
+  text += QStringLiteral("enhanced-audio = true\n");
+  text += QStringLiteral("screen-sim = true\n");
+  text += QStringLiteral("engine-hle = \"auto\"\n");
+  text += QStringLiteral("interpreter = true\n\n");
+  text += QStringLiteral("[output]\n");
+  text += QStringLiteral("binary = true\n");
+  text += QStringLiteral("c-source = false\n");
+  return text;
+}
+
 QString generatedGbaInfoPlist(const QString& bundleName, const QString& bundleId) {
   return QStringLiteral(R"PLIST(<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -391,68 +420,52 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
                                  const QString& bundleName,
                                  const QString& bundleId) {
   Q_UNUSED(game);
-  const bool windows = request.targetPlatform == TargetPlatform::Windows;
-  const bool linux = request.targetPlatform == TargetPlatform::Linux;
-  const bool macos = request.targetPlatform == TargetPlatform::MacOS;
+  Q_UNUSED(bundleId);
+  const bool requireGip = request.targetPlatform == TargetPlatform::MacOS &&
+                          request.macosGipGamepad;
   QString cmake;
   cmake += QStringLiteral("cmake_minimum_required(VERSION 3.20)\n");
-  cmake += windows ? QStringLiteral("project(GeneratedGbaApp C CXX RC)\n")
-                   : QStringLiteral("project(GeneratedGbaApp C CXX)\n");
-  cmake += QStringLiteral("set(CMAKE_C_STANDARD 11)\nset(CMAKE_CXX_STANDARD 20)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\n");
-  cmake += QStringLiteral("set(PSXRECOMP_DEPENDENCY_CACHE \"${CMAKE_BINARY_DIR}/dependencies\" CACHE PATH \"Shared dependency cache\")\n");
-  cmake += QStringLiteral("include(FetchContent)\nset(FETCHCONTENT_QUIET OFF)\nset(FETCHCONTENT_BASE_DIR \"${PSXRECOMP_DEPENDENCY_CACHE}\" CACHE PATH \"\" FORCE)\n");
-  if (windows) {
-    cmake += QStringLiteral("if(MSVC)\n");
-    cmake += QStringLiteral("  FetchContent_Declare(SDL2Source URL %1 URL_HASH SHA256=%2 DOWNLOAD_EXTRACT_TIMESTAMP TRUE)\n")
-               .arg(cmakeQuoted(QString::fromLatin1(kSdl2SourceUrl)), QString::fromLatin1(kSdl2SourceSha256));
-    cmake += QStringLiteral("  set(SDL_SHARED OFF CACHE BOOL \"\" FORCE)\n  set(SDL_STATIC ON CACHE BOOL \"\" FORCE)\n  set(SDL_TEST OFF CACHE BOOL \"\" FORCE)\n  set(SDL2_DISABLE_INSTALL ON CACHE BOOL \"\" FORCE)\n");
-    cmake += QStringLiteral("  set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded$<$<CONFIG:Debug>:Debug>\")\n  FetchContent_MakeAvailable(SDL2Source)\n");
-    cmake += QStringLiteral("  set(_GBA_SDL_INCLUDE \"${sdl2source_SOURCE_DIR}/include\")\n  set(_GBA_SDL_LIB SDL2::SDL2-static)\n");
-    cmake += QStringLiteral("else()\n");
-    cmake += QStringLiteral("  FetchContent_Declare(SDL2Mingw URL \"https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.tar.gz\" URL_HASH SHA256=83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2 DOWNLOAD_EXTRACT_TIMESTAMP TRUE)\n");
-    cmake += QStringLiteral("  FetchContent_GetProperties(SDL2Mingw)\n  if(NOT sdl2mingw_POPULATED)\n    FetchContent_Populate(SDL2Mingw)\n  endif()\n");
-    cmake += QStringLiteral("  set(_GBA_SDL_ROOT \"${sdl2mingw_SOURCE_DIR}/x86_64-w64-mingw32\")\n  find_package(SDL2 CONFIG REQUIRED PATHS \"${_GBA_SDL_ROOT}/lib/cmake/SDL2\" NO_DEFAULT_PATH)\n");
-    cmake += QStringLiteral("  set(_GBA_SDL_INCLUDE \"${_GBA_SDL_ROOT}/include;${_GBA_SDL_ROOT}/include/SDL2\")\n  set(_GBA_SDL_LIB SDL2::SDL2-static)\nendif()\n");
-  } else if (linux) {
-    cmake += QStringLiteral("FetchContent_Declare(SDL2Source URL %1 URL_HASH SHA256=%2 DOWNLOAD_EXTRACT_TIMESTAMP TRUE)\n")
-               .arg(cmakeQuoted(QString::fromLatin1(kSdl2SourceUrl)), QString::fromLatin1(kSdl2SourceSha256));
-    cmake += QStringLiteral("FetchContent_GetProperties(SDL2Source)\nif(NOT sdl2source_POPULATED)\n  FetchContent_Populate(SDL2Source)\nendif()\n");
-    cmake += QStringLiteral("FetchContent_Declare(SDL2Linux URL %1 URL_HASH SHA256=%2 DOWNLOAD_NAME \"pysdl2_dll-2.32.10-manylinux_2_28_x86_64.zip\" DOWNLOAD_EXTRACT_TIMESTAMP TRUE)\n")
-               .arg(cmakeQuoted(QString::fromLatin1(kLinuxSdl2WheelUrl)), QString::fromLatin1(kLinuxSdl2WheelSha256));
-    cmake += QStringLiteral("FetchContent_GetProperties(SDL2Linux)\nif(NOT sdl2linux_POPULATED)\n  FetchContent_Populate(SDL2Linux)\nendif()\n");
-    cmake += QStringLiteral("set(_GBA_SDL_LIBRARY \"${sdl2linux_SOURCE_DIR}/sdl2dll/dll/libSDL2-2.0.so\")\nif(NOT EXISTS \"${_GBA_SDL_LIBRARY}\")\n  message(FATAL_ERROR \"Pinned Linux SDL2 library missing\")\nendif()\n");
-    cmake += QStringLiteral("add_library(GbaStudioSDL2 SHARED IMPORTED GLOBAL)\nset_target_properties(GbaStudioSDL2 PROPERTIES IMPORTED_LOCATION \"${_GBA_SDL_LIBRARY}\" INTERFACE_INCLUDE_DIRECTORIES \"${sdl2source_SOURCE_DIR}/include\")\n");
-    cmake += QStringLiteral("set(_GBA_SDL_INCLUDE \"${sdl2source_SOURCE_DIR}/include\")\nset(_GBA_SDL_LIB GbaStudioSDL2)\nset(CMAKE_BUILD_WITH_INSTALL_RPATH ON)\nset(CMAKE_INSTALL_RPATH \"$ORIGIN\")\n");
-  } else {
-    cmake += QStringLiteral("find_package(PkgConfig REQUIRED)\npkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)\nset(_GBA_SDL_INCLUDE \"${SDL2_INCLUDE_DIRS}\")\nset(_GBA_SDL_LIB PkgConfig::SDL2)\n");
-    cmake += QStringLiteral("set(CMAKE_OSX_DEPLOYMENT_TARGET \"14.0\" CACHE STRING \"\" FORCE)\nset(CMAKE_MACOSX_RPATH ON)\nset(CMAKE_BUILD_WITH_INSTALL_RPATH ON)\nset(CMAKE_INSTALL_RPATH \"@executable_path/../Frameworks\")\n");
-  }
-  cmake += QStringLiteral("set(GBARECOMP_COMPILER_CACHE OFF CACHE STRING \"\" FORCE)\nset(GBARECOMP_BUILD_ORACLE OFF CACHE BOOL \"\" FORCE)\nset(GBARECOMP_SDL2_INCLUDE_DIRS \"${_GBA_SDL_INCLUDE}\" CACHE STRING \"\" FORCE)\nset(GBARECOMP_SDL2_LIBRARIES \"${_GBA_SDL_LIB}\" CACHE STRING \"\" FORCE)\nadd_subdirectory(gba++ gbarecomp_build EXCLUDE_FROM_ALL)\n");
-  cmake += QStringLiteral("file(GLOB _GBA_SHARDS CONFIGURE_DEPENDS \"${CMAKE_CURRENT_SOURCE_DIR}/generated/recompiled_[0-9][0-9][0-9].cpp\")\nlist(LENGTH _GBA_SHARDS _GBA_SHARD_COUNT)\nif(_GBA_SHARD_COUNT LESS 2)\n  message(FATAL_ERROR \"Expected at least two generated GBA recompilation shards\")\nendif()\n");
-  cmake += windows
-    ? QStringLiteral("add_executable(psx-runtime WIN32 src/main.cpp ${_GBA_SHARDS} generated/dispatch_table.cpp)\n")
-    : macos
-      ? QStringLiteral("add_executable(psx-runtime MACOSX_BUNDLE src/main.cpp ${_GBA_SHARDS} generated/dispatch_table.cpp)\n")
-      : QStringLiteral("add_executable(psx-runtime src/main.cpp ${_GBA_SHARDS} generated/dispatch_table.cpp)\n");
-  cmake += QStringLiteral("if(EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/generated/symbol_map.cpp\")\n  target_sources(psx-runtime PRIVATE generated/symbol_map.cpp)\nendif()\n");
-  cmake += QStringLiteral("target_include_directories(psx-runtime PRIVATE gba++/src/armv4t gba++/src/gba gba++/src/runtime gba++/src/debug generated)\n");
-  cmake += QStringLiteral("target_compile_definitions(psx-runtime PRIVATE GBARECOMP_WINDOW_TITLE=%1 $<$<CONFIG:Debug>:GBARECOMP_DEFAULT_DEBUG_PORT=4371>)\n")
-             .arg(cmakeQuoted(request.windowTitle));
-  cmake += QStringLiteral("if(MINGW)\n  target_link_libraries(psx-runtime PRIVATE -Wl,--start-group gbarecomp_runtime gbarecomp_debug gbarecomp_gba gbarecomp_armv4t gbarecomp_recompile_core gbarecomp_heal_gate -Wl,--end-group)\nelse()\n  target_link_libraries(psx-runtime PRIVATE gbarecomp_runtime gbarecomp_debug gbarecomp_gba gbarecomp_armv4t gbarecomp_recompile_core gbarecomp_heal_gate)\nendif()\n");
-  cmake += QStringLiteral("set(_GBA_RESOURCES \"${CMAKE_CURRENT_SOURCE_DIR}/package_resources\")\nset(_GBA_STEGANOS_PACKAGE_DIR \"${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/$<CONFIG>\")\n");
-  if (windows) {
-    cmake += QStringLiteral("target_sources(psx-runtime PRIVATE app.rc)\nset_target_properties(psx-runtime PROPERTIES OUTPUT_NAME %1)\n").arg(cmakeQuoted(bundleName));
-    cmake += QStringLiteral("if(MINGW)\n  target_link_options(psx-runtime PRIVATE -static-libgcc -static-libstdc++ -Wl,--stack,16777216)\nelseif(MSVC)\n  target_link_options(psx-runtime PRIVATE /STACK:16777216)\nendif()\n");
-    cmake += QStringLiteral("install(TARGETS psx-runtime RUNTIME DESTINATION .)\ninstall(DIRECTORY \"${_GBA_RESOURCES}/\" DESTINATION .)\ninstall(FILES game.manifest.json DESTINATION .)\nadd_custom_command(TARGET psx-runtime POST_BUILD COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_STEGANOS_PACKAGE_DIR}\" COMMAND ${CMAKE_COMMAND} -E make_directory \"${_GBA_STEGANOS_PACKAGE_DIR}\" COMMAND ${CMAKE_COMMAND} -E copy_if_different \"$<TARGET_FILE:psx-runtime>\" \"${_GBA_STEGANOS_PACKAGE_DIR}/%1.exe\" COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_GBA_RESOURCES}\" \"${_GBA_STEGANOS_PACKAGE_DIR}\" COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${_GBA_STEGANOS_PACKAGE_DIR}/game.manifest.json\" VERBATIM)\n").arg(bundleName);
-  } else if (linux) {
-    cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES OUTPUT_NAME %1 BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH \"$ORIGIN\")\n").arg(cmakeQuoted(bundleName));
-    cmake += QStringLiteral("target_link_options(psx-runtime PRIVATE -static-libgcc -static-libstdc++ -Wl,-z,origin)\ninstall(TARGETS psx-runtime RUNTIME DESTINATION .)\ninstall(FILES \"${_GBA_SDL_LIBRARY}\" DESTINATION . RENAME libSDL2-2.0.so.0)\ninstall(DIRECTORY \"${_GBA_RESOURCES}/\" DESTINATION .)\ninstall(FILES AppIcon.png game.manifest.json DESTINATION .)\nadd_custom_command(TARGET psx-runtime POST_BUILD COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_STEGANOS_PACKAGE_DIR}\" COMMAND ${CMAKE_COMMAND} -E make_directory \"${_GBA_STEGANOS_PACKAGE_DIR}\" COMMAND ${CMAKE_COMMAND} -E copy_if_different \"$<TARGET_FILE:psx-runtime>\" \"${_GBA_STEGANOS_PACKAGE_DIR}/%1\" COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_GBA_SDL_LIBRARY}\" \"${_GBA_STEGANOS_PACKAGE_DIR}/libSDL2-2.0.so.0\" COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_GBA_RESOURCES}\" \"${_GBA_STEGANOS_PACKAGE_DIR}\" COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" \"${_GBA_STEGANOS_PACKAGE_DIR}/AppIcon.png\" COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${_GBA_STEGANOS_PACKAGE_DIR}/game.manifest.json\" VERBATIM)\n").arg(bundleName);
-  } else {
-    cmake += QStringLiteral("set_source_files_properties(AppIcon.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)\ntarget_sources(psx-runtime PRIVATE AppIcon.icns)\n");
-    cmake += QStringLiteral("set_target_properties(psx-runtime PROPERTIES OUTPUT_NAME %1 MACOSX_BUNDLE TRUE MACOSX_BUNDLE_INFO_PLIST \"${CMAKE_CURRENT_SOURCE_DIR}/Info.plist\" MACOSX_BUNDLE_GUI_IDENTIFIER %2 MACOSX_BUNDLE_BUNDLE_NAME %1 MACOSX_BUNDLE_ICON_FILE AppIcon.icns XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED OFF XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY \"\")\n")
-               .arg(cmakeQuoted(bundleName), cmakeQuoted(bundleId));
-    cmake += QStringLiteral("add_custom_command(TARGET psx-runtime POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_GBA_RESOURCES}\" \"$<TARGET_BUNDLE_CONTENT_DIR:psx-runtime>/Resources\" COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_STEGANOS_PACKAGE_DIR}\" COMMAND ${CMAKE_COMMAND} -E make_directory \"${_GBA_STEGANOS_PACKAGE_DIR}\" COMMAND ${CMAKE_COMMAND} -E copy_directory \"$<TARGET_BUNDLE_DIR:psx-runtime>\" \"${_GBA_STEGANOS_PACKAGE_DIR}/%1.app\" COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${_GBA_STEGANOS_PACKAGE_DIR}/game.manifest.json\" VERBATIM)\ninstall(TARGETS psx-runtime BUNDLE DESTINATION .)\ninstall(FILES game.manifest.json DESTINATION .)\n").arg(bundleName);
-  }
+  cmake += QStringLiteral("project(GeneratedGbaRustPackage NONE)\n");
+  cmake += QStringLiteral("find_program(GBA_CARGO cargo REQUIRED)\n");
+  cmake += QStringLiteral("set(_GBA_RUST_ROOT \"${CMAKE_CURRENT_SOURCE_DIR}/gba-rust\")\n");
+  cmake += QStringLiteral("set(_GBA_GAMEPAD_ROOT \"${CMAKE_CURRENT_SOURCE_DIR}/recomp_gamepad\")\n");
+  cmake += QStringLiteral("set(_GBA_CARGO_TARGET \"${CMAKE_BINARY_DIR}/cargo-target\")\n");
+  cmake += QStringLiteral("set(_GBA_PACK_OUT \"${CMAKE_BINARY_DIR}/pack-out\")\n");
+  cmake += QStringLiteral("set(_GBA_PACKAGE_NAME %1)\n").arg(cmakeQuoted(bundleName));
+  cmake += QStringLiteral("if(WIN32)\n  set(_GBA_EXE_SUFFIX \".exe\")\nelse()\n  set(_GBA_EXE_SUFFIX \"\")\nendif()\n");
+  cmake += QStringLiteral("set(_GBA_ENV CARGO_TARGET_DIR=${_GBA_CARGO_TARGET} RECOMP_GAMEPAD_ROOT=${_GBA_GAMEPAD_ROOT})\n");
+  cmake += requireGip
+    ? QStringLiteral("list(APPEND _GBA_ENV RECOMP_REQUIRE_GIP=1)\n")
+    : QStringLiteral("list(APPEND _GBA_ENV RECOMP_DISABLE_GIP=1)\n");
+  cmake += QStringLiteral("file(GLOB_RECURSE _GBA_RUST_SOURCES CONFIGURE_DEPENDS \"${_GBA_RUST_ROOT}/*.rs\" \"${_GBA_RUST_ROOT}/*.toml\" \"${_GBA_RUST_ROOT}/Cargo.lock\")\n");
+  cmake += QStringLiteral("file(GLOB_RECURSE _GBA_GAMEPAD_SOURCES CONFIGURE_DEPENDS \"${_GBA_GAMEPAD_ROOT}/*\")\n");
+  cmake += QStringLiteral("set(_GBA_STAMP \"${CMAKE_BINARY_DIR}/gba-rust-package.stamp\")\n");
+  cmake += QStringLiteral("set(_GBA_STEGANOS_PACKAGE_DIR \"${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/$<CONFIG>\")\n");
+  cmake += QStringLiteral("add_custom_command(OUTPUT \"${_GBA_STAMP}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_PACK_OUT}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} ${GBA_CARGO} build --manifest-path \"${_GBA_RUST_ROOT}/Cargo.toml\" --profile dist --locked -p recomp -p gba-pack\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} \"${_GBA_CARGO_TARGET}/dist/gba-pack${_GBA_EXE_SUFFIX}\" build \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" --rom \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" --bios \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" --out \"${_GBA_PACK_OUT}\" --recomp \"${_GBA_CARGO_TARGET}/dist/recomp${_GBA_EXE_SUFFIX}\" --no-soak\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_GBA_PACK_OUT}/${_GBA_PACKAGE_NAME}\" \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${_GBA_STEGANOS_PACKAGE_DIR}/game.manifest.json\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\" \"${_GBA_STEGANOS_PACKAGE_DIR}/PSXRecomp-Proof.zip\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E touch \"${_GBA_STAMP}\"\n");
+  cmake += QStringLiteral("  DEPENDS ${_GBA_RUST_SOURCES} ${_GBA_GAMEPAD_SOURCES} \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\"\n");
+  cmake += QStringLiteral("  WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"\n  VERBATIM)\n");
+  cmake += QStringLiteral("add_custom_target(psx-runtime ALL DEPENDS \"${_GBA_STAMP}\")\n");
+  cmake += QStringLiteral(R"CMAKE(install(CODE [[
+  set(_cfg "${CMAKE_INSTALL_CONFIG_NAME}")
+  if(_cfg STREQUAL "")
+    set(_cfg "Release")
+  endif()
+  set(_src "${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/${_cfg}")
+  if(NOT EXISTS "${_src}")
+    message(FATAL_ERROR "GBA package has not been built: ${_src}")
+  endif()
+  file(COPY "${_src}/" DESTINATION "${CMAKE_INSTALL_PREFIX}")
+]])
+)CMAKE");
   return cmake;
 }
 

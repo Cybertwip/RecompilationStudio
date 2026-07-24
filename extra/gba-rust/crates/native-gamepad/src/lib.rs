@@ -84,7 +84,9 @@ unsafe extern "C" {
 fn raw_text(bytes: &[c_char]) -> String {
     let ptr = bytes.as_ptr();
     // The native ABI always NUL-terminates both fixed-capacity arrays.
-    unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 pub fn available() -> bool {
@@ -95,14 +97,17 @@ pub fn enumerate() -> Vec<DeviceInfo> {
     #[cfg(recomp_native_gip)]
     {
         let count = unsafe { psx_gip_gamepad_enumerate(std::ptr::null_mut(), 0) };
-        let mut raw = vec![RawInfo {
-            selector: [0; SELECTOR_CAPACITY],
-            name: [0; NAME_CAPACITY],
-            vendor_id: 0,
-            product_id: 0,
-            bus: 0,
-            address: 0,
-        }; count.min(64)];
+        let mut raw = vec![
+            RawInfo {
+                selector: [0; SELECTOR_CAPACITY],
+                name: [0; NAME_CAPACITY],
+                vendor_id: 0,
+                product_id: 0,
+                bus: 0,
+                address: 0,
+            };
+            count.min(64)
+        ];
         let total = unsafe { psx_gip_gamepad_enumerate(raw.as_mut_ptr(), raw.len()) };
         raw.truncate(total.min(raw.len()));
         return raw

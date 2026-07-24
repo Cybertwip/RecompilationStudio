@@ -171,13 +171,8 @@ impl AvScreen {
                         .color(theme::white(160)),
                 );
                 let label = if self.av.grid_enabled { "ON" } else { "OFF" };
-                if theme::glossy_button(
-                    ui,
-                    label,
-                    self.av.grid_enabled,
-                    Vec2::new(72.0, 26.0),
-                )
-                .clicked()
+                if theme::glossy_button(ui, label, self.av.grid_enabled, Vec2::new(72.0, 26.0))
+                    .clicked()
                 {
                     self.av.grid_enabled = !self.av.grid_enabled;
                     self.save();

@@ -438,13 +438,15 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   cmake += requireGip
     ? QStringLiteral("list(APPEND _GBA_ENV RECOMP_REQUIRE_GIP=1)\n")
     : QStringLiteral("list(APPEND _GBA_ENV RECOMP_DISABLE_GIP=1)\n");
-  cmake += QStringLiteral("file(GLOB_RECURSE _GBA_RUST_SOURCES CONFIGURE_DEPENDS \"${_GBA_RUST_ROOT}/*.rs\" \"${_GBA_RUST_ROOT}/*.toml\" \"${_GBA_RUST_ROOT}/Cargo.lock\")\n");
-  cmake += QStringLiteral("file(GLOB_RECURSE _GBA_GAMEPAD_SOURCES CONFIGURE_DEPENDS \"${_GBA_GAMEPAD_ROOT}/*\")\n");
+  cmake += QStringLiteral("file(GLOB_RECURSE _GBA_RUST_SOURCES \"${_GBA_RUST_ROOT}/*.rs\" \"${_GBA_RUST_ROOT}/*.toml\" \"${_GBA_RUST_ROOT}/Cargo.lock\")\n");
+  cmake += QStringLiteral("file(GLOB_RECURSE _GBA_GAMEPAD_SOURCES \"${_GBA_GAMEPAD_ROOT}/*\")\n");
   cmake += QStringLiteral("set(_GBA_STAMP \"${CMAKE_BINARY_DIR}/gba-rust-package.stamp\")\n");
-  cmake += QStringLiteral("set(_GBA_STEGANOS_PACKAGE_DIR \"${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/$<CONFIG>\")\n");
+  cmake += QStringLiteral("set(_GBA_STEGANOS_PACKAGE_DIR \"${CMAKE_BINARY_DIR}/steganos-package/gba-runtime/$<CONFIG>\")\n");
   cmake += QStringLiteral("add_custom_command(OUTPUT \"${_GBA_STAMP}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"[1/2] Building locked Rust runtime and packager\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_PACK_OUT}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} ${GBA_CARGO} build --manifest-path \"${_GBA_RUST_ROOT}/Cargo.toml\" --profile dist --locked -p recomp -p gba-pack\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"[2/2] Translating and assembling Rust GBA package\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} \"${_GBA_CARGO_TARGET}/dist/gba-pack${_GBA_EXE_SUFFIX}\" build \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" --rom \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" --bios \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" --out \"${_GBA_PACK_OUT}\" --recomp \"${_GBA_CARGO_TARGET}/dist/recomp${_GBA_EXE_SUFFIX}\" --no-soak\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
@@ -453,14 +455,14 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\" \"${_GBA_STEGANOS_PACKAGE_DIR}/PSXRecomp-Proof.zip\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E touch \"${_GBA_STAMP}\"\n");
   cmake += QStringLiteral("  DEPENDS ${_GBA_RUST_SOURCES} ${_GBA_GAMEPAD_SOURCES} \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\"\n");
-  cmake += QStringLiteral("  WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"\n  VERBATIM)\n");
-  cmake += QStringLiteral("add_custom_target(psx-runtime ALL DEPENDS \"${_GBA_STAMP}\")\n");
+  cmake += QStringLiteral("  WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"\n  COMMENT \"Building and packing Rust GBA runtime\"\n  USES_TERMINAL\n  VERBATIM)\n");
+  cmake += QStringLiteral("add_custom_target(gba-runtime ALL DEPENDS \"${_GBA_STAMP}\")\n");
   cmake += QStringLiteral(R"CMAKE(install(CODE [[
   set(_cfg "${CMAKE_INSTALL_CONFIG_NAME}")
   if(_cfg STREQUAL "")
     set(_cfg "Release")
   endif()
-  set(_src "${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/${_cfg}")
+  set(_src "${CMAKE_BINARY_DIR}/steganos-package/gba-runtime/${_cfg}")
   if(NOT EXISTS "${_src}")
     message(FATAL_ERROR "GBA package has not been built: ${_src}")
   endif()

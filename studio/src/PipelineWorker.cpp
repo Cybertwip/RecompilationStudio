@@ -3486,7 +3486,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("schema"), 2 },
     { QStringLiteral("system"), QStringLiteral("gba") },
     { QStringLiteral("runtime"), QStringLiteral("rust") },
-    { QStringLiteral("build_entry"), QStringLiteral("cmake --build --target psx-runtime") },
+    { QStringLiteral("build_entry"), QStringLiteral("cmake --build --target gba-runtime") },
     { QStringLiteral("packager"), QStringLiteral("gba-pack") },
     { QStringLiteral("title"), game.title },
     { QStringLiteral("game_code"), game.gameCode },
@@ -3520,9 +3520,9 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     "assembly. The selected ROM and BIOS are private build inputs and are not "
     "copied into the final package.\n\n"
     "## Build\n\n```sh\ncmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
-    "cmake --build build --target psx-runtime --parallel\n``\n\n"
+    "cmake --build build --target gba-runtime --parallel\n``\n\n"
     "The CI package is emitted under "
-    "`build/steganos-package/psx-runtime/<configuration>/`.\n")
+    "`build/steganos-package/gba-runtime/<configuration>/`.\n")
       .arg(request.windowTitle, targetPlatformDisplayName(request.targetPlatform));
   if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
                  generatedGbaProjectCMake(request, game, bundleName, bundleId), error) ||
@@ -3668,7 +3668,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
               << QStringLiteral("-DCMAKE_BUILD_TYPE=Release");
   }
   QStringList build{ QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
-                     QStringLiteral("psx-runtime"), QStringLiteral("--parallel"),
+                     QStringLiteral("gba-runtime"), QStringLiteral("--parallel"),
                      QString::number(std::max(1, QThread::idealThreadCount())) };
   QStringList install{ QStringLiteral("--install"), buildDir,
                        QStringLiteral("--prefix"), stageDir };
@@ -3679,7 +3679,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   if (!runCommand(cmake, configure, workspace,
                   QStringLiteral("cmake -S <Rust GBA project> -B <build>"), 10 * 60 * 1000) ||
       !runCommand(cmake, build, workspace,
-                  QStringLiteral("cmake --build <build> --target psx-runtime"),
+                  QStringLiteral("cmake --build <build> --target gba-runtime"),
                   4 * 60 * 60 * 1000) ||
       !runCommand(cmake, install, workspace,
                   QStringLiteral("cmake --install <build> --prefix <stage>"),

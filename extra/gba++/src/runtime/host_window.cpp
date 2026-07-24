@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -15,6 +16,7 @@
 
 #include "color_lut.h"
 #include "presentation_layout.h"
+#include "scanline_filter.h"
 
 #if defined(GBARECOMP_HAVE_SDL2)
 
@@ -279,6 +281,10 @@ struct Backend {
     bool expanded_view = false;  // native games retain the historical SDL path
     bool resize_driven_view = false;
     bool linear_filter = false;
+    bool scanlines = true;
+    HostGamepad gamepad;
+    std::string input_dir;
+    uint32_t previous_menu_buttons = 0;
 
     // ---- rebindable input (see HostWindow::load_input_config) --------------
     // GBA KEYINPUT bit (0..9) per bound SDL scancode; seeded from the

@@ -13,8 +13,12 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
+
+#include "host_gamepad.h"
 
 namespace gbarecomp {
 
@@ -100,6 +104,20 @@ public:
     // Never called => built-in defaults for both. Safe to call when the
     // files don't exist.
     void load_input_config(const char* dir);
+    bool save_input_config() const;
+    std::array<std::string, 10> keybind_labels() const;
+    void set_keybind_scancode(int bit, int scancode);
+    void reset_keybinds();
+
+    // Physical controller routing. `auto` prefers SDL, then the shared macOS
+    // direct-USB GIP backend, and falls back to the keyboard while no pad is
+    // live. The mapping database is the packaged SDL_GameControllerDB file.
+    void load_controller_mappings(const char* path);
+    void set_controller_route(const std::string& selector);
+    std::string controller_route() const;
+    void set_controller_deadzone(int deadzone);
+    int controller_deadzone() const;
+    std::vector<HostControllerOption> controller_options() const;
 
     // Live window/audio controls (hotkey + launcher-driven). All no-ops when
     // the window isn't open or this build has no SDL2.
@@ -113,6 +131,12 @@ public:
     int  volume() const;
     void set_fps_readout(bool on);      // presents-per-second in the title bar
     bool fps_readout() const;
+    void set_scanlines(bool on);
+    bool scanlines() const;
+    void set_linear_filter(bool on);
+    bool linear_filter() const;
+    void set_screen(const char* screen);
+    void set_audio_paused(bool paused);
 
     // Non-destructive live telemetry for the TCP debug surface. These report
     // the actual host output path (SDL callback bridge and presented frames),
@@ -162,6 +186,16 @@ public:
         bool     volume_up = false;
         bool     volume_down = false;
         bool     toggle_fps = false;
+        // Escape / guide opens the host settings overlay. Navigation is
+        // edge-triggered and accepts both keyboard and controller input.
+        bool     toggle_menu = false;
+        bool     menu_up = false;
+        bool     menu_down = false;
+        bool     menu_left = false;
+        bool     menu_right = false;
+        bool     menu_confirm = false;
+        bool     menu_cancel = false;
+        int      pressed_scancode = -1;
     };
     Events pump();
 

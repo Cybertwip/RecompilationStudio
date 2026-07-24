@@ -845,7 +845,8 @@ void CiPanel::submitBuild(const QSharedPointer<Job>& job) {
   const QJsonObject request{
     { QStringLiteral("repository"), job->repositoryPath },
     { QStringLiteral("commit"), job->commit },
-    { QStringLiteral("target"), QStringLiteral("psx-runtime") },
+    { QStringLiteral("target"), job->request.system == SystemKind::GameBoyAdvance
+        ? QStringLiteral("gba-runtime") : QStringLiteral("psx-runtime") },
     { QStringLiteral("platform"), job->builder.platform },
     { QStringLiteral("architecture"), job->builder.architecture },
     { QStringLiteral("configuration"), QStringLiteral("Release") },

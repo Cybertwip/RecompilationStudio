@@ -209,17 +209,40 @@ int main(int argc, char** argv) {
   check(gbaHleToml.contains(QStringLiteral("hle = true")) &&
           gbaHleToml.contains(QStringLiteral("hle_keep_intro = false")),
         QStringLiteral("noncanonical or absent GBA BIOS selects standalone HLE"));
+  const QString gbaPack = psxstudio::generatedGbaPackToml(
+    gbaRequest, QStringLiteral("Studio Test Advance"),
+    QString(64, QLatin1Char('a')), QString(64, QLatin1Char('b')));
+  check(gbaPack.contains(QStringLiteral("platforms = [\"macos\"]")) &&
+          gbaPack.contains(QStringLiteral("menu = true")) &&
+          gbaPack.contains(QStringLiteral("screen-sim = true")) &&
+          gbaPack.contains(QStringLiteral("interpreter = true")),
+        QStringLiteral("generated Rust GBA pack config enables the shipping host frontend"));
   const QString gbaCmake = psxstudio::generatedGbaProjectCMake(
     gbaRequest, gbaDescription, QStringLiteral("Studio Test Advance"),
     QStringLiteral("org.psxrecomp.gba.test"));
-  check(gbaCmake.contains(QStringLiteral("add_subdirectory(gba++")) &&
-          gbaCmake.contains(QStringLiteral("MACOSX_BUNDLE")) &&
-          gbaCmake.contains(QStringLiteral("TARGET_BUNDLE_CONTENT_DIR:psx-runtime")) &&
-          gbaCmake.contains(QStringLiteral("steganos-package/psx-runtime")) &&
-          gbaCmake.contains(QStringLiteral("GBARECOMP_WINDOW_TITLE=\"Studio Test Advance\"")) &&
-          gbaCmake.contains(QStringLiteral("$<$<CONFIG:Debug>:GBARECOMP_DEFAULT_DEBUG_PORT=4371>")) &&
-          gbaCmake.contains(QStringLiteral("add_executable(psx-runtime MACOSX_BUNDLE")),
-        QStringLiteral("generated GBA CMake follows Studio app and CI package structure"));
+  check(gbaCmake.contains(QStringLiteral("project(GeneratedGbaRustPackage NONE)")) &&
+          gbaCmake.contains(QStringLiteral("$ENV{HOME}/.cargo/bin")) &&
+          gbaCmake.contains(QStringLiteral("cargo build")) &&
+          gbaCmake.contains(QStringLiteral("gba-pack")) &&
+          gbaCmake.contains(QStringLiteral("add_custom_target(gba-runtime")) &&
+          gbaCmake.contains(QStringLiteral("steganos-package/gba-runtime")) &&
+          gbaCmake.contains(QStringLiteral("USES_TERMINAL")) &&
+          !gbaCmake.contains(QStringLiteral("add_executable(psx-runtime")),
+        QStringLiteral("generated GBA CMake drives the Rust runtime and target-specific CI package"));
+
+  const QByteArray savedCargoHome = qgetenv("CARGO_HOME");
+  const QString fakeCargoHome = QDir(temp.path()).filePath(QStringLiteral("cargo-home"));
+  const QString fakeCargo = QDir(fakeCargoHome).filePath(QStringLiteral("bin/cargo"));
+  check(psxstudio::writeText(fakeCargo, QStringLiteral("cargo"), error), error);
+#if !defined(Q_OS_WIN)
+  QFile::setPermissions(fakeCargo, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                   QFileDevice::ExeOwner);
+#endif
+  qputenv("CARGO_HOME", fakeCargoHome.toUtf8());
+  check(psxstudio::findExecutable(QStringLiteral("cargo")) == fakeCargo,
+        QStringLiteral("Cargo discovery searches CARGO_HOME for GUI-launched Studio"));
+  if (savedCargoHome.isNull()) qunsetenv("CARGO_HOME");
+  else qputenv("CARGO_HOME", savedCargoHome);
 
   const QString fakeGhidraHome = QDir(temp.path()).filePath(QStringLiteral("ghidra"));
   const QString fakeGhidraProperties =

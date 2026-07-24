@@ -666,6 +666,7 @@ mod tests {
         let mut cfg = InputConfig::default();
         cfg.device = Device::Gamepad;
         cfg.gamepad_name = "Pro Pad 2".into();
+        cfg.gamepad_id = "gip:045e:0b12:001:1-2".into();
         cfg.keys[Button::A.index()] = "Space".into();
         cfg.pads[Button::L.index()] = "LeftTrigger2".into();
         // stick-as-button binding survives the round-trip too
@@ -793,5 +794,12 @@ mod tests {
         assert_eq!(AvConfig::knob("auto"), None);
         assert_eq!(AvConfig::knob("0.5"), Some(0.5));
         assert_eq!(AvConfig::knob("nan"), None);
+        assert!(AvConfig::default().grid_enabled);
+        assert_eq!(AvConfig::default().resolved_grid_strength(0.65), 0.65);
+        let disabled = AvConfig {
+            grid_enabled: false,
+            ..AvConfig::default()
+        };
+        assert_eq!(disabled.resolved_grid_strength(0.65), 0.0);
     }
 }

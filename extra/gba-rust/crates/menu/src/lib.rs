@@ -519,6 +519,20 @@ mod tests {
     }
 
     #[test]
+    fn pixel_grid_is_an_explicit_toggle() {
+        let mut av = AvConfig::default();
+        let mut menu = Menu::new(true, true);
+        menu.selected = 5;
+        assert!(av.grid_enabled);
+        assert_eq!(
+            menu.handle(MenuInput::Right, &mut av),
+            Some(MenuAction::Changed(Changed::Video))
+        );
+        assert!(!av.grid_enabled);
+        assert_eq!(value_of(Row::Grid, &av).as_deref(), Some("OFF"));
+    }
+
+    #[test]
     fn resume_and_quit_actions() {
         let mut av = AvConfig::default();
         let mut menu = Menu::new(true, true);

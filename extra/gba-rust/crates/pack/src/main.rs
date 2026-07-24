@@ -480,6 +480,10 @@ next to the executable:\n\n  1. your cartridge image (.gba), sha256 {rom}\n\
         }
         println!("      C source: {n} translation units -> {}", src.display());
     }
+    if std::env::var_os("GBA_PACK_KEEP_WORK").is_none() {
+        std::fs::remove_dir_all(&work)
+            .map_err(|e| format!("could not remove {}: {e}", work.display()))?;
+    }
     println!();
     println!("package ready: {}", pkg.display());
     println!(

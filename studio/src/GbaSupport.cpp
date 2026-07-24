@@ -434,7 +434,7 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("set(_GBA_PACK_OUT \"${CMAKE_BINARY_DIR}/pack-out\")\n");
   cmake += QStringLiteral("set(_GBA_PACKAGE_NAME %1)\n").arg(cmakeQuoted(bundleName));
   cmake += QStringLiteral("if(WIN32)\n  set(_GBA_EXE_SUFFIX \".exe\")\nelse()\n  set(_GBA_EXE_SUFFIX \"\")\nendif()\n");
-  cmake += QStringLiteral("set(_GBA_ENV CARGO_TARGET_DIR=${_GBA_CARGO_TARGET} RECOMP_GAMEPAD_ROOT=${_GBA_GAMEPAD_ROOT})\n");
+  cmake += QStringLiteral("set(_GBA_ENV CARGO_TARGET_DIR=${_GBA_CARGO_TARGET} RECOMP_GAMEPAD_ROOT=${_GBA_GAMEPAD_ROOT} CARGO_INCREMENTAL=0 CARGO_PROFILE_DIST_LTO=thin CARGO_PROFILE_DIST_CODEGEN_UNITS=8)\n");
   cmake += requireGip
     ? QStringLiteral("list(APPEND _GBA_ENV RECOMP_REQUIRE_GIP=1)\n")
     : QStringLiteral("list(APPEND _GBA_ENV RECOMP_DISABLE_GIP=1)\n");
@@ -453,6 +453,8 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_GBA_PACK_OUT}/${_GBA_PACKAGE_NAME}\" \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${_GBA_STEGANOS_PACKAGE_DIR}/game.manifest.json\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\" \"${_GBA_STEGANOS_PACKAGE_DIR}/PSXRecomp-Proof.zip\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"Cleaning one-shot Cargo and translation intermediates\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_CARGO_TARGET}\" \"${_GBA_PACK_OUT}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E touch \"${_GBA_STAMP}\"\n");
   cmake += QStringLiteral("  DEPENDS ${_GBA_RUST_SOURCES} ${_GBA_GAMEPAD_SOURCES} \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\"\n");
   cmake += QStringLiteral("  WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"\n  COMMENT \"Building and packing Rust GBA runtime\"\n  USES_TERMINAL\n  VERBATIM)\n");

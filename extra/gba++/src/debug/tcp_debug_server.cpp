@@ -1089,6 +1089,19 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         out += "]}";
         return;
     }
+    if (contains("\"undefined_state\"")) {
+        char buf[256];
+        std::snprintf(
+            buf, sizeof(buf),
+            "{\"ok\":true,\"count\":%llu,\"pc\":\"0x%08X\","
+            "\"raw\":\"0x%08X\",\"cpsr\":\"0x%08X\",\"thumb\":%s}",
+            static_cast<unsigned long long>(g_runtime_undefined_entries),
+            g_runtime_undefined_last_pc, g_runtime_undefined_last_raw,
+            g_runtime_undefined_last_cpsr,
+            g_runtime_undefined_last_thumb ? "true" : "false");
+        out = buf;
+        return;
+    }
     if (contains("\"registers\"")) {
         if (!ctx.cpu && !ctx.recomp_cpu) {
             emit_error(out, "cpu unavailable");

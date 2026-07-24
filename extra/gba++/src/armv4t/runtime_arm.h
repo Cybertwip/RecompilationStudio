@@ -362,7 +362,12 @@ extern uint32_t g_runtime_break_pc;
 // recompiled and dispatched" and "Honest self-healing".
 
 void runtime_swi(uint32_t swi_imm);
-void runtime_undefined(uint32_t return_address);
+void runtime_undefined(uint32_t return_address, uint32_t raw);
+extern unsigned long long g_runtime_undefined_entries;
+extern uint32_t g_runtime_undefined_last_pc;
+extern uint32_t g_runtime_undefined_last_raw;
+extern uint32_t g_runtime_undefined_last_cpsr;
+extern uint32_t g_runtime_undefined_last_thumb;
 void runtime_irq(uint32_t return_address);
 int runtime_hle_irq_epilogue(void);
 

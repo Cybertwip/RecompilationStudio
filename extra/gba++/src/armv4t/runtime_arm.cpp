@@ -1167,8 +1167,21 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
 // behavior, not an interpreter implementation gap: bank LR/SPSR, enter UND
 // mode with IRQ masked and ARM state selected, then hand PC=0x04 back to the
 // central native/fallback dispatch loop.
-extern "C" void runtime_undefined(uint32_t return_address) {
+extern "C" unsigned long long g_runtime_undefined_entries = 0;
+extern "C" uint32_t g_runtime_undefined_last_pc = 0;
+extern "C" uint32_t g_runtime_undefined_last_raw = 0;
+extern "C" uint32_t g_runtime_undefined_last_cpsr = 0;
+extern "C" uint32_t g_runtime_undefined_last_thumb = 0;
+
+extern "C" void runtime_undefined(uint32_t return_address, uint32_t raw) {
     const uint32_t saved_cpsr = g_cpu.cpsr;
+    ++g_runtime_undefined_entries;
+    g_runtime_undefined_last_thumb =
+        (saved_cpsr & CPSR_T_BIT) != 0u ? 1u : 0u;
+    g_runtime_undefined_last_pc = return_address -
+        (g_runtime_undefined_last_thumb ? 2u : 4u);
+    g_runtime_undefined_last_raw = raw;
+    g_runtime_undefined_last_cpsr = saved_cpsr;
     const uint32_t new_cpsr =
         (saved_cpsr & ~(0x1Fu | CPSR_T_BIT)) | 0x1Bu | CPSR_I_BIT;
     const unsigned old_bank = mode_to_bank(saved_cpsr);

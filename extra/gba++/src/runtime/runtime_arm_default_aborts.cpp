@@ -600,7 +600,7 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
             // decoder/runtime gap. Enter UND mode and continue dispatch at the
             // 0x04 vector. Only NotImplemented remains fatal.
             gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
-            runtime_undefined(pc + (was_thumb ? 2u : 4u));
+            runtime_undefined(pc + (was_thumb ? 2u : 4u), insn.raw);
             runtime_tick(cyc);
             gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
             continue;
@@ -824,7 +824,7 @@ extern "C" void runtime_force_interp_step(void) {
 
     if (r == armv4t::Interpreter::Result::Undefined) {
         gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
-        runtime_undefined(pc + (cpu.thumb ? 2u : 4u));
+        runtime_undefined(pc + (cpu.thumb ? 2u : 4u), insn.raw);
         runtime_tick(cyc);
         bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
         return;

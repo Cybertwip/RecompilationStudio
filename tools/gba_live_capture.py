@@ -250,6 +250,7 @@ def main() -> int:
                 sample["presentation_state"] = client.call(cmd="presentation_state")
                 sample["ppu_state"] = client.call(cmd="ppu_state")
                 sample["irq_tail"] = client.call(cmd="irq_cap", count=16)
+                sample["undefined_state"] = client.call(cmd="undefined_state")
 
                 pc = parse_pc(sample["run_status"].get("pc"))
                 frame_now = sample["run_status"].get("frame")

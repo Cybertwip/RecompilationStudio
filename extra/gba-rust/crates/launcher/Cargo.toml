@@ -32,6 +32,7 @@ eframe = "0.34.3"
 flate2 = "1"  # PNG IDAT compression for the gba-icon master generator
 gilrs = "0.11.2"
 input-config = { version = "0.2.0", path = "../input-config" }
+native-gamepad = { version = "0.2.0", path = "../native-gamepad" }
 screen = { version = "0.2.0", path = "../screen", default-features = false }
 sha2 = "0.11.0"
 

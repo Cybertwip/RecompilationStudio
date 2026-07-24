@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 pub struct Manifest {
     pub name: String,
     pub rom_sha256: String,
-    pub bios_sha256: String,
+    pub bios_sha256: Option<String>,
+    pub skip_bios: bool,
     pub interpreter: bool,
     /// Whether the press-Escape in-game menu is available. Default true;
     /// a package may pin it off, in which case Escape quits as it did
@@ -75,16 +76,36 @@ fn parse(path: &Path, dir: PathBuf) -> Result<Manifest, String> {
             .ok_or_else(|| format!("{}: missing {}.{}", path.display(), keys[0], keys[1]))
     };
     let rom_sha256 = s(["image", "rom-sha256"])?.to_lowercase();
-    let bios_sha256 = s(["image", "bios-sha256"])?.to_lowercase();
-    for sha in [&rom_sha256, &bios_sha256] {
-        if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(format!("{}: malformed sha pin", path.display()));
-        }
+    let bios_sha256 = doc
+        .get("image")
+        .and_then(|t| t.get("bios-sha256"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_lowercase);
+    if rom_sha256.len() != 64 || !rom_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("{}: malformed ROM sha pin", path.display()));
+    }
+    if bios_sha256
+        .as_ref()
+        .is_some_and(|sha| sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(format!("{}: malformed BIOS sha pin", path.display()));
+    }
+    let skip_bios = doc
+        .get("runtime")
+        .and_then(|t| t.get("skip-bios"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true);
+    if !skip_bios && bios_sha256.is_none() {
+        return Err(format!(
+            "{}: image.bios-sha256 required when runtime.skip-bios = false",
+            path.display()
+        ));
     }
     Ok(Manifest {
         name: s(["package", "name"]).unwrap_or_else(|_| "recomp".into()),
         rom_sha256,
         bios_sha256,
+        skip_bios,
         interpreter: doc
             .get("runtime")
             .and_then(|t| t.get("interpreter"))

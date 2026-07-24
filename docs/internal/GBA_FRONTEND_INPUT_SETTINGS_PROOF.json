@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "artifact": "gba_frontend_input_settings",
+  "date": "2026-07-23",
+  "scope": [
+    "Rust GBA runtime and launcher",
+    "C++ GBA host frontend",
+    "PSX/GBA reusable macOS direct-USB gamepad component",
+    "Studio CMake-driven Rust GBA packaging"
+  ],
+  "defaults": {
+    "bios": "skipped via HLE boot path",
+    "pixel_grid_scanlines": false,
+    "controller": "automatic gamepad with keyboard merge",
+    "studio_package": "thin; native translation deferred to first-launch user cache"
+  },
+  "manifest": {
+    "shared_component": "lib/recomp_gamepad",
+    "rust_binding": "extra/gba-rust/crates/native-gamepad",
+    "rust_settings": ["audio", "screen model", "temporal response", "pixel grid", "gamut", "vsync"],
+    "cxx_settings": ["scanlines", "filtering", "screen model", "fullscreen", "volume", "controller", "deadzone", "keyboard bindings"],
+    "studio_target": "gba-runtime",
+    "studio_cargo_cache": "shared per-user cache; no per-title Cargo rebuild",
+    "package_data_policy": "ROM is hash-pinned and not copied; BIOS is skipped by default"
+  },
+  "verification": {
+    "studio_ctest": {"passed": 2, "failed": 0},
+    "cxx_frontend_ctest": {"passed": 4, "failed": 0},
+    "cxx_runtime_library": "gbarecomp_runtime built successfully with SDL identity and static GIP libraries",
+    "rust_cargo_check": "input-config, menu, recomp, gba-pack passed",
+    "rust_unit_tests": {"input_config": 8, "menu": 7, "native_gamepad": 1, "failed": 0},
+    "rust_gip_symbols": [
+      "_psx_gip_gamepad_open",
+      "_psx_gip_gamepad_get_state",
+      "_psx_gip_gamepad_close"
+    ],
+    "rust_gip_dynamic_libusb_dependency": false,
+    "thin_package_smoke": "passed; package contained recomp.pack.toml and gamedb.sqlite, no BIOS or translation work directory"
+  }
+}

@@ -443,7 +443,7 @@ impl Default for AvConfig {
             screen_darken: "auto".into(),
             response: "smart".into(),
             response_keep: "auto".into(),
-            grid_enabled: true,
+            grid_enabled: false,
             grid: "auto".into(),
             display_gamut: "auto".into(),
             video_vsync: false,
@@ -794,12 +794,12 @@ mod tests {
         assert_eq!(AvConfig::knob("auto"), None);
         assert_eq!(AvConfig::knob("0.5"), Some(0.5));
         assert_eq!(AvConfig::knob("nan"), None);
-        assert!(AvConfig::default().grid_enabled);
-        assert_eq!(AvConfig::default().resolved_grid_strength(0.65), 0.65);
-        let disabled = AvConfig {
-            grid_enabled: false,
+        assert!(!AvConfig::default().grid_enabled);
+        assert_eq!(AvConfig::default().resolved_grid_strength(0.65), 0.0);
+        let enabled = AvConfig {
+            grid_enabled: true,
             ..AvConfig::default()
         };
-        assert_eq!(disabled.resolved_grid_strength(0.65), 0.0);
+        assert_eq!(enabled.resolved_grid_strength(0.65), 0.65);
     }
 }

@@ -3312,8 +3312,6 @@ void PipelineWorker::run(PipelineRequest request) {
 }
 
 void PipelineWorker::runGba(const PipelineRequest& request) {
-  constexpr auto kCanonicalGbaBiosSha256 = "fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570";
-  constexpr auto kZeroGbaBiosSha256 = "4fe7b59af6de3b665b67788cc2f99892ab827efae3a467342b3bb4e3bc8e5bfe";
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
@@ -3356,9 +3354,9 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     return;
   }
   if (!game.warning.isEmpty()) emit logLine(QStringLiteral("Warning: %1").arg(game.warning));
-  if (request.biosPath.trimmed().isEmpty() ||
+  if (!request.biosPath.trimmed().isEmpty() &&
       QFileInfo(request.biosPath).size() != 16 * 1024) {
-    fail(QStringLiteral("The Rust GBA packager requires a real 16,384-byte GBA BIOS image."));
+    fail(QStringLiteral("A supplied GBA BIOS must be exactly 16,384 bytes. Leave it blank to use the default HLE boot path."));
     return;
   }
   const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
@@ -3417,26 +3415,19 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const QString romSha1 = sha1File(request.romPath, error);
   const QString romSha256 = sha256File(request.romPath, error);
   const quint32 romCrc32 = crc32File(request.romPath, error);
-  const QString biosSha1 = sha1File(request.biosPath, error);
-  const QString biosSha256 = sha256File(request.biosPath, error);
-  const quint32 biosCrc32 = crc32File(request.biosPath, error);
-  if (romSha1.isEmpty() || romSha256.isEmpty() || biosSha1.isEmpty() || biosSha256.isEmpty()) {
+  const bool biosProvided = !request.biosPath.trimmed().isEmpty();
+  const QString biosSha1 = biosProvided ? sha1File(request.biosPath, error) : QString();
+  const QString biosSha256 = biosProvided ? sha256File(request.biosPath, error) : QString();
+  const quint32 biosCrc32 = biosProvided ? crc32File(request.biosPath, error) : 0u;
+  if (romSha1.isEmpty() || romSha256.isEmpty() ||
+      (biosProvided && (biosSha1.isEmpty() || biosSha256.isEmpty()))) {
     fail(error.isEmpty() ? QStringLiteral("The GBA inputs could not be hashed.") : error);
-    return;
-  }
-  if (biosSha256.compare(QString::fromLatin1(kCanonicalGbaBiosSha256),
-                         Qt::CaseInsensitive) != 0) {
-    const bool zeroImage = biosSha256.compare(QString::fromLatin1(kZeroGbaBiosSha256),
-                                              Qt::CaseInsensitive) == 0;
-    fail(zeroImage
-      ? QStringLiteral("The selected GBA BIOS is the old all-zero placeholder. Select the canonical gba_bios.bin dump (SHA-256 fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570).")
-      : QStringLiteral("The selected GBA BIOS is not the canonical dump. Expected SHA-256 fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570, got %1.").arg(biosSha256));
     return;
   }
   emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · entry %4")
     .arg(game.title, game.gameCode).arg(game.romSize)
     .arg(QStringLiteral("0x%1").arg(game.entryTarget, 8, 16, QLatin1Char('0'))));
-  emit logLine(QStringLiteral("GBA BIOS: 16 KiB · SHA-256 %1").arg(biosSha256));
+  emit logLine(QStringLiteral("GBA BIOS: skipped by default (HLE boot path)"));
   emit logLine(QStringLiteral("Runtime: Rust workspace · CMake-orchestrated Cargo/pack target"));
 
   nextStage(QStringLiteral("Prepare Rust GBA source workspace"));
@@ -3475,7 +3466,6 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   if (!copySourceDirectory(rustRoot, QDir(projectDir).filePath(QStringLiteral("gba-rust")), error) ||
       !copySourceDirectory(gamepadRoot, QDir(projectDir).filePath(QStringLiteral("recomp_gamepad")), error) ||
       !copyFileReplacing(request.romPath, QDir(inputsDir).filePath(QStringLiteral("game.gba")), error) ||
-      !copyFileReplacing(request.biosPath, QDir(inputsDir).filePath(QStringLiteral("gba_bios.bin")), error) ||
       !createPngIcon(iconSourcePath, QDir(projectDir).filePath(QStringLiteral("AppIcon.png")), error)) {
     fail(error);
     return;
@@ -3484,7 +3474,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     game.gameCode.isEmpty() ? QStringLiteral("gba") : game.gameCode, request.windowTitle);
   Q_UNUSED(bundleId);
   if (!writeText(QDir(projectDir).filePath(QStringLiteral("pack.toml")),
-                 generatedGbaPackToml(request, bundleName, romSha256, biosSha256), error) ||
+                 generatedGbaPackToml(request, bundleName, romSha256, QString()), error) ||
       !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
                  gameManifestForRequest(request), error) ||
       !writeText(QDir(projectDir).filePath(QStringLiteral(".gitignore")),
@@ -3507,14 +3497,16 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("rom_sha1"), romSha1 },
     { QStringLiteral("rom_sha256"), romSha256 },
     { QStringLiteral("rom_crc32"), QStringLiteral("%1").arg(romCrc32, 8, 16, QLatin1Char('0')) },
-    { QStringLiteral("bios_size"), QString::number(16 * 1024) },
+    { QStringLiteral("bios_size"), biosProvided ? QString::number(16 * 1024) : QStringLiteral("0") },
     { QStringLiteral("bios_sha1"), biosSha1 },
     { QStringLiteral("bios_sha256"), biosSha256 },
     { QStringLiteral("bios_crc32"), QStringLiteral("%1").arg(biosCrc32, 8, 16, QLatin1Char('0')) },
     { QStringLiteral("menu"), true },
     { QStringLiteral("controller_default"), QStringLiteral("automatic gamepad with keyboard merge") },
     { QStringLiteral("scanlines_optional"), true },
+    { QStringLiteral("scanlines_default"), false },
     { QStringLiteral("macos_gip_requested"), macosTarget && request.macosGipGamepad },
+    { QStringLiteral("bios_mode"), QStringLiteral("skipped_hle") },
     { QStringLiteral("package_contains_rom_or_bios"), false },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_inputs.json")), inputProof, error) ||
@@ -3527,9 +3519,10 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const QString readme = QStringLiteral(
     "# %1 — Rust GBARecomp Studio source export\n\n"
     "Generated by PSXRecomp Studio for **%2**. CMake is the CI entrypoint and "
-    "orchestrates the locked Cargo workspace, native translation, and gba-pack "
-    "assembly. The selected ROM and BIOS are private build inputs and are not "
-    "copied into the final package.\n\n"
+    "orchestrates the locked Cargo workspace and gba-pack assembly. The selected "
+    "ROM is a private hash input and is not copied into the final package. BIOS "
+    "execution is skipped by default; native translation is created in the user "
+    "cache on first launch.\n\n"
     "## Build\n\n```sh\ncmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
     "cmake --build build --target gba-runtime --parallel\n``\n\n"
     "The CI package is emitted under "
@@ -3670,7 +3663,13 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   }
 
   nextStage(QStringLiteral("Build Rust GBA package through CMake"));
-  QStringList configure{ QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir };
+  QString cargoCache = QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+    .filePath(QStringLiteral("dependencies/gba-rust-cargo-target"));
+  if (!QDir().mkpath(cargoCache))
+    cargoCache = QDir(workspace).filePath(QStringLiteral("cargo-target"));
+  QStringList configure{ QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
+                         QStringLiteral("-DGBA_CARGO_TARGET_DIR=%1").arg(cargoCache),
+                         QStringLiteral("-DGBA_CLEAN_CARGO_TARGET=OFF") };
   if (hostTargetPlatform() == TargetPlatform::Windows) {
     configure << QStringLiteral("-G") << QStringLiteral("Visual Studio 17 2022")
               << QStringLiteral("-A") << QStringLiteral("x64");
@@ -3681,23 +3680,23 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   QStringList build{ QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
                      QStringLiteral("gba-runtime"), QStringLiteral("--parallel"),
                      QString::number(std::max(1, QThread::idealThreadCount())) };
-  QStringList install{ QStringLiteral("--install"), buildDir,
-                       QStringLiteral("--prefix"), stageDir };
-  if (hostTargetPlatform() == TargetPlatform::Windows) {
+  if (hostTargetPlatform() == TargetPlatform::Windows)
     build << QStringLiteral("--config") << QStringLiteral("Release");
-    install << QStringLiteral("--config") << QStringLiteral("Release");
-  }
   if (!runCommand(cmake, configure, workspace,
                   QStringLiteral("cmake -S <Rust GBA project> -B <build>"), 10 * 60 * 1000) ||
       !runCommand(cmake, build, workspace,
                   QStringLiteral("cmake --build <build> --target gba-runtime"),
-                  4 * 60 * 60 * 1000) ||
-      !runCommand(cmake, install, workspace,
-                  QStringLiteral("cmake --install <build> --prefix <stage>"),
-                  10 * 60 * 1000)) {
+                  4 * 60 * 60 * 1000)) {
     if (cancellationRequested()) cancelledOut();
     else fail(QStringLiteral("The Rust %1 GBA package could not be built and staged.")
                 .arg(targetPlatformDisplayName(request.targetPlatform)));
+    return;
+  }
+  const QString builtPackage = QDir(buildDir).filePath(
+    QStringLiteral("steganos-package/gba-runtime/Release"));
+  QDir(stageDir).removeRecursively();
+  if (!copyDirectoryTree(builtPackage, stageDir, error)) {
+    fail(error.isEmpty() ? QStringLiteral("The built Rust GBA package could not be staged.") : error);
     return;
   }
 
@@ -3760,6 +3759,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("pre_sign_executable_sha256"), preSignExecutableHash },
     { QStringLiteral("macos_gip_compiled"), macosTarget && request.macosGipGamepad },
     { QStringLiteral("scanlines_optional"), true },
+    { QStringLiteral("scanlines_default"), false },
     { QStringLiteral("menu"), true },
     { QStringLiteral("package_contains_rom_or_bios"), false },
     { QStringLiteral("signing_mode"), signingRequested ? QStringLiteral("pfx")

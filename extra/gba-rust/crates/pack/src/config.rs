@@ -73,7 +73,8 @@ pub struct Image {
     pub rom_sha256: String,
     /// SHA-256 of the BIOS image the package boots with. Same deal:
     /// end-user supplied, hash-gated, never distributed.
-    pub bios_sha256: String,
+    #[serde(default)]
+    pub bios_sha256: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -100,6 +101,11 @@ pub struct Runtime {
     /// Sound-engine HLE selection. `auto` = runtime discovery as in
     /// `play`; pinning skips discovery for a known title.
     pub engine_hle: EngineHle,
+    /// Skip the real BIOS and use the verified HLE boot/SWI path. This is the
+    /// default player experience; explicit release packs can opt back into a
+    /// pinned BIOS by setting this false and supplying image.bios-sha256.
+    #[serde(default = "default_true")]
+    pub skip_bios: bool,
     /// `false` = full recomp: the packaged binary ships with no
     /// interpreter fallback — a dispatch miss halts loudly. The build
     /// gates this on a zero-fallback soak.
@@ -118,6 +124,7 @@ impl Default for Runtime {
             enhanced_audio: true,
             screen_sim: true,
             engine_hle: EngineHle::Auto,
+            skip_bios: true,
             interpreter: true,
         }
     }
@@ -194,11 +201,15 @@ impl PackConfig {
         if !valid_sha(&cfg.image.rom_sha256) {
             return Err("image.rom-sha256 must be 64 hex digits".into());
         }
-        if !valid_sha(&cfg.image.bios_sha256) {
-            return Err("image.bios-sha256 must be 64 hex digits".into());
+        if let Some(sha) = cfg.image.bios_sha256.as_mut() {
+            if !valid_sha(sha) {
+                return Err("image.bios-sha256 must be 64 hex digits".into());
+            }
+            sha.make_ascii_lowercase();
+        } else if !cfg.runtime.skip_bios {
+            return Err("image.bios-sha256 is required when runtime.skip-bios = false".into());
         }
         cfg.image.rom_sha256.make_ascii_lowercase();
-        cfg.image.bios_sha256.make_ascii_lowercase();
         if cfg.package.platforms.is_empty() {
             cfg.package.platforms = default_platforms();
         }
@@ -266,7 +277,7 @@ mod tests {
         );
         let c = PackConfig::load(&p).unwrap();
         assert_eq!(c.package.platforms.len(), 3);
-        assert_eq!(c.image.bios_sha256, "b".repeat(64)); // normalized
+        assert_eq!(c.image.bios_sha256, Some("b".repeat(64))); // normalized
         assert!(c.runtime.menu && c.runtime.enhanced_audio && c.runtime.screen_sim);
         assert_eq!(c.runtime.engine_hle, EngineHle::Auto);
         assert!(c.output.binary && !c.output.c_source);

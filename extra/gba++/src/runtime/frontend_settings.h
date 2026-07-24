@@ -6,7 +6,7 @@
 namespace gbarecomp::runtime {
 
 struct FrontendSettings {
-    bool scanlines = true;
+    bool scanlines = false;
     bool linear_filter = false;
     std::string screen = "frontlit";
     int fullscreen = 0;          // 0 windowed, 1 borderless, 2 exclusive

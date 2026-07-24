@@ -32,13 +32,14 @@ open-licensed default fonts.
   so bindings apply without re-launching the frontend. Modifier keys
   cannot be captured (egui reports them as modifiers, not keys); the
   default Select=RightShift survives unless rebound.
-- **A/V** — placeholder (hazard stripes): scaling, filters, and audio mix
-  land here.
+- **AUDIO / VIDEO** — persistent enhanced-audio, panel simulation, temporal
+  response, output gamut, vsync, and an explicit pixel-grid/scanline switch.
+  The grid is off by default; enabling it restores the remembered strength.
 
 ## Input config
 
 `<config dir>/gba-recomp/input.cfg` — plain `key = value` lines:
-`device`, `gamepad_name`, `dpad_source`, `stick_deadzone`, `key.<button>`,
+`device`, `gamepad_name`, `gamepad_id`, `dpad_source`, `stick_deadzone`, `key.<button>`,
 `pad.<button>` (see the `input-config` crate). Key names are a canonical
 set mapped to egui keys on the launcher side and minifb keys on the play
 side; pad names are gilrs button names or stick-direction tokens
@@ -47,7 +48,9 @@ side; pad names are gilrs button names or stick-direction tokens
 float clamped to `[0.05, 0.95]` (default `0.50`). Unknown values fall
 back to defaults per-key. A vendored community controller-mapping
 database (`assets/gamecontrollerdb.txt`, embedded into both binaries) is
-layered over gilrs's built-in mappings for the widest pad compatibility.
+layered over gilrs's built-in mappings for the widest pad compatibility. On
+macOS, wired Xbox/PDP/PowerA devices that gilrs cannot expose are supplied by the
+shared statically linked `recomp_gamepad` GIP backend.
 
 ## Platform integration
 

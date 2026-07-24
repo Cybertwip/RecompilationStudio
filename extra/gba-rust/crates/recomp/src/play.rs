@@ -1112,8 +1112,16 @@ pub fn cmd_play(args: &[String]) -> Result<(), String> {
     // > the launcher-installed image via the shared resolution), BIOS HLE
     // otherwise. An explicit --bios that fails to load is a hard error; a
     // discovered image that fails is loud but non-fatal.
-    let bios: Option<Vec<u8>> = if no_bios {
-        eprintln!("boot: BIOS HLE (--no-bios)");
+    let package_skips_bios = manifest.as_ref().is_some_and(|m| m.skip_bios);
+    let bios: Option<Vec<u8>> = if no_bios || package_skips_bios {
+        eprintln!(
+            "{}",
+            if package_skips_bios {
+                "boot: BIOS HLE (package default)"
+            } else {
+                "boot: BIOS HLE (--no-bios)"
+            }
+        );
         None
     } else if let Some(p) = &bios_arg {
         let b = load_bios_file(p)?;
@@ -1140,23 +1148,26 @@ pub fn cmd_play(args: &[String]) -> Result<(), String> {
             .iter()
             .map(|x| format!("{x:02x}"))
             .collect::<String>();
-        if let Some(m) = &manifest {
-            if sha != m.bios_sha256 {
+        if let Some(want) = manifest.as_ref().and_then(|m| m.bios_sha256.as_ref()) {
+            if sha != *want {
                 return Err(format!(
                     "this package requires the pinned BIOS (sha256 {}…); the installed \
 image hashes to {}…",
-                    &m.bios_sha256[..16],
+                    &want[..16],
                     &sha[..16]
                 ));
             }
         } else if sha != input_config::BIOS_SHA256 {
             eprintln!("bios: image is not the canonical dump (sha256 {sha}) — trying it as-is");
         }
-    } else if let Some(m) = &manifest {
+    } else if let Some((m, want)) = manifest
+        .as_ref()
+        .and_then(|m| m.bios_sha256.as_ref().map(|want| (m, want)))
+    {
         return Err(format!(
             "this package requires a BIOS image (sha256 {}…) and none is installed.\n\
 Place your own dump as gba_bios.bin next to the executable:\n  {}",
-            &m.bios_sha256[..16],
+            &want[..16],
             m.dir.display()
         ));
     }

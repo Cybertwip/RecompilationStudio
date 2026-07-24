@@ -523,13 +523,13 @@ mod tests {
         let mut av = AvConfig::default();
         let mut menu = Menu::new(true, true);
         menu.selected = 5;
-        assert!(av.grid_enabled);
+        assert!(!av.grid_enabled);
         assert_eq!(
             menu.handle(MenuInput::Right, &mut av),
             Some(MenuAction::Changed(Changed::Video))
         );
-        assert!(!av.grid_enabled);
-        assert_eq!(value_of(Row::Grid, &av).as_deref(), Some("OFF"));
+        assert!(av.grid_enabled);
+        assert_eq!(value_of(Row::Grid, &av).as_deref(), Some("ON"));
     }
 
     #[test]

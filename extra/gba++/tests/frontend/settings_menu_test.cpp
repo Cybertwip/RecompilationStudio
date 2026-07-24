@@ -19,7 +19,7 @@ int main() {
     menu.open();
     menu.handle(SettingsMenuInput::Down, settings, controllers);
     auto result = menu.handle(SettingsMenuInput::Confirm, settings, controllers);
-    if (settings.scanlines || !result.settings_changed) return 1;
+    if (!settings.scanlines || !result.settings_changed) return 1;
 
     for (int i = 0; i < 5; ++i) menu.handle(SettingsMenuInput::Down, settings, controllers);
     result = menu.handle(SettingsMenuInput::Right, settings, controllers);

@@ -14,23 +14,22 @@ selected output directory receives only the final platform package.
 ## Game Boy Advance flow
 
 Choose **Game Boy Advance** in the System selector, then provide one `.gba`
-cartridge image. A canonical 16 KiB GBA BIOS is optional: canonical images use
-LLE; a blank or noncanonical selection uses the ported standalone BIOS HLE path.
-GBA builds are self-contained and
-do not invoke Ghidra. Batch mode scans recursively for `.gba` files. Studio
-builds the isolated C++ platform core under `extra/gba++`, emits sharded
-ARM/THUMB C++, and reuses the same platform, source/build, ZIP, signing, CI,
-proof, and delivery controls as PlayStation exports.
+cartridge image. Studio packages the Rust runtime under `extra/gba-rust`; BIOS
+execution is skipped through the HLE boot path by default, and the LCD pixel
+grid/scanline filter is off by default. Both remain explicit runtime choices.
+GBA builds do not invoke Ghidra. Batch mode scans recursively for `.gba` files.
 
-Studio personal exports mirror the existing PlayStation package policy: the
-selected ROM and BIOS are embedded in the generated app/source repository and
-hash-pinned in `game.toml`. Saves and runtime caches are redirected to a
-per-user writable data directory. Do not redistribute generated packages with
-copyrighted input data unless you have permission.
+CMake remains the CI entrypoint (`gba-runtime`). It orchestrates the locked Cargo
+workspace and `gba-pack`, emits a thin package, and uses a shared Studio Cargo
+cache so the Rust runtime is compiled once rather than once per title. Native
+translation is created in the per-user cache on first launch using the packaged
+function database; Studio does not generate a multi-gigabyte translation work
+tree during export. The selected ROM is hash-pinned but not copied into the final
+package.
 
-The GBA C++ core is licensed under PolyForm Noncommercial 1.0.0, with ported
-JRickey components retaining their MIT OR Apache-2.0 terms. License and
-attribution files are embedded in every GBA build.
+The GBA runtime provides automatic keyboard/gamepad input, the shared static
+macOS Xbox/PDP GIP backend, keyboard rebinding, an in-game settings menu, and
+persistent audio/video/controller settings.
 
 ## Required inputs
 
@@ -242,9 +241,10 @@ seeds/ghidra_funcs.txt
 ### macOS wired Xbox/PDP controller export
 
 **Enable wired Xbox/PDP controllers on macOS** is enabled by default. Studio
-requires the static libusb archive, passes `PSX_MACOS_GIP_GAMEPAD=ON` explicitly
-to the generated project, and rejects the export unless the finished executable
-contains the native GIP symbols and has no dynamic libusb dependency. Player 1
+requires the static libusb archive and rejects an export unless the finished
+PSX or GBA executable contains the native GIP symbols and has no dynamic libusb
+dependency. The same `lib/recomp_gamepad` implementation is linked by CMake and
+by the Rust `native-gamepad` FFI crate. Player 1
 uses `p1_device = "auto"`; the runtime loads that packaged default before
 per-install `settings.toml` overrides, so SDL controllers remain preferred and
 the direct USB backend activates when SDL cannot expose the wired device. USB

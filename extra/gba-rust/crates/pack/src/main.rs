@@ -165,21 +165,33 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     }
     let cfg = PackConfig::load(Path::new(&cfg_path.ok_or(USAGE)?))?;
     let rom = rom.ok_or("build needs --rom (the packager's own dump)")?;
-    let bios = bios.ok_or("build needs --bios (the packager's own dump)")?;
     let rom = std::fs::canonicalize(&rom).map_err(|e| format!("{rom}: {e}"))?;
-    let bios = std::fs::canonicalize(&bios).map_err(|e| format!("{bios}: {e}"))?;
-    for (p, want, what) in [
-        (&rom, &cfg.image.rom_sha256, "image.rom-sha256"),
-        (&bios, &cfg.image.bios_sha256, "image.bios-sha256"),
-    ] {
-        let got = sha256_file(p.to_str().ok_or("non-UTF8 path")?)?;
-        if got != *want {
+    let got_rom = sha256_file(rom.to_str().ok_or("non-UTF8 path")?)?;
+    if got_rom != cfg.image.rom_sha256 {
+        return Err(format!(
+            "{}: sha256 {got_rom} does not match image.rom-sha256",
+            rom.display()
+        ));
+    }
+    let bios = if cfg.runtime.skip_bios {
+        None
+    } else {
+        let path = bios.ok_or("build needs --bios when runtime.skip-bios = false")?;
+        let path = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
+        let got = sha256_file(path.to_str().ok_or("non-UTF8 path")?)?;
+        let want = cfg
+            .image
+            .bios_sha256
+            .as_deref()
+            .ok_or("image.bios-sha256 is required when runtime.skip-bios = false")?;
+        if got != want {
             return Err(format!(
-                "{}: sha256 {got} does not match {what}",
-                p.display()
+                "{}: sha256 {got} does not match image.bios-sha256",
+                path.display()
             ));
         }
-    }
+        Some(path)
+    };
     if let Some(f) = &cfg.labels.file {
         if !f.is_file() {
             return Err(format!("labels.file not found: {}", f.display()));
@@ -213,7 +225,8 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         .and_then(|s| s.to_str())
         .ok_or("bad ROM name")?
         .to_string();
-    let translation = work.join(format!("out/{stem}-bios.{LIB_EXT}"));
+    let suffix = if bios.is_some() { "-bios" } else { "" };
+    let translation = work.join(format!("out/{stem}{suffix}.{LIB_EXT}"));
     if !defer_translation {
         let recomp = find_recomp(recomp_flag.as_deref())?;
         std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
@@ -223,7 +236,10 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         // would have no native blocks for region 0 and a full recomp
         // would trap at the reset vector.
         let rom_str = rom.to_str().ok_or("non-UTF8 rom path")?;
-        let bios_str = bios.to_str().ok_or("non-UTF8 bios path")?;
+        let bios_str = bios
+            .as_ref()
+            .map(|p| p.to_str().ok_or("non-UTF8 bios path"))
+            .transpose()?;
         // Full recomp builds seed every decode point inside every bounded
         // function (the mapper's `end` records): computed jump-table
         // targets the soak never reaches still get native blocks. The
@@ -271,7 +287,11 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         };
         // --ram is always on: it profiles an interpreter run to translate
         // RAM-resident code the static map can't address (see --no-soak above).
-        let mut build_args: Vec<&str> = vec!["build", rom_str, "--ram", "--bios", bios_str];
+        let mut build_args: Vec<&str> = vec!["build", rom_str, "--ram"];
+        if let Some(bios_str) = bios_str {
+            build_args.push("--bios");
+            build_args.push(bios_str);
+        }
         if let Some(l) = &labels_abs {
             build_args.push("--labels");
             build_args.push(l);
@@ -280,9 +300,7 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
             build_args.push(db);
         }
 
-        println!(
-            "[1/3] translating (recomp build --ram --bios; exhaustive seeding from the map)..."
-        );
+        println!("[1/3] translating (recomp build --ram; exhaustive seeding from the map)...");
         if !build_envs.is_empty() {
             println!(
                 "      build env: {}",
@@ -306,7 +324,11 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         } else {
             println!("[2/3] soak: {soak} frames with fallback tracing...");
             let frames = soak.to_string();
-            let soak_args = ["runc", rom_str, "--frames", &frames, "--bios", bios_str];
+            let mut soak_args = vec!["runc", rom_str, "--frames", frames.as_str()];
+            if let Some(bios_str) = bios_str {
+                soak_args.push("--bios");
+                soak_args.push(bios_str);
+            }
             let mut steps = fallback_steps(&recomp_run(
                 &recomp,
                 &work,
@@ -318,20 +340,9 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
                 println!(
                     "      full recomp requires zero — recording the gaps and rebuilding once..."
                 );
-                recomp_run(
-                    &recomp,
-                    &work,
-                    &[
-                        "runc",
-                        rom_str,
-                        "--frames",
-                        &frames,
-                        "--bios",
-                        bios_str,
-                        "--record-labels",
-                    ],
-                    &[],
-                )?;
+                let mut record_args = soak_args.clone();
+                record_args.push("--record-labels");
+                recomp_run(&recomp, &work, &record_args, &[])?;
                 recomp_run(&recomp, &work, &build_args, keep_c)?;
                 steps = fallback_steps(&recomp_run(
                     &recomp,
@@ -412,15 +423,22 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     } else {
         format!("\n[translation]\nfile = \"{translation_name}\"\n")
     };
+    let bios_pin = cfg
+        .image
+        .bios_sha256
+        .as_ref()
+        .map(|sha| format!("bios-sha256 = \"{sha}\"\n"))
+        .unwrap_or_default();
     std::fs::write(
         data_dir.join("recomp.pack.toml"),
         format!(
             "# Generated by gba-pack — pins only, no image content.\n\
-[package]\nname = \"{}\"\n\n[image]\nrom-sha256 = \"{}\"\nbios-sha256 = \"{}\"\n\n\
-[runtime]\ninterpreter = {}\nmenu = {}\n{}{}",
+[package]\nname = \"{}\"\n\n[image]\nrom-sha256 = \"{}\"\n{}\n\
+[runtime]\nskip-bios = {}\ninterpreter = {}\nmenu = {}\n{}{}",
             name,
             cfg.image.rom_sha256,
-            cfg.image.bios_sha256,
+            bios_pin,
+            cfg.runtime.skip_bios,
             cfg.runtime.interpreter,
             cfg.runtime.menu,
             engine_pin,
@@ -431,31 +449,35 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
 
     // Per-platform icon embedding + desktop integration, and a top-level
     // README that explains where the end user drops their own dumps.
+    let bios_instruction = if cfg.runtime.skip_bios {
+        String::new()
+    } else {
+        format!(
+            "  2. your BIOS image as gba_bios.bin, sha256 {}\n",
+            cfg.image.bios_sha256.as_deref().unwrap_or("<missing>")
+        )
+    };
     let readme = match host {
-        // Inside an .app the binary is buried; the user drops dumps into
-        // the bundle's MacOS dir (or the shared config dir), so the
-        // top-level README spells out the path.
         Platform::Macos => format!(
             "{name} — a statically recompiled game (macOS .app bundle).\n\n\
-This package contains NO game or BIOS data. To play, place your own dumps\n\
+This package contains NO game data. To play, place your own cartridge dump\n\
 inside the bundle next to the executable, or in your config directory:\n\n\
   {name}.app/Contents/MacOS/   (or ~/Library/Application Support/gba-recomp/)\n\n\
-  1. your cartridge image (.gba),  sha256 {rom}\n\
-  2. your BIOS image as gba_bios.bin, sha256 {bios}\n\n\
-Then open {name}.app. The bundle is ad-hoc signed; on first launch macOS may\n\
-ask you to confirm in System Settings > Privacy & Security.\n",
+  1. your cartridge image (.gba), sha256 {rom}\n\
+{bios_instruction}\n\
+Then open {name}.app. The default package skips the BIOS through the runtime's\n\
+HLE boot path. The bundle is ad-hoc signed; on first launch macOS may ask you\n\
+to confirm in System Settings > Privacy & Security.\n",
             name = name,
             rom = cfg.image.rom_sha256,
-            bios = cfg.image.bios_sha256,
         ),
         _ => format!(
             "{name} — a statically recompiled game.\n\n\
-This package contains NO game or BIOS data. To play, place your own dumps\n\
+This package contains NO game data. To play, place your own cartridge dump\n\
 next to the executable:\n\n  1. your cartridge image (.gba), sha256 {rom}\n\
-  2. your BIOS image as gba_bios.bin, sha256 {bios}\n\nThen run ./{name}\n",
+{bios_instruction}\nThen run ./{name}\n",
             name = name,
             rom = cfg.image.rom_sha256,
-            bios = cfg.image.bios_sha256,
         ),
     };
     std::fs::write(pkg.join("README.txt"), readme).map_err(|e| e.to_string())?;
@@ -533,11 +555,18 @@ next to the executable:\n\n  1. your cartridge image (.gba), sha256 {rom}\n\
         },
         cfg.runtime.interpreter
     );
-    println!(
-        "  end user supplies: ROM {}…, BIOS {}…",
-        &cfg.image.rom_sha256[..12],
-        &cfg.image.bios_sha256[..12]
-    );
+    if cfg.runtime.skip_bios {
+        println!(
+            "  end user supplies: ROM {}… (BIOS skipped)",
+            &cfg.image.rom_sha256[..12]
+        );
+    } else if let Some(bios) = &cfg.image.bios_sha256 {
+        println!(
+            "  end user supplies: ROM {}…, BIOS {}…",
+            &cfg.image.rom_sha256[..12],
+            &bios[..12]
+        );
+    }
     Ok(())
 }
 
@@ -615,7 +644,11 @@ fn run() -> Result<(), String> {
             .join(", ")
     );
     println!("image    rom  {}…", &cfg.image.rom_sha256[..16]);
-    println!("         bios {}…", &cfg.image.bios_sha256[..16]);
+    if let Some(bios) = &cfg.image.bios_sha256 {
+        println!("         bios {}…", &bios[..16]);
+    } else {
+        println!("         bios skipped (HLE)");
+    }
 
     // The packager's own dumps, when offered, must hash to the pins —
     // a package built from the wrong revision is broken at birth.
@@ -628,12 +661,16 @@ fn run() -> Result<(), String> {
     }
     if let Some(p) = &bios {
         let got = sha256_file(p)?;
-        if got != cfg.image.bios_sha256 {
-            return Err(format!(
-                "{p}: sha256 {got} does not match image.bios-sha256"
-            ));
+        if let Some(want) = &cfg.image.bios_sha256 {
+            if got != *want {
+                return Err(format!(
+                    "{p}: sha256 {got} does not match image.bios-sha256"
+                ));
+            }
+            println!("bios     {p} (verified)");
+        } else {
+            println!("bios     {p} (ignored; runtime.skip-bios = true)");
         }
-        println!("bios     {p} (verified)");
     }
 
     match &cfg.labels.file {

@@ -384,12 +384,15 @@ QString generatedGbaPackToml(const PipelineRequest& request,
   text += QStringLiteral("icon = \"AppIcon.png\"\n\n");
   text += QStringLiteral("[image]\n");
   text += QStringLiteral("rom-sha256 = %1\n").arg(tomlQuoted(romSha256));
-  text += QStringLiteral("bios-sha256 = %1\n\n").arg(tomlQuoted(biosSha256));
+  if (!biosSha256.isEmpty())
+    text += QStringLiteral("bios-sha256 = %1\n").arg(tomlQuoted(biosSha256));
+  text += QStringLiteral("\n");
   text += QStringLiteral("[runtime]\n");
   text += QStringLiteral("menu = true\n");
   text += QStringLiteral("enhanced-audio = true\n");
   text += QStringLiteral("screen-sim = true\n");
   text += QStringLiteral("engine-hle = \"auto\"\n");
+  text += QStringLiteral("skip-bios = true\n");
   text += QStringLiteral("interpreter = true\n\n");
   text += QStringLiteral("[output]\n");
   text += QStringLiteral("binary = true\n");
@@ -430,10 +433,13 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("if(NOT GBA_CARGO)\n  message(FATAL_ERROR \"Cargo was not found. Install Rust with rustup or set CARGO_HOME.\")\nendif()\n");
   cmake += QStringLiteral("set(_GBA_RUST_ROOT \"${CMAKE_CURRENT_SOURCE_DIR}/gba-rust\")\n");
   cmake += QStringLiteral("set(_GBA_GAMEPAD_ROOT \"${CMAKE_CURRENT_SOURCE_DIR}/recomp_gamepad\")\n");
-  cmake += QStringLiteral("set(_GBA_CARGO_TARGET \"${CMAKE_BINARY_DIR}/cargo-target\")\n");
+  cmake += QStringLiteral("set(GBA_CARGO_TARGET_DIR \"${CMAKE_BINARY_DIR}/cargo-target\" CACHE PATH \"Reusable Cargo target cache\")\n");
+  cmake += QStringLiteral("option(GBA_CLEAN_CARGO_TARGET \"Remove Cargo intermediates after packaging\" ON)\n");
+  cmake += QStringLiteral("set(_GBA_CARGO_TARGET \"${GBA_CARGO_TARGET_DIR}\")\n");
   cmake += QStringLiteral("set(_GBA_PACK_OUT \"${CMAKE_BINARY_DIR}/pack-out\")\n");
   cmake += QStringLiteral("set(_GBA_PACKAGE_NAME %1)\n").arg(cmakeQuoted(bundleName));
   cmake += QStringLiteral("if(WIN32)\n  set(_GBA_EXE_SUFFIX \".exe\")\nelse()\n  set(_GBA_EXE_SUFFIX \"\")\nendif()\n");
+  cmake += QStringLiteral("if(GBA_CLEAN_CARGO_TARGET)\n  set(_GBA_CARGO_CLEAN_COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_CARGO_TARGET}\")\nelse()\n  set(_GBA_CARGO_CLEAN_COMMAND ${CMAKE_COMMAND} -E true)\nendif()\n");
   cmake += QStringLiteral("set(_GBA_ENV CARGO_TARGET_DIR=${_GBA_CARGO_TARGET} RECOMP_GAMEPAD_ROOT=${_GBA_GAMEPAD_ROOT} CARGO_INCREMENTAL=0 CARGO_PROFILE_DIST_LTO=thin CARGO_PROFILE_DIST_CODEGEN_UNITS=8)\n");
   cmake += requireGip
     ? QStringLiteral("list(APPEND _GBA_ENV RECOMP_REQUIRE_GIP=1)\n")
@@ -446,31 +452,20 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"[1/2] Building locked Rust runtime and packager\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_PACK_OUT}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} ${GBA_CARGO} build --manifest-path \"${_GBA_RUST_ROOT}/Cargo.toml\" --profile dist --locked -p recomp -p gba-pack\n");
-  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"[2/2] Translating and assembling Rust GBA package\"\n");
-  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} \"${_GBA_CARGO_TARGET}/dist/gba-pack${_GBA_EXE_SUFFIX}\" build \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" --rom \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" --bios \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" --out \"${_GBA_PACK_OUT}\" --recomp \"${_GBA_CARGO_TARGET}/dist/recomp${_GBA_EXE_SUFFIX}\" --gamedb \"${_GBA_RUST_ROOT}/gamedb.sqlite\" --defer-translation --no-soak\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"[2/2] Assembling thin Rust GBA package (translation deferred)\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} \"${_GBA_CARGO_TARGET}/dist/gba-pack${_GBA_EXE_SUFFIX}\" build \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" --rom \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" --out \"${_GBA_PACK_OUT}\" --recomp \"${_GBA_CARGO_TARGET}/dist/recomp${_GBA_EXE_SUFFIX}\" --gamedb \"${_GBA_RUST_ROOT}/gamedb.sqlite\" --defer-translation --no-soak\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_GBA_PACK_OUT}/${_GBA_PACKAGE_NAME}\" \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${_GBA_STEGANOS_PACKAGE_DIR}/game.manifest.json\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\" \"${_GBA_STEGANOS_PACKAGE_DIR}/PSXRecomp-Proof.zip\"\n");
-  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"Cleaning one-shot Cargo and translation intermediates\"\n");
-  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_CARGO_TARGET}\" \"${_GBA_PACK_OUT}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"Cleaning one-shot translation intermediates\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_PACK_OUT}\"\n");
+  cmake += QStringLiteral("  COMMAND ${_GBA_CARGO_CLEAN_COMMAND}\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E touch \"${_GBA_STAMP}\"\n");
-  cmake += QStringLiteral("  DEPENDS ${_GBA_RUST_SOURCES} ${_GBA_GAMEPAD_SOURCES} \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\"\n");
+  cmake += QStringLiteral("  DEPENDS ${_GBA_RUST_SOURCES} ${_GBA_GAMEPAD_SOURCES} \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\" \"${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip\"\n");
   cmake += QStringLiteral("  WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}\"\n  COMMENT \"Building and packing Rust GBA runtime\"\n  USES_TERMINAL\n  VERBATIM)\n");
   cmake += QStringLiteral("add_custom_target(gba-runtime ALL DEPENDS \"${_GBA_STAMP}\")\n");
-  cmake += QStringLiteral(R"CMAKE(install(CODE [[
-  set(_cfg "${CMAKE_INSTALL_CONFIG_NAME}")
-  if(_cfg STREQUAL "")
-    set(_cfg "Release")
-  endif()
-  set(_src "${CMAKE_BINARY_DIR}/steganos-package/gba-runtime/${_cfg}")
-  if(NOT EXISTS "${_src}")
-    message(FATAL_ERROR "GBA package has not been built: ${_src}")
-  endif()
-  file(COPY "${_src}/" DESTINATION "${CMAKE_INSTALL_PREFIX}")
-]])
-)CMAKE");
   return cmake;
 }
 

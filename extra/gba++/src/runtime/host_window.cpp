@@ -281,7 +281,7 @@ struct Backend {
     bool expanded_view = false;  // native games retain the historical SDL path
     bool resize_driven_view = false;
     bool linear_filter = false;
-    bool scanlines = true;
+    bool scanlines = false;
     HostGamepad gamepad;
     std::string input_dir;
     uint32_t previous_menu_buttons = 0;

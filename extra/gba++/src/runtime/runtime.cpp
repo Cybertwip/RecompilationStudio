@@ -136,7 +136,7 @@ struct Args {
     int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
-    bool scanlines = true;        // present-time LCD row/grid effect
+    bool scanlines = false;       // present-time LCD row/grid effect
     std::string settings_path;    // writable host settings.toml
     std::string input_dir;        // keybinds.ini/config.ini directory
     std::string controller_db;    // packaged SDL_GameControllerDB

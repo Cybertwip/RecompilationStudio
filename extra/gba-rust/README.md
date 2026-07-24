@@ -91,8 +91,9 @@ everything below is covered once, in [Legal](#legal).
 - **Temporal response.** Optional reproduction of LCD pixel persistence, which
   restores the transparency and shading effects many titles draw by flickering at
   30 Hz — effects a perfect, instantaneous modern display would otherwise break.
-- **Pixel grid.** An analytic, scale-aware subpixel grid (BGR stripes) rendered on
-  the GPU (wgpu).
+- **Optional pixel grid.** An analytic, scale-aware subpixel grid (BGR stripes)
+  rendered on the GPU (wgpu). It is off by default and can be enabled live from
+  the launcher or in-game menu.
 - **Correct on every display, out of the box.** Simulated colors carry their
   colorspace, so a color-managing compositor lands them accurately on the actual
   panel — ordinary sRGB, wide-gamut, or HDR — instead of stretching them into
@@ -112,7 +113,7 @@ everything below is covered once, in [Legal](#legal).
 | `crates/recomp-core` | Static recompiler engine: analyze, emit C, parallel compile/link, pluggable label sourcing — the library behind the CLI, packager, and launcher |
 | `crates/gamedb` | Reader for `gamedb.sqlite`: function boundaries by ROM SHA-256, seeding a full recompile |
 | `crates/recomp` | Recompiler CLI + play runtime over `recomp-core`: `build` (emit + cc), `runc`/`verify` (recompiled execution, differential checks), `play` (windowed play), `frames`/`run`/`dis` (headless tools) |
-| `crates/pack` | `gba-pack`: package one mapped game into a standalone, distributable executable (pins ROM/BIOS by hash; ships no game data) |
+| `crates/pack` | `gba-pack`: package one mapped game into a standalone distributable; thin Studio packages pin the ROM, skip BIOS by default, and build the native translation in the user cache on first launch |
 | `crates/input-config` | Shared input bindings: device choice + button maps, written by the launcher, read by `play` |
 | `crates/screen` | Screen simulation: per-revision panel color, temporal response, GPU pixel-grid present path |
 | `crates/launcher` | `gba-launcher` frontend: cartridge selection/launch, input rebinding, A/V settings — procedural theme, no bundled assets |

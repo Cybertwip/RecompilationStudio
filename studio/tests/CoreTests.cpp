@@ -211,10 +211,12 @@ int main(int argc, char** argv) {
         QStringLiteral("noncanonical or absent GBA BIOS selects standalone HLE"));
   const QString gbaPack = psxstudio::generatedGbaPackToml(
     gbaRequest, QStringLiteral("Studio Test Advance"),
-    QString(64, QLatin1Char('a')), QString(64, QLatin1Char('b')));
+    QString(64, QLatin1Char('a')), QString());
   check(gbaPack.contains(QStringLiteral("platforms = [\"macos\"]")) &&
           gbaPack.contains(QStringLiteral("menu = true")) &&
           gbaPack.contains(QStringLiteral("screen-sim = true")) &&
+          gbaPack.contains(QStringLiteral("skip-bios = true")) &&
+          !gbaPack.contains(QStringLiteral("bios-sha256")) &&
           gbaPack.contains(QStringLiteral("interpreter = true")),
         QStringLiteral("generated Rust GBA pack config enables the shipping host frontend"));
   const QString gbaCmake = psxstudio::generatedGbaProjectCMake(
@@ -229,6 +231,25 @@ int main(int argc, char** argv) {
           gbaCmake.contains(QStringLiteral("USES_TERMINAL")) &&
           !gbaCmake.contains(QStringLiteral("add_executable(psx-runtime")),
         QStringLiteral("generated GBA CMake drives the Rust runtime and target-specific CI package"));
+  const QString gbaProject = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-project"));
+  const QString gbaBuild = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-build"));
+  check(psxstudio::writeText(QDir(gbaProject).filePath(QStringLiteral("CMakeLists.txt")),
+                             gbaCmake, error) &&
+        QDir().mkpath(QDir(gbaProject).filePath(QStringLiteral("gba-rust"))) &&
+        QDir().mkpath(QDir(gbaProject).filePath(QStringLiteral("recomp_gamepad"))) &&
+        QDir().mkpath(QDir(gbaProject).filePath(QStringLiteral("package_inputs"))),
+        error.isEmpty() ? QStringLiteral("generated Rust GBA CMake fixture") : error);
+  QProcess gbaConfigure;
+  gbaConfigure.start(QStringLiteral("cmake"),
+    { QStringLiteral("-S"), gbaProject, QStringLiteral("-B"), gbaBuild,
+      QStringLiteral("-G"), QStringLiteral("Ninja"),
+      QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
+      QStringLiteral("-DGBA_CLEAN_CARGO_TARGET=OFF") });
+  check(gbaConfigure.waitForStarted(5000) && gbaConfigure.waitForFinished(30000) &&
+          gbaConfigure.exitStatus() == QProcess::NormalExit &&
+          gbaConfigure.exitCode() == 0,
+        QStringLiteral("generated Rust GBA CMake configures: %1")
+          .arg(QString::fromUtf8(gbaConfigure.readAllStandardError())));
 
   const QByteArray savedCargoHome = qgetenv("CARGO_HOME");
   const QString fakeCargoHome = QDir(temp.path()).filePath(QStringLiteral("cargo-home"));

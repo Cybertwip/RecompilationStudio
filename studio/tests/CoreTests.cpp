@@ -211,12 +211,13 @@ int main(int argc, char** argv) {
         QStringLiteral("noncanonical or absent GBA BIOS selects standalone HLE"));
   const QString gbaPack = psxstudio::generatedGbaPackToml(
     gbaRequest, QStringLiteral("Studio Test Advance"),
-    QString(64, QLatin1Char('a')), QString());
+    QString(64, QLatin1Char('a')), QString(64, QLatin1Char('b')));
   check(gbaPack.contains(QStringLiteral("platforms = [\"macos\"]")) &&
           gbaPack.contains(QStringLiteral("menu = true")) &&
           gbaPack.contains(QStringLiteral("screen-sim = true")) &&
           gbaPack.contains(QStringLiteral("skip-bios = true")) &&
-          !gbaPack.contains(QStringLiteral("bios-sha256")) &&
+          gbaPack.contains(QStringLiteral("bios-sha256")) &&
+          gbaPack.contains(QStringLiteral("embed-inputs = true")) &&
           gbaPack.contains(QStringLiteral("interpreter = true")),
         QStringLiteral("generated Rust GBA pack config enables the shipping host frontend"));
   const QString gbaCmake = psxstudio::generatedGbaProjectCMake(
@@ -228,6 +229,10 @@ int main(int argc, char** argv) {
           gbaCmake.contains(QStringLiteral("gba-pack")) &&
           gbaCmake.contains(QStringLiteral("add_custom_target(gba-runtime")) &&
           gbaCmake.contains(QStringLiteral("steganos-package/gba-runtime")) &&
+          gbaCmake.contains(QStringLiteral("--defer-translation")) &&
+          gbaCmake.contains(QStringLiteral("GBA_CARGO_TARGET_DIR")) &&
+          gbaCmake.contains(QStringLiteral("CARGO_PROFILE_DIST_STRIP=none")) &&
+          gbaCmake.contains(QStringLiteral("package_inputs/gba_bios.bin")) &&
           gbaCmake.contains(QStringLiteral("USES_TERMINAL")) &&
           !gbaCmake.contains(QStringLiteral("add_executable(psx-runtime")),
         QStringLiteral("generated GBA CMake drives the Rust runtime and target-specific CI package"));

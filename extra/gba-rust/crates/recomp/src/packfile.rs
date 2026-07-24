@@ -135,6 +135,11 @@ fn parse(path: &Path, dir: PathBuf) -> Result<Manifest, String> {
 /// (then in the shared config dir) hashing to the pin.
 pub fn find_rom(m: &Manifest) -> Result<PathBuf, String> {
     let mut dirs = vec![m.dir.clone()];
+    if cfg!(target_os = "macos") && m.dir.file_name().is_some_and(|n| n == "MacOS") {
+        if let Some(contents) = m.dir.parent() {
+            dirs.push(contents.join("Resources"));
+        }
+    }
     if let Some(c) = dirs::config_dir() {
         dirs.push(c.join("gba-recomp"));
     }

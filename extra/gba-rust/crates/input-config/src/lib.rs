@@ -609,6 +609,14 @@ pub fn find_bios() -> Option<PathBuf> {
         if p.is_file() {
             return Some(p);
         }
+        if cfg!(target_os = "macos") && dir.file_name().is_some_and(|n| n == "MacOS") {
+            if let Some(contents) = dir.parent() {
+                let resource = contents.join("Resources").join(BIOS_FILE_NAME);
+                if resource.is_file() {
+                    return Some(resource);
+                }
+            }
+        }
     }
     let p = config_root()?.join(BIOS_FILE_NAME);
     p.is_file().then_some(p)

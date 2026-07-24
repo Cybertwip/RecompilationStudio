@@ -159,6 +159,10 @@ impl EngineHle {
 pub struct Output {
     /// The platform-native game binary.
     pub binary: bool,
+    /// Embed the packager-owned ROM and BIOS inputs into the personal package.
+    /// Studio enables this for private exports; public releases should leave it off.
+    #[serde(default)]
+    pub embed_inputs: bool,
     /// Also emit the recompiled C source tree, with function labels
     /// applied: named where the label set carries names, `sub_<addr>`
     /// elsewhere. The tree is derived from the image — it is for the
@@ -171,6 +175,7 @@ impl Default for Output {
     fn default() -> Self {
         Output {
             binary: true,
+            embed_inputs: false,
             c_source: false,
         }
     }

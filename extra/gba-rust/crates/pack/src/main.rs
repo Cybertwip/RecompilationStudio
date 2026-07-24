@@ -173,24 +173,31 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
             rom.display()
         ));
     }
+    let bios_input = bios
+        .map(|path| {
+            let canonical = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
+            if let Some(want) = cfg.image.bios_sha256.as_deref() {
+                let got = sha256_file(canonical.to_str().ok_or("non-UTF8 path")?)?;
+                if got != want {
+                    return Err(format!(
+                        "{}: sha256 {got} does not match image.bios-sha256",
+                        canonical.display()
+                    ));
+                }
+            }
+            Ok(canonical)
+        })
+        .transpose()?;
+    if cfg.output.embed_inputs && bios_input.is_none() {
+        return Err("output.embed-inputs = true requires --bios".into());
+    }
+    if !cfg.runtime.skip_bios && bios_input.is_none() {
+        return Err("build needs --bios when runtime.skip-bios = false".into());
+    }
     let bios = if cfg.runtime.skip_bios {
         None
     } else {
-        let path = bios.ok_or("build needs --bios when runtime.skip-bios = false")?;
-        let path = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
-        let got = sha256_file(path.to_str().ok_or("non-UTF8 path")?)?;
-        let want = cfg
-            .image
-            .bios_sha256
-            .as_deref()
-            .ok_or("image.bios-sha256 is required when runtime.skip-bios = false")?;
-        if got != want {
-            return Err(format!(
-                "{}: sha256 {got} does not match image.bios-sha256",
-                path.display()
-            ));
-        }
-        Some(path)
+        bios_input.clone()
     };
     if let Some(f) = &cfg.labels.file {
         if !f.is_file() {
@@ -386,7 +393,11 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     // binary lives in <name>.app/Contents/MacOS, so the package data must
     // sit there; on Windows/Linux it sits in the package root next to the
     // binary. `data_dir` is wherever the executable ends up.
-    let (exe, data_dir): (std::path::PathBuf, std::path::PathBuf) = match host {
+    let (exe, data_dir, resource_dir): (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) = match host {
         Platform::Macos => {
             let app = pkg.join(format!("{name}.app"));
             let macos = app.join("Contents/MacOS");
@@ -398,9 +409,9 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
                 .map_err(|e| format!("{name}.icns: {e}"))?;
             std::fs::write(app.join("Contents/Info.plist"), info_plist(name))
                 .map_err(|e| format!("Info.plist: {e}"))?;
-            (macos.join(name), macos)
+            (macos.join(name), macos, res)
         }
-        _ => (pkg.join(name), pkg.clone()),
+        _ => (pkg.join(name), pkg.clone(), pkg.clone()),
     };
 
     let runtime_bin = find_recomp(recomp_flag.as_deref())?;
@@ -411,6 +422,11 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     }
     if let Some(db) = &gamedb_file {
         std::fs::copy(db, data_dir.join("gamedb.sqlite")).map_err(|e| e.to_string())?;
+    }
+    if cfg.output.embed_inputs {
+        std::fs::copy(&rom, resource_dir.join(format!("{name}.gba"))).map_err(|e| e.to_string())?;
+        let bios_path = bios_input.as_ref().ok_or("embedded BIOS input missing")?;
+        std::fs::copy(bios_path, resource_dir.join("gba_bios.bin")).map_err(|e| e.to_string())?;
     }
     // The engine-HLE pin travels only when it pins something — `auto`
     // is the runtime's own default discovery.

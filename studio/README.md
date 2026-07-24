@@ -24,8 +24,8 @@ workspace and `gba-pack`, emits a thin package, and uses a shared Studio Cargo
 cache so the Rust runtime is compiled once rather than once per title. Native
 translation is created in the per-user cache on first launch using the packaged
 function database; Studio does not generate a multi-gigabyte translation work
-tree during export. The selected ROM is hash-pinned but not copied into the final
-package.
+tree during export. Personal Studio packages include the selected ROM and canonical
+BIOS in the app resources; BIOS execution remains skipped/HLE by default.
 
 The GBA runtime provides automatic keyboard/gamepad input, the shared static
 macOS Xbox/PDP GIP backend, keyboard rebinding, an in-game settings menu, and

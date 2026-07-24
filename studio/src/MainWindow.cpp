@@ -1170,8 +1170,8 @@ void MainWindow::updateSystemControls() {
   if (discLabel_) discLabel_->setText(gba ? QStringLiteral("GBA ROM") : QStringLiteral("Disc BIN/CUE"));
   discEdit_->setPlaceholderText(gba ? QStringLiteral("One .gba cartridge image")
                                     : QStringLiteral("One .cue and all referenced .bin files"));
-  if (biosLabel_) biosLabel_->setText(gba ? QStringLiteral("GBA BIOS (optional)") : QStringLiteral("PlayStation BIOS"));
-  biosEdit_->setPlaceholderText(gba ? QStringLiteral("Optional 16 KiB dump; Studio packages skip BIOS/HLE by default")
+  if (biosLabel_) biosLabel_->setText(gba ? QStringLiteral("GBA BIOS (required for package)") : QStringLiteral("PlayStation BIOS"));
+  biosEdit_->setPlaceholderText(gba ? QStringLiteral("Canonical 16 KiB dump; packaged as a resource, HLE boot remains default")
                                     : QStringLiteral("Canonical SCPH1001.BIN only"));
   batchCheck_->setToolTip(gba
     ? QStringLiteral("Scan a directory recursively and queue one export for every .gba image.")
@@ -1230,7 +1230,7 @@ void MainWindow::updateExportMode() {
 void MainWindow::chooseBios() {
   const bool gba = currentSystem_ == SystemKind::GameBoyAdvance;
   const auto path = QFileDialog::getOpenFileName(
-    this, gba ? QStringLiteral("Select 16 KiB GBA BIOS (optional)")
+    this, gba ? QStringLiteral("Select 16 KiB GBA BIOS (required for package)")
               : QStringLiteral("Select SCPH1001.BIN"),
     QFileInfo(biosEdit_->text()).absolutePath(),
     gba ? QStringLiteral("GBA BIOS (*.bin *.BIN);;All files (*)")
@@ -1870,8 +1870,7 @@ void MainWindow::updateBuildButton() {
                 });
   const bool analysisReady = currentSystem_ == SystemKind::GameBoyAdvance ||
                              !ghidraEdit_->text().isEmpty();
-  const bool biosReady = currentSystem_ == SystemKind::GameBoyAdvance ||
-                         !biosEdit_->text().isEmpty();
+  const bool biosReady = !biosEdit_->text().isEmpty();
   const bool ready = gameReady && biosReady &&
                      !outputEdit_->text().isEmpty() && analysisReady &&
                      signingReady && brandingReady && ciReady && localPlatformReady;

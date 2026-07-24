@@ -21,7 +21,7 @@
     "cxx_settings": ["scanlines", "filtering", "screen model", "fullscreen", "volume", "controller", "deadzone", "keyboard bindings"],
     "studio_target": "gba-runtime",
     "studio_cargo_cache": "shared per-user cache; no per-title Cargo rebuild",
-    "package_data_policy": "ROM is hash-pinned and not copied; BIOS is skipped by default"
+    "package_data_policy": "personal Studio package embeds ROM and canonical BIOS resources; BIOS execution is skipped by default"
   },
   "verification": {
     "studio_ctest": {"passed": 2, "failed": 0},
@@ -35,6 +35,6 @@
       "_psx_gip_gamepad_close"
     ],
     "rust_gip_dynamic_libusb_dependency": false,
-    "thin_package_smoke": "passed; package contained recomp.pack.toml and gamedb.sqlite, no BIOS or translation work directory"
+    "thin_package_smoke": "passed; package contained recomp.pack.toml, gamedb.sqlite, ROM, and BIOS resources; no translation work directory"
   }
 }

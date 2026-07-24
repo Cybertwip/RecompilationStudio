@@ -1162,6 +1162,27 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     runtime_dispatch(0x00000008u);
 }
 
+// Undefined-instruction exception entry, matching extra/gba-rust's
+// Cpu::enter_exception(Exception::Undefined). Undefined encodings are guest
+// behavior, not an interpreter implementation gap: bank LR/SPSR, enter UND
+// mode with IRQ masked and ARM state selected, then hand PC=0x04 back to the
+// central native/fallback dispatch loop.
+extern "C" void runtime_undefined(uint32_t return_address) {
+    const uint32_t saved_cpsr = g_cpu.cpsr;
+    const uint32_t new_cpsr =
+        (saved_cpsr & ~(0x1Fu | CPSR_T_BIT)) | 0x1Bu | CPSR_I_BIT;
+    const unsigned old_bank = mode_to_bank(saved_cpsr);
+    const unsigned new_bank = mode_to_bank(new_cpsr);
+    if (old_bank != new_bank) {
+        bank_out(old_bank, saved_cpsr);
+        bank_in(new_bank, new_cpsr);
+    }
+    g_cpu.cpsr = new_cpsr;
+    g_cpu.banked_spsr[new_bank] = saved_cpsr;
+    g_cpu.R[14] = return_address;
+    g_cpu.R[15] = 0x00000004u;
+}
+
 // Count of IRQ vectorings performed by the recompiled runtime (every
 // runtime_irq call = one exception entry to 0x18). The recomp delivers IRQs
 // here (called from runtime_tick), NOT in runtime.cpp's run loop, so this is

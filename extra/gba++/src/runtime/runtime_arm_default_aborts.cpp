@@ -595,21 +595,26 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
             armv4t::Interpreter::step(cpu, *bus, insn, &cyc);
         ++bridged_insns;
 
-        if (r == armv4t::Interpreter::Result::NotImplemented ||
-            r == armv4t::Interpreter::Result::Undefined) {
+        if (r == armv4t::Interpreter::Result::Undefined) {
+            // Rust reference: Undefined is an architectural exception, not a
+            // decoder/runtime gap. Enter UND mode and continue dispatch at the
+            // 0x04 vector. Only NotImplemented remains fatal.
+            gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+            runtime_undefined(pc + (was_thumb ? 2u : 4u));
+            runtime_tick(cyc);
+            gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
+            continue;
+        }
+        if (r == armv4t::Interpreter::Result::NotImplemented) {
             // A genuine interpreter gap inside the bridged subtree. The
             // interpreter is the reference model; if IT can't execute this,
-            // self-healing has nothing to fall back to. Stay loud (this is the
-            // interpreter's own NotImplemented gate — PRINCIPLES.md "Genuine
-            // interpreter gaps still abort loudly").
+            // self-healing has nothing to fall back to.
             gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
             std::fprintf(stderr,
-                "runtime_arm: SELF-HEAL bridge hit interpreter %s at "
+                "runtime_arm: SELF-HEAL bridge hit interpreter NotImplemented at "
                 "pc=0x%08X while bridging dispatch miss 0x%08X. The reference "
                 "interpreter cannot execute this op; add its lowering in "
                 "src/armv4t/interpreter.cpp.\n",
-                r == armv4t::Interpreter::Result::Undefined ? "Undefined"
-                                                            : "NotImplemented",
                 pc, entry_pc);
             runtime_trace_dump_recent(96);
             std::abort();
@@ -817,17 +822,20 @@ extern "C" void runtime_force_interp_step(void) {
     const armv4t::Interpreter::Result r =
         armv4t::Interpreter::step(cpu, fib, insn, &cyc);
 
-    if (r == armv4t::Interpreter::Result::NotImplemented ||
-        r == armv4t::Interpreter::Result::Undefined) {
-        // A genuine interpreter gap. The interpreter is the reference model here;
-        // stay loud (PRINCIPLES.md "Genuine interpreter gaps still abort loudly").
+    if (r == armv4t::Interpreter::Result::Undefined) {
+        gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+        runtime_undefined(pc + (cpu.thumb ? 2u : 4u));
+        runtime_tick(cyc);
+        bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
+        return;
+    }
+    if (r == armv4t::Interpreter::Result::NotImplemented) {
+        // Genuine interpreter implementation gaps remain fatal.
         gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
         std::fprintf(stderr,
-            "runtime_arm: FORCE-INTERP hit interpreter %s at pc=0x%08X. The "
+            "runtime_arm: FORCE-INTERP hit interpreter NotImplemented at pc=0x%08X. The "
             "reference interpreter cannot execute this op; add its lowering in "
             "src/armv4t/interpreter.cpp.\n",
-            r == armv4t::Interpreter::Result::Undefined ? "Undefined"
-                                                        : "NotImplemented",
             pc);
         runtime_trace_dump_recent(96);
         std::abort();
@@ -869,9 +877,21 @@ extern "C" void runtime_force_interp_step(void) {
     }
 }
 
-// runtime_dispatch_miss — Stage-1 self-healing entry: log the miss, enqueue a
-// Stage-2 heal (so the NEXT hit dispatches native), then bridge through the
-// interpreter via runtime_bridge_interpret. See that function's note above.
+// runtime_dispatch_miss — Rust-reference fallback contract.
+//
+// `extra/gba-rust` never guesses a return address and interprets an arbitrary
+// missing call subtree. Its dispatch loop executes ONE fallback instruction,
+// then resolves the resulting PC again (native block when present, one more
+// interpreter step otherwise). That structure is load-bearing: HALT/IRQ/SWI
+// interleave at instruction boundaries, dynamic RAM code cannot swallow the
+// whole program inside one host call, and a bad LR cannot turn a coverage miss
+// into a 200M-instruction runaway/abort.
+//
+// Keep the C++ port identical: record/enqueue the missing PC, execute exactly
+// one reference-interpreter instruction on g_cpu, and return so the generated
+// host stack unwinds to the central dispatch loop. Guest LR/SP/CPSR remain the
+// source of truth; the host call-return optimization is deliberately abandoned
+// across the fallback boundary.
 extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const std::uint32_t entry_pc = target_pc & ~1u;
     const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
@@ -905,26 +925,10 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     }
     record_and_log_miss(entry_pc, entry_thumb);
     gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
-
-    // Runtime-installed IWRAM/EWRAM functions are commonly reached by an
-    // indirect call when the host call-return stack is empty. Their guest LR is
-    // nevertheless the exact return contract. The generic top-level bridge
-    // stops as soon as it re-enters any static ROM function; that is safe for a
-    // vector/resume miss but WRONG for RAM code that calls ROM helpers, because
-    // it skips the remainder of the RAM routine after the helper returns. Force
-    // the bridge to the guest LR for RAM entries so the whole installed routine
-    // (and its call subtree) executes before native dispatch resumes.
-    uint32_t forced_stop = 0u;
-    const bool ram_entry = entry_pc >= 0x02000000u && entry_pc < 0x04000000u;
-    if (ram_entry && runtime_call_stack_depth() == 0u) {
-        const uint32_t lr = g_cpu.R[14] & ~1u;
-        const bool plausible_lr =
-            (lr >= 0x02000000u && lr < 0x04000000u) ||
-            (lr >= 0x08000000u && lr < 0x0E000000u);
-        if (plausible_lr && lr != entry_pc) forced_stop = lr;
-    }
-    runtime_bridge_interpret(entry_pc, entry_thumb, forced_stop,
-                             /*max_instrs=*/0u);
+    g_cpu.R[15] = entry_pc;
+    if (entry_thumb) g_cpu.cpsr |= CPSR_T_BIT;
+    else             g_cpu.cpsr &= ~CPSR_T_BIT;
+    runtime_force_interp_step();
 }
 
 extern "C" void runtime_unimplemented_op(const char* op_name,

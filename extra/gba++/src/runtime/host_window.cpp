@@ -533,25 +533,16 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
-    // The independent FramePacer still governs emulation at 59.7275 Hz
-    // (MC-HP-004) — vsync below only aligns scanout, in series after the
-    // pacer, and can never become the game clock.
-    // HP-002: EVERY path now requests a synchronized present. The cadence
-    // probe measured the legacy D3D9 blit returning in <1 ms despite
-    // vsync=yes (presents never sync to scanout → the tear band users see
-    // toward the bottom at native res). SDL2's D3D11 backend is a DXGI
-    // flip-model swapchain whose vsync genuinely blocks, and windowed VRR
-    // (G-Sync "windowed and full screen") can engage through it — so prefer
-    // it by default on Windows; SDL_RENDER_DRIVER in the environment still
-    // overrides. GBARECOMP_NO_VSYNC=1 restores the historical
-    // unsynchronized present for A/B.
+    // Rust-reference pacing contract: audio owns emulation speed, never the
+    // display. Present immediately and let the producer follow the audio-ring
+    // fill; opt into vsync only for an explicit visual A/B.
 #if defined(_WIN32)
     SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "direct3d11",
                             SDL_HINT_DEFAULT);
 #endif
-    const char* no_vsync_env = std::getenv("GBARECOMP_NO_VSYNC");
+    const char* vsync_env = std::getenv("GBARECOMP_VSYNC");
     const bool want_vsync =
-        !(no_vsync_env && *no_vsync_env && *no_vsync_env != '0');
+        vsync_env && *vsync_env && *vsync_env != '0';
     const Uint32 renderer_flags = SDL_RENDERER_ACCELERATED |
         (want_vsync ? static_cast<Uint32>(SDL_RENDERER_PRESENTVSYNC)
                     : Uint32{0});
@@ -643,9 +634,14 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         cfg.channels    = 1;
         cfg.source_rate = 65536.0;                 // engine's standardized GBA mixer rate
         cfg.host_rate   = static_cast<double>(got.freq);
-        cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
-        cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
-                                                    // recomp warm-up hitch (drains to target)
+        // Match extra/gba-rust's faithful-ring control: 4096 source sample
+        // frames at 65.536 kHz (~62.5 ms), +/-2% fill correction, no long
+        // cold-start pre-roll and no time-stretch (which is audible as slowed
+        // audio when the producer falls behind).
+        cfg.target_ms      = 62.5;
+        cfg.preroll_ms     = 62.5;
+        cfg.max_correction = 0.02;
+        cfg.stretch_enable = 0;
         if (rab_init(&b->bridge, &cfg) == 0) {
             b->bridge_ready = true;
             b->host_audio_capture.assign(kHostAudioCaptureSize, 0);

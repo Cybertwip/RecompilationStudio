@@ -118,6 +118,8 @@ public:
     // the actual host output path (SDL callback bridge and presented frames),
     // complementing the emulated GBA-side audio/PPU state.
     bool audio_debug_state(AudioDebugState& out) const;
+    bool audio_clock_available() const;
+    double audio_fill_ms() const;
     bool capture_host_audio(uint64_t start, std::size_t count,
                             std::vector<int16_t>& samples,
                             uint64_t& first, uint64_t& head,

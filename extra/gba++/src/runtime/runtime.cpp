@@ -30,6 +30,8 @@
 #include "gba_rom_header.h"
 #include "host_platform.h"
 #include "host_window.h"
+#include "frontend_settings.h"
+#include "settings_menu.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "self_heal.h"
@@ -134,6 +136,12 @@ struct Args {
     int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
+    bool scanlines = true;        // present-time LCD row/grid effect
+    std::string settings_path;    // writable host settings.toml
+    std::string input_dir;        // keybinds.ini/config.ini directory
+    std::string controller_db;    // packaged SDL_GameControllerDB
+    std::string controller = "auto";
+    int controller_deadzone = 12000;
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
     // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
     bool audio_shadow = false;
@@ -508,6 +516,15 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             args->tcp_port = port;
         } else if (section == "video" && key == "screen") {
             args->screen = val;
+        } else if (section == "video" && key == "scanlines") {
+            args->scanlines = (val == "true" || val == "1");
+        } else if (section == "video" &&
+                   (key == "linear_filter" || key == "linear_filtering")) {
+            args->linear_filter = (val == "true" || val == "1");
+        } else if (section == "video" && key == "fullscreen") {
+            int mode = 0;
+            if (parse_int(val.c_str(), &mode)) args->fullscreen = std::clamp(mode, 0, 2);
+            else args->fullscreen = (val == "true") ? 1 : 0;
         } else if (section == "video" && key == "view_width") {
             int n = 0;
             if (parse_int(val.c_str(), &n) && n >= 240) args->view_width = n;
@@ -522,6 +539,15 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             }
         } else if (section == "audio" && key == "shadow") {
             args->audio_shadow = (val == "true" || val == "1");
+        } else if (section == "audio" && key == "volume") {
+            int volume = 100;
+            if (parse_int(val.c_str(), &volume)) args->volume = std::clamp(volume, 0, 100);
+        } else if (section == "controller" && key == "device") {
+            if (!val.empty()) args->controller = val;
+        } else if (section == "controller" && key == "deadzone") {
+            int deadzone = 12000;
+            if (parse_int(val.c_str(), &deadzone))
+                args->controller_deadzone = std::clamp(deadzone, 0, 32767);
         } else if (section == "bios" && key == "hle") {
             args->bios_hle = (val == "true" || val == "1");
         } else if (section == "bios" && key == "hle_keep_intro") {
@@ -538,13 +564,28 @@ void find_config_arg(int argc, char** argv, Args* args) {
             args->config = argv[++i];
             continue;
         }
+        if (s == "--settings" && i + 1 < argc) {
+            args->settings_path = argv[++i];
+            continue;
+        }
+        if (s == "--input-dir" && i + 1 < argc) {
+            args->input_dir = argv[++i];
+            continue;
+        }
+        if (s == "--controller-db" && i + 1 < argc) {
+            args->controller_db = argv[++i];
+            continue;
+        }
         if ((s == "--bios" || s == "--rom" || s == "--bios-sha1" ||
              s == "--rom-sha1" || s == "--steps" || s == "--frames" ||
              s == "--scale" || s == "--tcp" || s == "--window-title" ||
              s == "--dump-bmp" ||
              s == "--dump-png" || s == "--load-state" ||
              s == "--view-width" || s == "--widescreen" ||
-             s == "--save" || s == "--save-path") &&
+             s == "--save" || s == "--save-path" || s == "--screen" ||
+             s == "--volume" || s == "--linear-filter" ||
+             s == "--scanlines" || s == "--controller" ||
+             s == "--controller-deadzone") &&
             i + 1 < argc) {
             ++i;
             continue;
@@ -608,6 +649,18 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
 
         if (s == "--config") {
             if (!need_value("--config")) return false;
+            continue;
+        }
+        if (s == "--settings") {
+            if (!need_value("--settings")) return false;
+            continue;
+        }
+        if (s == "--input-dir") {
+            if (!need_value("--input-dir")) return false;
+            continue;
+        }
+        if (s == "--controller-db") {
+            if (!need_value("--controller-db")) return false;
             continue;
         }
         if (s == "--bios") {
@@ -769,6 +822,32 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             args->linear_filter = lf != 0;
             continue;
         }
+        if (s == "--scanlines") {
+            const char* v = need_value("--scanlines");
+            if (!v) return false;
+            int enabled = 0;
+            if (!parse_int(v, &enabled)) {
+                if (err) *err = "invalid --scanlines value (expected 0 or 1)";
+                return false;
+            }
+            args->scanlines = enabled != 0;
+            continue;
+        }
+        if (s == "--controller") {
+            const char* v = need_value("--controller");
+            if (!v) return false;
+            args->controller = v;
+            continue;
+        }
+        if (s == "--controller-deadzone") {
+            const char* v = need_value("--controller-deadzone");
+            if (!v || !parse_int(v, &args->controller_deadzone)) {
+                if (err) *err = "invalid --controller-deadzone value";
+                return false;
+            }
+            args->controller_deadzone = std::clamp(args->controller_deadzone, 0, 32767);
+            continue;
+        }
         if (s == "--quiet") {
             args->quiet = true;
             continue;
@@ -905,10 +984,49 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return 1;
         }
     }
+
+    std::filesystem::path executable_dir = std::filesystem::current_path();
+    if (argc > 0 && argv[0] && argv[0][0]) {
+        std::error_code ec;
+        const auto absolute = std::filesystem::absolute(argv[0], ec);
+        if (!ec && absolute.has_parent_path()) executable_dir = absolute.parent_path();
+    }
+    if (args.settings_path.empty())
+        args.settings_path = (executable_dir / "settings.toml").string();
+    if (args.input_dir.empty())
+        args.input_dir = std::filesystem::path(args.settings_path).parent_path().string();
+    if (args.controller_db.empty())
+        args.controller_db = (executable_dir / "gamecontrollerdb.txt").string();
+
+    runtime::FrontendSettings frontend;
+    frontend.scanlines = args.scanlines;
+    frontend.linear_filter = args.linear_filter;
+    frontend.screen = args.screen.empty() ? "frontlit" : args.screen;
+    frontend.fullscreen = args.fullscreen;
+    frontend.volume = args.volume;
+    frontend.controller = args.controller;
+    frontend.deadzone = args.controller_deadzone;
+    if (!runtime::load_frontend_settings(args.settings_path, frontend, &err))
+        return 1;
+    args.scanlines = frontend.scanlines;
+    args.linear_filter = frontend.linear_filter;
+    args.screen = frontend.screen;
+    args.fullscreen = frontend.fullscreen;
+    args.volume = frontend.volume;
+    args.controller = frontend.controller;
+    args.controller_deadzone = frontend.deadzone;
+
     if (!parse_cli(argc, argv, &args, &err)) {
         std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
         return 1;
     }
+    frontend.scanlines = args.scanlines;
+    frontend.linear_filter = args.linear_filter;
+    frontend.screen = args.screen.empty() ? "frontlit" : args.screen;
+    frontend.fullscreen = args.fullscreen;
+    frontend.volume = args.volume;
+    frontend.controller = args.controller;
+    frontend.deadzone = args.controller_deadzone;
 
     // Resolve BIOS via the picker chain (argv path -> sidecar cache ->
     // Win32 file dialog). Released binaries don't ship a default path
@@ -1990,17 +2108,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             runtime_shutdown();
             return 1;
         }
-        // Rebindable input: keybinds.ini (player buttons, recomp-ui generic
-        // format) + config.ini [KeyMap] (system hotkeys), both next to the
-        // exe. Missing files leave the built-in defaults.
-        {
-            std::string exe_dir = ".";
-            if (argc > 0 && argv[0] && argv[0][0]) {
-                std::filesystem::path p(argv[0]);
-                if (p.has_parent_path()) exe_dir = p.parent_path().string();
-            }
-            win.load_input_config(exe_dir.c_str());
-        }
+        // Writable host settings and packaged controller mappings are separate
+        // from guest configuration. Missing files retain deterministic defaults.
+        win.load_input_config(args.input_dir.c_str());
+        win.load_controller_mappings(args.controller_db.c_str());
+        win.set_controller_route(args.controller);
+        win.set_controller_deadzone(args.controller_deadzone);
+        win.set_scanlines(args.scanlines);
+        win.set_linear_filter(args.linear_filter);
         if (args.fullscreen) win.set_fullscreen(args.fullscreen);
         win.set_volume(args.volume);
         sync_resize_driven_view();
@@ -2130,6 +2245,86 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 input_replay_events[input_replay_index].keyinput);
     };
 
+    runtime::SettingsMenu settings_menu;
+    std::vector<uint8_t> settings_frame;
+    auto apply_frontend_settings = [&]() {
+        args.scanlines = frontend.scanlines;
+        args.linear_filter = frontend.linear_filter;
+        args.screen = frontend.screen;
+        args.fullscreen = frontend.fullscreen;
+        args.volume = frontend.volume;
+        args.controller = frontend.controller;
+        args.controller_deadzone = frontend.deadzone;
+        win.set_scanlines(frontend.scanlines);
+        win.set_linear_filter(frontend.linear_filter);
+        win.set_screen(frontend.screen.c_str());
+        win.set_fullscreen(frontend.fullscreen);
+        win.set_volume(frontend.volume);
+        win.set_controller_route(frontend.controller);
+        win.set_controller_deadzone(frontend.deadzone);
+    };
+    auto persist_frontend_settings = [&]() {
+        std::string ignored;
+        runtime::save_frontend_settings(args.settings_path, frontend, &ignored);
+    };
+    auto run_settings_menu = [&]() {
+        settings_menu.open();
+        win.set_audio_paused(true);
+        bus.io().set_keyinput(0x03FFu);
+        while (settings_menu.is_open() && !host_quit) {
+            const auto ev = win.pump();
+            if (ev.quit) {
+                host_quit = true;
+                break;
+            }
+            const auto controllers = win.controller_options();
+            if (settings_menu.capturing_binding() && ev.toggle_menu) {
+                settings_menu.handle(runtime::SettingsMenuInput::Cancel,
+                                     frontend, controllers);
+            } else if (settings_menu.capturing_binding() &&
+                       ev.pressed_scancode >= 0) {
+                win.set_keybind_scancode(
+                    settings_menu.capture_binding(), ev.pressed_scancode);
+                win.save_input_config();
+                settings_menu.finish_binding_capture();
+            } else {
+                auto handle = [&](bool fired, runtime::SettingsMenuInput input) {
+                    if (!fired || !settings_menu.is_open()) return;
+                    const auto result = settings_menu.handle(input, frontend, controllers);
+                    if (result.reset_bindings) {
+                        win.reset_keybinds();
+                        win.save_input_config();
+                    }
+                    if (result.settings_changed) {
+                        apply_frontend_settings();
+                        persist_frontend_settings();
+                    }
+                    if (result.quit) host_quit = true;
+                };
+                handle(ev.toggle_menu || ev.menu_cancel,
+                       runtime::SettingsMenuInput::Cancel);
+                handle(ev.menu_up, runtime::SettingsMenuInput::Up);
+                handle(ev.menu_down, runtime::SettingsMenuInput::Down);
+                handle(ev.menu_left, runtime::SettingsMenuInput::Left);
+                handle(ev.menu_right, runtime::SettingsMenuInput::Right);
+                handle(ev.menu_confirm, runtime::SettingsMenuInput::Confirm);
+            }
+
+            settings_frame = live_fb;
+            if (settings_frame.size() != ppu.render_bytes())
+                settings_frame.assign(ppu.render_bytes(), 0);
+            settings_menu.draw(
+                settings_frame.data(), static_cast<int>(ppu.render_width()),
+                static_cast<int>(ppu.render_height()), frontend,
+                win.controller_options(), win.keybind_labels());
+            win.present(settings_frame.data());
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        win.set_audio_paused(false);
+        bus.io().set_keyinput(0x03FFu);
+        if (pacer) pacer->reset();
+    };
+
     auto pump_host_input = [&]() {
         if (!args.window) return;
         auto ev = win.pump();
@@ -2156,12 +2351,23 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             // toggles back into that same mode.
             const int on_mode = args.fullscreen ? args.fullscreen : 1;
             win.set_fullscreen(win.fullscreen() ? 0 : on_mode);
+            frontend.fullscreen = win.fullscreen();
+            persist_frontend_settings();
         }
         if (ev.window_bigger)  win.adjust_scale(+1);
         if (ev.window_smaller) win.adjust_scale(-1);
-        if (ev.volume_up)   win.set_volume(win.volume() + 10);
-        if (ev.volume_down) win.set_volume(win.volume() - 10);
+        if (ev.volume_up) {
+            win.set_volume(win.volume() + 10);
+            frontend.volume = win.volume();
+            persist_frontend_settings();
+        }
+        if (ev.volume_down) {
+            win.set_volume(win.volume() - 10);
+            frontend.volume = win.volume();
+            persist_frontend_settings();
+        }
         if (ev.toggle_fps)  win.set_fps_readout(!win.fps_readout());
+        if (ev.toggle_menu && !host_quit) run_settings_menu();
         if (ev.toggle_pause) {
             host_paused = !host_paused;
             // Realign the pacer on unpause so it doesn't burn the

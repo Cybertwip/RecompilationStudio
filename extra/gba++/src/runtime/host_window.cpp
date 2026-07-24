@@ -509,6 +509,10 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
                          SDL_GetError());
         }
     }
+    if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0) {
+        SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+    }
+    SDL_GameControllerEventState(SDL_ENABLE);
 
     auto* b = new Backend{};
     b->base_w = base_w;
@@ -657,7 +661,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     }
 
     b->color_lut = std::make_unique<runtime::ColorLut>(resolve_color_settings(screen));
-    if (!b->color_lut->is_passthrough())
+    if (!b->color_lut->is_passthrough() || b->scanlines)
         b->graded_fb.resize(static_cast<std::size_t>(base_w) * base_h * 3);
 
     impl_ = b;
@@ -734,7 +738,7 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
     b->base_w = base_w;
     b->base_h = base_h;
     b->expanded_view = base_w != 240 || base_h != 160;
-    if (b->color_lut && !b->color_lut->is_passthrough())
+    if ((b->color_lut && !b->color_lut->is_passthrough()) || b->scanlines)
         b->graded_fb.resize(static_cast<std::size_t>(base_w) * base_h * 3u);
     return true;
 }
@@ -772,11 +776,20 @@ bool HostWindow::drawable_size(int* width, int* height) const {
 void HostWindow::present(const uint8_t* rgb888) {
     if (!open_ || !impl_ || !rgb888) return;
     auto* b = static_cast<Backend*>(impl_);
-    // Present-time color grading (opt-in). Raw is passthrough: the raw
-    // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
-    if (b->color_lut && !b->color_lut->is_passthrough() &&
-        b->graded_fb.size() == static_cast<std::size_t>(b->base_w) * b->base_h * 3u) {
-        b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), b->base_w, b->base_h);
+    // Present-time color grading + optional scanlines. The raw PPU frame is
+    // never modified, so verification hashes and emulated state are unchanged.
+    const std::size_t bytes = static_cast<std::size_t>(b->base_w) * b->base_h * 3u;
+    if ((b->color_lut && !b->color_lut->is_passthrough()) || b->scanlines) {
+        if (b->graded_fb.size() != bytes) b->graded_fb.resize(bytes);
+        if (b->color_lut && !b->color_lut->is_passthrough()) {
+            b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), b->base_w, b->base_h);
+        } else {
+            std::memcpy(b->graded_fb.data(), rgb888, bytes);
+        }
+        if (b->scanlines) {
+            runtime::apply_scanline_filter(
+                b->graded_fb.data(), b->base_w, b->base_h);
+        }
         rgb888 = b->graded_fb.data();
     }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, b->base_w * 3);
@@ -835,6 +848,7 @@ void HostWindow::present(const uint8_t* rgb888) {
 void HostWindow::load_input_config(const char* dir) {
     if (!open_ || !impl_ || !dir) return;
     auto* b = static_cast<Backend*>(impl_);
+    b->input_dir = dir;
     const std::string base = std::string(dir) + "/";
 
     // keybinds.ini [player1] (recomp-ui generic format, scancode names).
@@ -857,6 +871,81 @@ void HostWindow::load_input_config(const char* dir) {
             return;
         }
     });
+}
+
+bool HostWindow::save_input_config() const {
+    if (!open_ || !impl_) return false;
+    const auto* b = static_cast<const Backend*>(impl_);
+    if (b->input_dir.empty()) return false;
+    const std::string path = b->input_dir + "/keybinds.ini";
+    const std::string temporary = path + ".tmp";
+    std::ofstream output(temporary, std::ios::trunc);
+    if (!output) return false;
+    output << "[player1]\n";
+    for (const auto& binding : kBindKeys) {
+        const char* name = SDL_GetScancodeName(b->bind_sc[binding.bit]);
+        output << binding.name << " = "
+               << ((name && name[0]) ? name : "None") << "\n";
+    }
+    output.close();
+    if (!output) return false;
+    std::remove(path.c_str());
+    return std::rename(temporary.c_str(), path.c_str()) == 0;
+}
+
+std::array<std::string, 10> HostWindow::keybind_labels() const {
+    std::array<std::string, 10> labels{};
+    if (!open_ || !impl_) return labels;
+    const auto* b = static_cast<const Backend*>(impl_);
+    for (int bit = 0; bit < 10; ++bit) {
+        const char* name = SDL_GetScancodeName(b->bind_sc[bit]);
+        labels[static_cast<std::size_t>(bit)] =
+            (name && name[0]) ? name : "None";
+    }
+    return labels;
+}
+
+void HostWindow::set_keybind_scancode(int bit, int scancode) {
+    if (!open_ || !impl_ || bit < 0 || bit >= 10) return;
+    if (scancode < SDL_SCANCODE_UNKNOWN || scancode >= SDL_NUM_SCANCODES) return;
+    static_cast<Backend*>(impl_)->bind_sc[bit] =
+        static_cast<SDL_Scancode>(scancode);
+}
+
+void HostWindow::reset_keybinds() {
+    if (!open_ || !impl_) return;
+    std::memcpy(static_cast<Backend*>(impl_)->bind_sc,
+                kDefaultBinds, sizeof(kDefaultBinds));
+}
+
+void HostWindow::load_controller_mappings(const char* path) {
+    if (!open_ || !impl_) return;
+    static_cast<Backend*>(impl_)->gamepad.load_mapping_database(path);
+}
+
+void HostWindow::set_controller_route(const std::string& selector) {
+    if (!open_ || !impl_) return;
+    static_cast<Backend*>(impl_)->gamepad.set_route(selector);
+}
+
+std::string HostWindow::controller_route() const {
+    if (!open_ || !impl_) return "auto";
+    return static_cast<const Backend*>(impl_)->gamepad.route();
+}
+
+void HostWindow::set_controller_deadzone(int deadzone) {
+    if (!open_ || !impl_) return;
+    static_cast<Backend*>(impl_)->gamepad.set_deadzone(deadzone);
+}
+
+int HostWindow::controller_deadzone() const {
+    if (!open_ || !impl_) return 12000;
+    return static_cast<const Backend*>(impl_)->gamepad.deadzone();
+}
+
+std::vector<HostControllerOption> HostWindow::controller_options() const {
+    if (!open_ || !impl_) return {};
+    return static_cast<const Backend*>(impl_)->gamepad.options();
 }
 
 void HostWindow::set_fullscreen(int mode) {
@@ -923,6 +1012,49 @@ void HostWindow::set_fps_readout(bool on) {
 bool HostWindow::fps_readout() const {
     if (!open_ || !impl_) return false;
     return static_cast<const Backend*>(impl_)->fps_readout;
+}
+
+void HostWindow::set_scanlines(bool on) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->scanlines = on;
+    if (on && b->graded_fb.empty())
+        b->graded_fb.resize(static_cast<std::size_t>(b->base_w) * b->base_h * 3u);
+}
+
+bool HostWindow::scanlines() const {
+    return open_ && impl_ && static_cast<const Backend*>(impl_)->scanlines;
+}
+
+void HostWindow::set_linear_filter(bool on) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->linear_filter = on;
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, on ? "linear" : "nearest");
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(b->texture,
+        on ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+}
+
+bool HostWindow::linear_filter() const {
+    return open_ && impl_ && static_cast<const Backend*>(impl_)->linear_filter;
+}
+
+void HostWindow::set_screen(const char* screen) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->color_lut = std::make_unique<runtime::ColorLut>(resolve_color_settings(screen));
+    if (!b->color_lut->is_passthrough() || b->scanlines)
+        b->graded_fb.resize(static_cast<std::size_t>(b->base_w) * b->base_h * 3u);
+    else
+        b->graded_fb.clear();
+}
+
+void HostWindow::set_audio_paused(bool paused) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (b->audio_dev) SDL_PauseAudioDevice(b->audio_dev, paused ? 1 : 0);
 }
 
 bool HostWindow::audio_debug_state(AudioDebugState& out) const {
@@ -1069,20 +1201,37 @@ HostWindow::Events HostWindow::pump() {
         } else if (e.type == SDL_WINDOWEVENT &&
                    e.window.event == SDL_WINDOWEVENT_CLOSE) {
             ev.quit = true;
+        } else if (e.type == SDL_CONTROLLERDEVICEADDED ||
+                   e.type == SDL_CONTROLLERDEVICEREMOVED) {
+            b->gamepad.update();
         } else if (e.type == SDL_KEYDOWN && e.key.repeat == 0) {
-            // Edge-triggered hotkeys (ignore key-repeat). F1..F9 are
-            // save-state slots: plain = load, Shift = save. SDL's F1..F12
-            // keycodes are contiguous, so slot = sym - F1 + 1.
-            SDL_Keycode sym = e.key.keysym.sym;
-            Uint16 mods = e.key.keysym.mod;
+            const SDL_Keycode sym = e.key.keysym.sym;
+            const Uint16 mods = e.key.keysym.mod;
+            ev.pressed_scancode = static_cast<int>(e.key.keysym.scancode);
             if (sym == SDLK_ESCAPE) {
-                ev.quit = true;
-            } else if (sym >= SDLK_F1 && sym <= SDLK_F9) {
-                int slot = static_cast<int>(sym - SDLK_F1) + 1;
+                ev.toggle_menu = true;
+                ev.menu_cancel = true;
+            } else if (sym == SDLK_UP) {
+                ev.menu_up = true;
+            } else if (sym == SDLK_DOWN) {
+                ev.menu_down = true;
+            } else if (sym == SDLK_LEFT) {
+                ev.menu_left = true;
+            } else if (sym == SDLK_RIGHT) {
+                ev.menu_right = true;
+            } else if (sym == SDLK_RETURN || sym == SDLK_SPACE) {
+                ev.menu_confirm = true;
+            } else if (sym == SDLK_BACKSPACE) {
+                ev.menu_cancel = true;
+            }
+
+            // Edge-triggered hotkeys (ignore key-repeat). F1..F9 are
+            // save-state slots: plain = load, Shift = save.
+            if (sym >= SDLK_F1 && sym <= SDLK_F9) {
+                const int slot = static_cast<int>(sym - SDLK_F1) + 1;
                 if (mods & KMOD_SHIFT) ev.save_slot = slot;
                 else                   ev.load_slot = slot;
-            } else {
-                // Rebindable system hotkeys (config.ini [KeyMap]).
+            } else if (sym != SDLK_ESCAPE) {
                 for (int h = 0; h < HK_COUNT; ++h) {
                     const HotkeyBind& hb = b->hotkeys[h];
                     if (hb.key == SDLK_UNKNOWN || hb.key != sym ||
@@ -1091,7 +1240,7 @@ HostWindow::Events HostWindow::pump() {
                     switch (h) {
                         case HK_FULLSCREEN:     ev.toggle_fullscreen = true; break;
                         case HK_PAUSE:          ev.toggle_pause = true;      break;
-                        case HK_TURBO:          /* level-triggered below */  break;
+                        case HK_TURBO:          break;
                         case HK_WINDOW_BIGGER:  ev.window_bigger = true;     break;
                         case HK_WINDOW_SMALLER: ev.window_smaller = true;    break;
                         case HK_VOLUME_UP:      ev.volume_up = true;         break;
@@ -1103,26 +1252,64 @@ HostWindow::Events HostWindow::pump() {
         }
     }
 
-    // Build the GBA KEYINPUT value from current keyboard state via the
-    // rebindable table (keybinds.ini; defaults in kDefaultBinds).
-    const Uint8* ks = SDL_GetKeyboardState(nullptr);
-    uint16_t keys = 0x03FFu;  // all released
-    for (int bit = 0; bit < 10; ++bit) {
-        SDL_Scancode sc = b->bind_sc[bit];
-        if (sc != SDL_SCANCODE_UNKNOWN && ks[sc])
-            keys &= static_cast<uint16_t>(~(1u << bit));
+    b->gamepad.update();
+    const HostGamepadState pad = b->gamepad.state();
+    const bool physical = b->gamepad.connected();
+    const std::string route = b->gamepad.route();
+
+    // Build GBA KEYINPUT from the selected route. Automatic mode follows the
+    // PSX frontend policy: physical pad first, keyboard fallback while absent.
+    uint16_t keys = 0x03FFu;
+    const bool keyboard = route == "keyboard" || (route == "auto" && !physical);
+    if (keyboard) {
+        const Uint8* ks = SDL_GetKeyboardState(nullptr);
+        for (int bit = 0; bit < 10; ++bit) {
+            const SDL_Scancode sc = b->bind_sc[bit];
+            if (sc != SDL_SCANCODE_UNKNOWN && ks[sc])
+                keys &= static_cast<uint16_t>(~(1u << bit));
+        }
     }
+    if (physical && route != "keyboard" && route != "none")
+        keys &= gba_keyinput_from_gamepad(pad, b->gamepad.deadzone());
     ev.keyinput = keys;
 
-    // Turbo is level-triggered: held = uncap the frame limiter (default Tab).
+    // Controller menu navigation uses rising edges. Guide opens the menu; a
+    // Start+Back chord is a fallback for pads whose OS reserves Guide.
+    enum : uint32_t {
+        NAV_UP = 1u << 0, NAV_DOWN = 1u << 1, NAV_LEFT = 1u << 2,
+        NAV_RIGHT = 1u << 3, NAV_CONFIRM = 1u << 4, NAV_CANCEL = 1u << 5,
+        NAV_TOGGLE = 1u << 6,
+    };
+    uint32_t nav = 0;
+    const int dz = b->gamepad.deadzone();
+    if ((pad.buttons & HOST_PAD_DPAD_UP) || pad.left_y < -dz) nav |= NAV_UP;
+    if ((pad.buttons & HOST_PAD_DPAD_DOWN) || pad.left_y > dz) nav |= NAV_DOWN;
+    if ((pad.buttons & HOST_PAD_DPAD_LEFT) || pad.left_x < -dz) nav |= NAV_LEFT;
+    if ((pad.buttons & HOST_PAD_DPAD_RIGHT) || pad.left_x > dz) nav |= NAV_RIGHT;
+    if (pad.buttons & HOST_PAD_FACE_SOUTH) nav |= NAV_CONFIRM;
+    if (pad.buttons & HOST_PAD_FACE_EAST) nav |= NAV_CANCEL;
+    if ((pad.buttons & HOST_PAD_GUIDE) ||
+        ((pad.buttons & HOST_PAD_START) && (pad.buttons & HOST_PAD_BACK))) {
+        nav |= NAV_TOGGLE;
+    }
+    const uint32_t rising = nav & ~b->previous_menu_buttons;
+    b->previous_menu_buttons = nav;
+    ev.menu_up |= (rising & NAV_UP) != 0;
+    ev.menu_down |= (rising & NAV_DOWN) != 0;
+    ev.menu_left |= (rising & NAV_LEFT) != 0;
+    ev.menu_right |= (rising & NAV_RIGHT) != 0;
+    ev.menu_confirm |= (rising & NAV_CONFIRM) != 0;
+    ev.menu_cancel |= (rising & NAV_CANCEL) != 0;
+    ev.toggle_menu |= (rising & NAV_TOGGLE) != 0;
+
+    const Uint8* ks = SDL_GetKeyboardState(nullptr);
     ev.fast_forward = false;
-    {
-        const HotkeyBind& hb = b->hotkeys[HK_TURBO];
-        if (hb.key != SDLK_UNKNOWN) {
-            SDL_Scancode sc = SDL_GetScancodeFromKey(hb.key);
-            if (sc != SDL_SCANCODE_UNKNOWN && ks[sc] &&
-                hotkey_mods_ok(hb, SDL_GetModState()))
-                ev.fast_forward = true;
+    const HotkeyBind& turbo = b->hotkeys[HK_TURBO];
+    if (turbo.key != SDLK_UNKNOWN) {
+        const SDL_Scancode sc = SDL_GetScancodeFromKey(turbo.key);
+        if (sc != SDL_SCANCODE_UNKNOWN && ks[sc] &&
+            hotkey_mods_ok(turbo, SDL_GetModState())) {
+            ev.fast_forward = true;
         }
     }
     return ev;
@@ -1160,6 +1347,16 @@ bool HostWindow::drawable_size(int* /*width*/, int* /*height*/) const {
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
 
 void HostWindow::load_input_config(const char* /*dir*/) {}
+bool HostWindow::save_input_config() const { return false; }
+std::array<std::string, 10> HostWindow::keybind_labels() const { return {}; }
+void HostWindow::set_keybind_scancode(int /*bit*/, int /*scancode*/) {}
+void HostWindow::reset_keybinds() {}
+void HostWindow::load_controller_mappings(const char* /*path*/) {}
+void HostWindow::set_controller_route(const std::string& /*selector*/) {}
+std::string HostWindow::controller_route() const { return "auto"; }
+void HostWindow::set_controller_deadzone(int /*deadzone*/) {}
+int HostWindow::controller_deadzone() const { return 12000; }
+std::vector<HostControllerOption> HostWindow::controller_options() const { return {}; }
 void HostWindow::set_fullscreen(int /*mode*/) {}
 int  HostWindow::fullscreen() const { return 0; }
 void HostWindow::adjust_scale(int /*delta*/) {}
@@ -1167,6 +1364,12 @@ void HostWindow::set_volume(int /*pct*/) {}
 int  HostWindow::volume() const { return 100; }
 void HostWindow::set_fps_readout(bool /*on*/) {}
 bool HostWindow::fps_readout() const { return false; }
+void HostWindow::set_scanlines(bool /*on*/) {}
+bool HostWindow::scanlines() const { return false; }
+void HostWindow::set_linear_filter(bool /*on*/) {}
+bool HostWindow::linear_filter() const { return false; }
+void HostWindow::set_screen(const char* /*screen*/) {}
+void HostWindow::set_audio_paused(bool /*paused*/) {}
 bool HostWindow::audio_debug_state(AudioDebugState& out) const {
     out = {};
     return false;

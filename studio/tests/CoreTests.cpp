@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
     QStringLiteral("org.psxrecomp.gba.test"));
   check(gbaCmake.contains(QStringLiteral("project(GeneratedGbaRustPackage NONE)")) &&
           gbaCmake.contains(QStringLiteral("$ENV{HOME}/.cargo/bin")) &&
-          gbaCmake.contains(QStringLiteral("cargo build")) &&
+          gbaCmake.contains(QStringLiteral("${GBA_CARGO} build")) &&
           gbaCmake.contains(QStringLiteral("gba-pack")) &&
           gbaCmake.contains(QStringLiteral("add_custom_target(gba-runtime")) &&
           gbaCmake.contains(QStringLiteral("steganos-package/gba-runtime")) &&
@@ -232,14 +232,14 @@ int main(int argc, char** argv) {
 
   const QByteArray savedCargoHome = qgetenv("CARGO_HOME");
   const QString fakeCargoHome = QDir(temp.path()).filePath(QStringLiteral("cargo-home"));
-  const QString fakeCargo = QDir(fakeCargoHome).filePath(QStringLiteral("bin/cargo"));
+  const QString fakeCargo = QDir(fakeCargoHome).filePath(QStringLiteral("bin/cargo-studio-probe"));
   check(psxstudio::writeText(fakeCargo, QStringLiteral("cargo"), error), error);
 #if !defined(Q_OS_WIN)
   QFile::setPermissions(fakeCargo, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
                                    QFileDevice::ExeOwner);
 #endif
   qputenv("CARGO_HOME", fakeCargoHome.toUtf8());
-  check(psxstudio::findExecutable(QStringLiteral("cargo")) == fakeCargo,
+  check(psxstudio::findExecutable(QStringLiteral("cargo-studio-probe")) == fakeCargo,
         QStringLiteral("Cargo discovery searches CARGO_HOME for GUI-launched Studio"));
   if (savedCargoHome.isNull()) qunsetenv("CARGO_HOME");
   else qputenv("CARGO_HOME", savedCargoHome);

@@ -167,6 +167,57 @@ else()
     endif()
 endif()
 
+# Shared host-controller component. The identity layer is available on every
+# SDL build; macOS may additionally link the same static libusb Xbox GIP
+# transport used by PSXRecomp.
+set(GBARECOMP_GAMEPAD_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../lib/recomp_gamepad"
+    CACHE PATH "Path to the reusable recomp_gamepad component")
+if(APPLE)
+    option(GBARECOMP_MACOS_GIP_GAMEPAD
+        "Build direct USB support for Xbox GIP controllers on macOS" ON)
+else()
+    set(GBARECOMP_MACOS_GIP_GAMEPAD OFF)
+endif()
+set(GBARECOMP_GAMEPAD_AVAILABLE OFF)
+set(GBARECOMP_GIP_AVAILABLE OFF)
+if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_GAMEPAD_ROOT}/CMakeLists.txt")
+    set(RECOMP_GAMEPAD_SDL_INCLUDE_DIRS "${SDL2_INCLUDE_DIRS}" CACHE STRING "" FORCE)
+    set(RECOMP_GAMEPAD_SDL_LIBRARIES "${SDL2_LIBRARIES}" CACHE STRING "" FORCE)
+    set(RECOMP_GAMEPAD_BUILD_GIP OFF CACHE BOOL "" FORCE)
+    if(APPLE AND GBARECOMP_MACOS_GIP_GAMEPAD)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(GBARECOMP_LIBUSB QUIET libusb-1.0)
+        endif()
+        if(GBARECOMP_LIBUSB_FOUND)
+            foreach(_dir IN LISTS GBARECOMP_LIBUSB_LIBRARY_DIRS)
+                if(EXISTS "${_dir}/libusb-1.0.a")
+                    set(GBARECOMP_LIBUSB_STATIC "${_dir}/libusb-1.0.a")
+                    break()
+                endif()
+            endforeach()
+            if(GBARECOMP_LIBUSB_STATIC)
+                find_library(GBARECOMP_IOKIT IOKit REQUIRED)
+                find_library(GBARECOMP_COREFOUNDATION CoreFoundation REQUIRED)
+                find_library(GBARECOMP_SECURITY Security REQUIRED)
+                set(RECOMP_GAMEPAD_BUILD_GIP ON CACHE BOOL "" FORCE)
+                set(RECOMP_GAMEPAD_GIP_INCLUDE_DIRS "${GBARECOMP_LIBUSB_INCLUDE_DIRS}" CACHE STRING "" FORCE)
+                set(RECOMP_GAMEPAD_GIP_LIBRARIES
+                    "${GBARECOMP_LIBUSB_STATIC};${GBARECOMP_IOKIT};${GBARECOMP_COREFOUNDATION};${GBARECOMP_SECURITY};objc"
+                    CACHE STRING "" FORCE)
+                set(GBARECOMP_GIP_AVAILABLE ON)
+            else()
+                message(WARNING "gbarecomp: static libusb archive unavailable; direct-USB gamepads disabled")
+            endif()
+        else()
+            message(WARNING "gbarecomp: libusb-1.0 unavailable; direct-USB gamepads disabled")
+        endif()
+    endif()
+    add_subdirectory("${GBARECOMP_GAMEPAD_ROOT}"
+                     "${CMAKE_CURRENT_BINARY_DIR}/recomp_gamepad" EXCLUDE_FROM_ALL)
+    set(GBARECOMP_GAMEPAD_AVAILABLE ON)
+endif()
+
 if(GBARECOMP_STATIC_RELEASE)
     # NOTE: -static / -static-libgcc / -static-libstdc++ MUST be set
     # via -DCMAKE_EXE_LINKER_FLAGS at configure time (see package_release.ps1).
@@ -265,6 +316,11 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/overlay_compile.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
+    src/runtime/host_gamepad.cpp
+    src/runtime/frontend_settings.cpp
+    src/runtime/settings_menu.cpp
+    src/runtime/bitmap_font.cpp
+    src/runtime/scanline_filter.cpp
     src/runtime/color_lut.cpp
     src/runtime/asset_picker.cpp
     # Production abort stubs for runtime_dispatch_miss +
@@ -313,6 +369,12 @@ if(GBARECOMP_SDL2_OK)
     # `#include_next <stdlib.h>`.
     target_include_directories(gbarecomp_runtime PUBLIC ${SDL2_INCLUDE_DIRS})
     target_link_libraries(gbarecomp_runtime PUBLIC ${SDL2_LIBRARIES})
+endif()
+if(GBARECOMP_GAMEPAD_AVAILABLE)
+    target_link_libraries(gbarecomp_runtime PUBLIC recomp_gamepad::identity)
+endif()
+if(GBARECOMP_GIP_AVAILABLE)
+    target_link_libraries(gbarecomp_runtime PUBLIC recomp_gamepad::gip)
 endif()
 if(WIN32 OR MSYS)
     # asset_picker uses GetOpenFileNameA (comdlg32) and MessageBoxA (user32).
@@ -581,6 +643,43 @@ add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
 add_executable(presentation_layout_tests tests/presentation_layout/test_main.cpp)
 target_include_directories(presentation_layout_tests PRIVATE src/runtime)
 add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
+
+add_executable(scanline_filter_test
+    tests/presentation_layout/scanline_filter_test.cpp
+    src/runtime/scanline_filter.cpp)
+target_include_directories(scanline_filter_test PRIVATE src/runtime)
+add_test(NAME scanline_filter_test COMMAND scanline_filter_test)
+
+add_executable(frontend_settings_test
+    tests/frontend/frontend_settings_test.cpp
+    src/runtime/frontend_settings.cpp
+    src/runtime/color_lut.cpp)
+target_include_directories(frontend_settings_test PRIVATE src/runtime)
+add_test(NAME frontend_settings_test COMMAND frontend_settings_test)
+
+add_executable(settings_menu_test
+    tests/frontend/settings_menu_test.cpp
+    src/runtime/settings_menu.cpp
+    src/runtime/bitmap_font.cpp)
+target_include_directories(settings_menu_test PRIVATE src/runtime)
+add_test(NAME settings_menu_test COMMAND settings_menu_test)
+
+add_executable(host_gamepad_mapping_test
+    tests/frontend/host_gamepad_mapping_test.cpp
+    src/runtime/host_gamepad.cpp)
+target_include_directories(host_gamepad_mapping_test PRIVATE src/runtime)
+if(GBARECOMP_SDL2_OK)
+    target_compile_definitions(host_gamepad_mapping_test PRIVATE GBARECOMP_HAVE_SDL2)
+    target_include_directories(host_gamepad_mapping_test PRIVATE ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(host_gamepad_mapping_test PRIVATE ${SDL2_LIBRARIES})
+    if(GBARECOMP_GAMEPAD_AVAILABLE)
+        target_link_libraries(host_gamepad_mapping_test PRIVATE recomp_gamepad::identity)
+    endif()
+    if(GBARECOMP_GIP_AVAILABLE)
+        target_link_libraries(host_gamepad_mapping_test PRIVATE recomp_gamepad::gip)
+    endif()
+endif()
+add_test(NAME host_gamepad_mapping_test COMMAND host_gamepad_mapping_test)
 
 # P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
 add_executable(heal_gate_tests

@@ -1971,6 +1971,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // the Windows timer-resolution bump doesn't apply to headless/TCP
     // batch runs (which intentionally run uncapped).
     std::optional<FramePacer> pacer;
+    bool host_fast_forward = false;
     if (args.window) {
         if (!HostWindow::is_available()) {
             std::fprintf(stderr,
@@ -2006,6 +2007,19 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (live_fb.empty()) live_fb.assign(ppu.render_bytes(), 0);
         pacer.emplace();  // paces to the GBA's 59.7275 Hz
     }
+    auto pace_host_output = [&]() {
+        if (!args.window || host_fast_forward) return;
+        if (win.audio_clock_available()) {
+            // Rust-reference producer policy: audio is the clock. Produce
+            // immediately while the ring is below its 4096-frame target
+            // (~62.5 ms at 65.536 kHz); once primed/full, yield briefly for
+            // the callback to consume. Display refresh never owns speed.
+            if (win.audio_fill_ms() >= 62.5)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            return;
+        }
+        if (pacer) pacer->wait_for_next_frame();
+    };
 
     // Host-window save-state slots: the ROM path with a .stateN
     // extension (N = 1..9). Shift+Fn writes slot N, Fn restores it.
@@ -2132,6 +2146,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             input_record_last_value = ev.keyinput;
         }
         if (ev.quit) host_quit = true;
+        host_fast_forward = ev.fast_forward;
         if (pacer) pacer->set_uncapped(ev.fast_forward);
         // System hotkeys (config.ini [KeyMap], rebindable in the launcher).
         if (ev.toggle_fullscreen) {
@@ -2507,7 +2522,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 ++frames_presented;
                 if (args.frames >= 0 && frames_presented >= args.frames)
                     host_quit = true;
-                if (pacer) pacer->wait_for_next_frame();
+                pace_host_output();
                 frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3, fp_t4,
                                    FramePhaseRing::now_ns());
             }
@@ -2858,7 +2873,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 }
                 // Pace to real GBA time. Decoupled from monitor vsync
                 // (MC-HP-004); hold Tab to uncap (fast-forward).
-                if (pacer) pacer->wait_for_next_frame();
+                pace_host_output();
                 frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3, fp_t4,
                                    FramePhaseRing::now_ns());
                 window_debug_checkpoint(true, false);

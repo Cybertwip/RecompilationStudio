@@ -24,7 +24,8 @@ Machine-readable evidence is in
 ## Root cause and fix
 
 `psx_dispatch_game_compiled()` directly invokes generated C. A normal generated
-callee returns with `cpu->pc == guest_return_pc`. The dirty interpreter call helper checked `cpu->pc != 0` before consuming that normal return,
+callee returns with `cpu->pc == guest_return_pc`. The dirty interpreter call
+helper checked `cpu->pc != 0` before consuming that normal return,
 misclassifying it as a nonlocal transfer.
 
 The runtime now:

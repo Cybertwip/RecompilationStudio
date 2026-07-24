@@ -15,7 +15,7 @@ void psx_bail_record(uint32_t site_ra, uint32_t site_sp,
     (void)site_ra; (void)site_sp; (void)wild_pc; (void)guest_sp;
 }
 
-/* Mirrors the corrected interpreter/JIT call-result ordering. */
+/* Mirrors the corrected dirty-interpreter call-result ordering. */
 static int finish_direct_call(CPUState *cpu, uint32_t site_ra, uint32_t site_sp) {
     if (g_psx_call_bail) return 1;
     if (psx_call_result_is_transfer(cpu, site_ra)) return 1;

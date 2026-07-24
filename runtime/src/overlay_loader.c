@@ -3198,17 +3198,14 @@ static int psx_sljit_call_inner(CPUState *cpu, uint32_t target, uint32_t return_
     if (dirty_ram_text_native_ok(target & 0x1FFFFFFFu)) {
         extern int psx_dispatch_game_compiled(CPUState *cpu, uint32_t addr);
         cpu->pc = 0;
-        int prev_unit_depth = g_call_unit_depth;
-        if (overlay_unit_defer_enabled()) g_call_unit_depth = prev_unit_depth + 1;
         int prev_phase = g_exec_phase;
         g_exec_phase = 3;
         int _gc = psx_dispatch_game_compiled(cpu, target);
         g_exec_phase = prev_phase;
-        g_call_unit_depth = prev_unit_depth;
         if (_gc) {
             if (g_psx_call_bail) return 1;
-            if (check_contract && psx_call_contract(cpu, return_pc, site_sp)) return 1;
             if (psx_call_result_is_transfer(cpu, return_pc)) return 1;
+            if (check_contract && psx_call_contract(cpu, return_pc, site_sp)) return 1;
             return 0;
         }
     }
@@ -3216,8 +3213,8 @@ static int psx_sljit_call_inner(CPUState *cpu, uint32_t target, uint32_t return_
     cpu->pc = 0;
     if (overlay_loader_call_native(cpu, target)) {
         if (g_psx_call_bail) return 1;
-        if (check_contract && psx_call_contract(cpu, return_pc, site_sp)) return 1;
         if (psx_call_result_is_transfer(cpu, return_pc)) return 1;
+        if (check_contract && psx_call_contract(cpu, return_pc, site_sp)) return 1;
         return 0;
     }
     /* Not a resolved compiled/native unit: dispatch the callee as a unit (the

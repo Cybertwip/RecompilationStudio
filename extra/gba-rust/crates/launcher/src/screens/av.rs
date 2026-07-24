@@ -161,23 +161,45 @@ impl AvScreen {
                 .color(theme::white(140)),
             );
 
-            // Pixel grid.
+            // Pixel grid / scanline filter. The switch is explicit so OFF
+            // never discards the user's preferred strength.
             ui.add_space(8.0);
-            self.knob_row(
-                ui,
-                "Pixel grid",
-                "video.grid",
-                0.0..=1.0,
-                |av| &mut av.grid,
-                |s| {
-                    screen::ScreenKind::by_name(s)
-                        .map(screen::ScreenKind::default_grid_strength)
-                        .unwrap_or(0.0)
-                },
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("PIXEL GRID / SCANLINES")
+                        .size(11.0)
+                        .color(theme::white(160)),
+                );
+                let label = if self.av.grid_enabled { "ON" } else { "OFF" };
+                if theme::glossy_button(
+                    ui,
+                    label,
+                    self.av.grid_enabled,
+                    Vec2::new(72.0, 26.0),
+                )
+                .clicked()
+                {
+                    self.av.grid_enabled = !self.av.grid_enabled;
+                    self.save();
+                }
+            });
+            if self.av.grid_enabled {
+                self.knob_row(
+                    ui,
+                    "Grid strength",
+                    "video.grid",
+                    0.0..=1.0,
+                    |av| &mut av.grid,
+                    |s| {
+                        screen::ScreenKind::by_name(s)
+                            .map(screen::ScreenKind::default_grid_strength)
+                            .unwrap_or(0.0)
+                    },
+                );
+            }
             ui.label(
                 egui::RichText::new(
-                    "Subpixel stripes and row gaps, integrated so they stay \
+                    "Optional subpixel stripes and row gaps, integrated so they stay \
                      clean at any window size. Fades out automatically below \
                      ~2\u{00d7} scale.",
                 )

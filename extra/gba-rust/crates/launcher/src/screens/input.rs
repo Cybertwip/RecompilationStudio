@@ -23,15 +23,23 @@ fn build_gilrs() -> Option<gilrs::Gilrs> {
 pub struct InputScreen {
     cfg: InputConfig,
     gilrs: Option<gilrs::Gilrs>,
+    direct: Option<native_gamepad::Gamepad>,
     capture: Option<Button>,
     status: String,
 }
 
 impl InputScreen {
     pub fn new() -> Self {
+        let cfg = InputConfig::load();
+        let direct = if cfg.gamepad_id.starts_with("gip:") {
+            native_gamepad::Gamepad::open(&cfg.gamepad_id)
+        } else {
+            None
+        };
         Self {
-            cfg: InputConfig::load(),
+            cfg,
             gilrs: build_gilrs(),
+            direct,
             capture: None,
             status: String::new(),
         }
@@ -43,6 +51,13 @@ impl InputScreen {
         // gamepad list is rebuilt each frame, so hotplug shows up live.
         let mut pad_presses: Vec<String> = Vec::new();
         let mut pads: Vec<String> = Vec::new();
+        let direct_devices = native_gamepad::enumerate();
+        if self.cfg.gamepad_id.starts_with("gip:") &&
+            self.direct.as_ref().map(native_gamepad::Gamepad::selector)
+                != Some(self.cfg.gamepad_id.as_str())
+        {
+            self.direct = native_gamepad::Gamepad::open(&self.cfg.gamepad_id);
+        }
         if let Some(g) = self.gilrs.as_mut() {
             while let Some(ev) = g.next_event() {
                 match ev.event {
@@ -63,6 +78,11 @@ impl InputScreen {
             }
             pads = g.gamepads().map(|(_, gp)| gp.name().to_string()).collect();
         }
+        if self.cfg.gamepad_id.starts_with("gip:") {
+            if let Some(state) = self.direct.as_ref().and_then(native_gamepad::Gamepad::state) {
+                pad_presses.extend(native_capture_sources(&state));
+            }
+        }
 
         theme::glass_frame().show(ui, |ui| {
             ui.set_min_size(Vec2::new(ui.available_width(), ui.available_height()));
@@ -76,19 +96,35 @@ impl InputScreen {
                     .clicked()
                 {
                     self.cfg.device = Device::Keyboard;
+                    self.direct = None;
                     self.persist();
                 }
                 for name in &pads {
                     let sel = self.cfg.device == Device::Gamepad
+                        && self.cfg.gamepad_id.is_empty()
                         && (self.cfg.gamepad_name == *name || self.cfg.gamepad_name.is_empty());
                     let label = format!("\u{1F3AE} {}", name.to_uppercase());
                     if theme::glossy_button(ui, &label, sel, Vec2::new(220.0, 32.0)).clicked() {
                         self.cfg.device = Device::Gamepad;
                         self.cfg.gamepad_name = name.clone();
+                        self.cfg.gamepad_id.clear();
+                        self.direct = None;
                         self.persist();
                     }
                 }
-                if pads.is_empty() {
+                for device in &direct_devices {
+                    let sel = self.cfg.device == Device::Gamepad
+                        && self.cfg.gamepad_id == device.selector;
+                    let label = format!("\u{1F3AE} {} (DIRECT USB)", device.name.to_uppercase());
+                    if theme::glossy_button(ui, &label, sel, Vec2::new(260.0, 32.0)).clicked() {
+                        self.cfg.device = Device::Gamepad;
+                        self.cfg.gamepad_name = device.name.clone();
+                        self.cfg.gamepad_id = device.selector.clone();
+                        self.direct = native_gamepad::Gamepad::open(&device.selector);
+                        self.persist();
+                    }
+                }
+                if pads.is_empty() && direct_devices.is_empty() {
                     ui.label(
                         egui::RichText::new("no pads detected — plug one in, it shows up here")
                             .size(11.0)

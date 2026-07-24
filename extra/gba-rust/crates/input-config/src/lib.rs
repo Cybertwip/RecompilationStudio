@@ -229,8 +229,12 @@ impl StickToken {
 #[derive(Clone, PartialEq, Debug)]
 pub struct InputConfig {
     pub device: Device,
-    /// Preferred pad by name; empty = first connected.
+    /// Preferred pad by display name; retained for compatibility with older
+    /// configs and ordinary gilrs devices.
     pub gamepad_name: String,
+    /// Persistent backend selector when available (`gip:...` for the shared
+    /// macOS direct-USB transport). Empty selects by name / first connected.
+    pub gamepad_id: String,
     pub keys: [String; 10],
     /// Pad bindings: a gilrs button name (`South`, `DPadUp`, ...) or a
     /// stick-direction token (`LeftStickUp`, ...). The play runtime
@@ -248,6 +252,7 @@ impl Default for InputConfig {
         Self {
             device: Device::Keyboard,
             gamepad_name: String::new(),
+            gamepad_id: String::new(),
             // the historical play-command mapping
             keys: [
                 s("Z"),
@@ -299,6 +304,7 @@ impl InputConfig {
                     }
                 }
                 "gamepad_name" => cfg.gamepad_name = v.to_string(),
+                "gamepad_id" => cfg.gamepad_id = v.to_string(),
                 "dpad_source" => {
                     if let Some(d) = DpadSource::from_token(&v.to_ascii_lowercase()) {
                         cfg.dpad_source = d;
@@ -337,6 +343,7 @@ impl InputConfig {
             }
         ));
         out.push_str(&format!("gamepad_name = {}\n", self.gamepad_name));
+        out.push_str(&format!("gamepad_id = {}\n", self.gamepad_id));
         out.push_str(&format!("dpad_source = {}\n", self.dpad_source.token()));
         out.push_str(&format!("stick_deadzone = {:.2}\n", self.stick_deadzone));
         for b in Button::ALL {
@@ -411,6 +418,10 @@ pub struct AvConfig {
     pub response: String,
     /// Persistence carryover: "auto" or 0..0.9.
     pub response_keep: String,
+    /// Whether the physical LCD pixel-grid / scanline pass is enabled.
+    /// Kept separate from strength so users can turn the effect off without
+    /// losing their tuned value.
+    pub grid_enabled: bool,
     /// Pixel-grid strength: "auto" (per-screen default) or 0..1.
     pub grid: String,
     /// Output colorspace: auto | srgb | display-p3.
@@ -429,6 +440,7 @@ impl Default for AvConfig {
             screen_darken: "auto".into(),
             response: "smart".into(),
             response_keep: "auto".into(),
+            grid_enabled: true,
             grid: "auto".into(),
             display_gamut: "auto".into(),
             video_vsync: false,
@@ -451,6 +463,7 @@ impl AvConfig {
                 "video.darken" => cfg.screen_darken = v.to_ascii_lowercase(),
                 "video.response" => cfg.response = v.to_ascii_lowercase(),
                 "video.response_keep" => cfg.response_keep = v.to_ascii_lowercase(),
+                "video.grid_enabled" => cfg.grid_enabled = v.eq_ignore_ascii_case("true"),
                 "video.grid" => cfg.grid = v.to_ascii_lowercase(),
                 "video.gamut" => cfg.display_gamut = v.to_ascii_lowercase(),
                 "video.vsync" => cfg.video_vsync = v.eq_ignore_ascii_case("true"),
@@ -468,6 +481,7 @@ impl AvConfig {
              video.darken = {}\n\
              video.response = {}\n\
              video.response_keep = {}\n\
+             video.grid_enabled = {}\n\
              video.grid = {}\n\
              video.gamut = {}\n\
              video.vsync = {}\n",
@@ -476,6 +490,7 @@ impl AvConfig {
             self.screen_darken,
             self.response,
             self.response_keep,
+            self.grid_enabled,
             self.grid,
             self.display_gamut,
             self.video_vsync,
@@ -485,6 +500,16 @@ impl AvConfig {
     /// "auto" (or anything unparseable) -> None; otherwise the number.
     pub fn knob(value: &str) -> Option<f32> {
         value.parse::<f32>().ok().filter(|v| v.is_finite())
+    }
+
+    /// Resolve the present-time pixel-grid strength. Disabled is exactly zero;
+    /// enabled preserves the stored explicit/automatic strength.
+    pub fn resolved_grid_strength(&self, automatic: f32) -> f32 {
+        if self.grid_enabled {
+            Self::knob(&self.grid).unwrap_or(automatic).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     /// Load from the default path; missing or unreadable = defaults.

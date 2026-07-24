@@ -1073,14 +1073,6 @@ static int interp_enter_compiled(CPUState *cpu, uint32_t target) {
         g_psx_call_bail = 1;
         return 1;
     }
-    /* A guest JAL/JALR into static code is one atomic call unit. Without this
-     * guard a scheduler IRQ can switch threads after the callee produced its
-     * return value but before the interpreted continuation consumes it. Chrono
-     * Cross exposed that as GPUSTAT 0x80013450 returning zero at 0x801D2CB8. */
-    extern int g_call_unit_depth;
-    extern int overlay_unit_defer_enabled(void);
-    int prev_unit_depth = g_call_unit_depth;
-    if (overlay_unit_defer_enabled()) g_call_unit_depth = prev_unit_depth + 1;
     g_mixed_depth++;
     ls_func_enter(target, cpu);
     int prev_phase = g_exec_phase;
@@ -1089,7 +1081,6 @@ static int interp_enter_compiled(CPUState *cpu, uint32_t target) {
     g_exec_phase = prev_phase;
     ls_func_exit(target, cpu, r);
     g_mixed_depth--;
-    g_call_unit_depth = prev_unit_depth;
     return r;
 }
 #endif /* PSX_HAS_GAME_DISPATCH */
@@ -1280,10 +1271,13 @@ static int exec_one(CPUState *cpu, uint32_t pc, uint32_t *next_pc_out) {
             cpu->pc = 0;
             if (interp_enter_compiled(cpu, target)) {
                 if (g_psx_call_bail) return 1;  /* wild unwind: cpu->pc = true target */
+                /* A genuinely different PC is a nonlocal transfer and must
+                 * surface before contract validation. Only pc==return_pc is
+                 * the normal direct-compiled return that needs normalization. */
+                if (psx_call_result_is_transfer(cpu, return_pc)) return 1;
                 if (rd == 0 || rd == 31) {
                     if (psx_call_contract(cpu, return_pc, site_sp)) return 1;
                 }
-                if (psx_call_result_is_transfer(cpu, return_pc)) return 1;
                 return dirty_ram_finish_call_return(cpu, return_pc, next_pc_out);
             }
 #endif
@@ -1451,8 +1445,8 @@ static int exec_one(CPUState *cpu, uint32_t pc, uint32_t *next_pc_out) {
         cpu->pc = 0;
         if (interp_enter_compiled(cpu, target)) {
             if (g_psx_call_bail) { XRES(XRES_EC_BAIL); return 1; }  /* wild unwind: cpu->pc = true target */
-            if (psx_call_contract(cpu, return_pc, site_sp)) { XRES(XRES_EC_CONTRACT); return 1; }
             if (psx_call_result_is_transfer(cpu, return_pc)) { XRES(XRES_EC_PC); return 1; }
+            if (psx_call_contract(cpu, return_pc, site_sp)) { XRES(XRES_EC_CONTRACT); return 1; }
             XRES(XRES_EC_RET);
             return dirty_ram_finish_call_return(cpu, return_pc, next_pc_out);
         }

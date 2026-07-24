@@ -31,11 +31,10 @@
   },
   "root_cause": {
     "component": "runtime/src/dirty_ram_interp.c interpreted-to-compiled JAL/JALR boundary",
-    "description": "A directly invoked compiled callee returns normally with cpu->pc equal to the guest return address. The interpreter treated every nonzero cpu->pc as a nonlocal transfer before applying the call contract, so the normal return escaped through the generic transfer path. The compiled call was also not bracketed as an atomic call unit, allowing scheduler delivery between producing and consuming the return value."
+    "description": "A directly invoked compiled callee returns normally with cpu->pc equal to the guest return address. The interpreter treated every nonzero cpu->pc as a nonlocal transfer, so the normal return escaped through the generic transfer path. The corrected ordering consumes only pc==return_pc; a genuinely different PC still surfaces before call-contract validation."
   },
   "fix": {
-    "normal_return_rule": "Normalize cpu->pc == return_pc to the dispatch convention pc=0 after call-contract validation.",
-    "atomicity_rule": "Bracket interpreted/JIT calls into statically compiled code with g_call_unit_depth.",
+    "normal_return_rule": "Normalize cpu->pc == return_pc to the dispatch convention pc=0, while preserving nonlocal-transfer precedence over call-contract validation.",
     "generated_code_modified": false
   },
   "regression": {

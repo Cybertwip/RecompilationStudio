@@ -62,7 +62,7 @@ pub enum Changed {
     /// `audio_enhanced` flipped.
     Audio,
     /// A video setting that rebuilds the color LUT / temporal / grid in
-    /// place (screen model, darken, response, grid).
+    /// place (screen model, darken, response, grid toggle).
     Video,
     /// The output gamut — may need the GPU presenter recreated; the loop
     /// decides whether to apply now or on next launch.
@@ -107,7 +107,7 @@ impl Row {
             Row::Screen => "Screen",
             Row::Darken => "Darken",
             Row::Response => "Response",
-            Row::Grid => "Grid",
+            Row::Grid => "Pixel Grid",
             Row::Gamut => "Gamut",
             Row::Vsync => "Vsync",
             Row::Quit => "Quit (saves)",
@@ -309,7 +309,7 @@ fn value_of(row: Row, av: &AvConfig) -> Option<String> {
         Row::Screen => screen_kind(av).name().to_uppercase(),
         Row::Darken => av.screen_darken.to_uppercase(),
         Row::Response => response_mode(av).name().to_uppercase(),
-        Row::Grid => av.grid.to_uppercase(),
+        Row::Grid => if av.grid_enabled { "ON" } else { "OFF" }.to_string(),
         Row::Gamut => display_target(av).name().to_uppercase(),
         Row::Vsync => if av.video_vsync { "ON" } else { "OFF" }.to_string(),
     })
@@ -341,7 +341,7 @@ fn cycle(row: Row, av: &mut AvConfig, forward: bool) -> Option<Changed> {
             Some(Changed::Video)
         }
         Row::Grid => {
-            av.grid = step_knob(&av.grid, forward);
+            av.grid_enabled = !av.grid_enabled;
             Some(Changed::Video)
         }
         Row::Gamut => {

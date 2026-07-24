@@ -993,8 +993,7 @@ fn apply_av_change(
                     .unwrap_or_else(|| screen::blend::default_rho(*screen_kind)),
             );
             *grid_params = screen::present::GridParams::with_strength(
-                input_config::AvConfig::knob(&av.grid)
-                    .unwrap_or_else(|| screen_kind.default_grid_strength()),
+                av.resolved_grid_strength(screen_kind.default_grid_strength()),
             );
         }
     }

@@ -26,15 +26,19 @@ Machine-readable evidence is in
 `psx_dispatch_game_compiled()` directly invokes generated C. A normal generated
 callee returns with `cpu->pc == guest_return_pc`. The dirty interpreter and
 sljit call helpers checked `cpu->pc != 0` before consuming that normal return,
-misclassifying it as a nonlocal transfer. They also failed to bracket static
-compiled callees with the atomic call-unit depth used by native overlay callees.
+misclassifying it as a nonlocal transfer.
 
 The runtime now:
 
-1. validates the call contract;
-2. normalizes `cpu->pc == return_pc` to the dispatch convention `pc=0`;
-3. surfaces only a genuinely different nonzero PC; and
-4. brackets interpreted/JIT calls into static code with `g_call_unit_depth`.
+1. surfaces a genuinely different nonzero PC before call-contract validation;
+2. normalizes only `cpu->pc == return_pc` to the dispatch convention `pc=0`;
+3. validates the call contract for an actual return; and
+4. preserves the callee's return registers for the interpreted continuation.
+
+An initial revision validated the contract before classifying a different
+nonzero PC. That fabricated a bail in the BIOS exception path (`0xE28` ->
+`0x800164F4`) and froze startup at frame 332. The regression test now covers
+that exception/nonlocal-transfer case explicitly.
 
 Generated game/BIOS code is unchanged.
 

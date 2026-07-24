@@ -125,6 +125,70 @@ fn reset_audio_counters(streams: &Arc<Mutex<AudioStreams>>) {
     st.clipped = 0;
 }
 
+fn native_axis(state: &native_gamepad::State, token: input_config::StickToken) -> f32 {
+    let raw = match (token.left(), token.axis().0) {
+        (true, true) => state.left_x,
+        (true, false) => state.left_y.saturating_neg(),
+        (false, true) => state.right_x,
+        (false, false) => state.right_y.saturating_neg(),
+    };
+    raw as f32 / 32767.0
+}
+
+fn native_button_pressed(state: &native_gamepad::State, name: &str, deadzone: f32) -> bool {
+    use native_gamepad::button as b;
+    match input_config::pad_binding(name) {
+        input_config::PadBinding::Stick(token) => {
+            let value = native_axis(state, token);
+            let positive = token.axis().1;
+            if positive { value > deadzone } else { value < -deadzone }
+        }
+        input_config::PadBinding::Button(name) => match name {
+            "South" => state.buttons & b::A != 0,
+            "East" => state.buttons & b::B != 0,
+            "West" => state.buttons & b::X != 0,
+            "North" => state.buttons & b::Y != 0,
+            "LeftTrigger" => state.buttons & b::LEFT_BUMPER != 0,
+            "LeftTrigger2" => state.left_trigger >= 256,
+            "RightTrigger" => state.buttons & b::RIGHT_BUMPER != 0,
+            "RightTrigger2" => state.right_trigger >= 256,
+            "Select" => state.buttons & b::VIEW != 0,
+            "Start" => state.buttons & b::MENU != 0,
+            "Mode" => state.guide,
+            "LeftThumb" => state.buttons & b::LEFT_STICK != 0,
+            "RightThumb" => state.buttons & b::RIGHT_STICK != 0,
+            "DPadUp" => state.buttons & b::DPAD_UP != 0,
+            "DPadDown" => state.buttons & b::DPAD_DOWN != 0,
+            "DPadLeft" => state.buttons & b::DPAD_LEFT != 0,
+            "DPadRight" => state.buttons & b::DPAD_RIGHT != 0,
+            _ => false,
+        },
+    }
+}
+
+fn native_pad_active(
+    state: &native_gamepad::State,
+    name: &str,
+    source: input_config::DpadSource,
+    deadzone: f32,
+    button: input_config::Button,
+) -> bool {
+    if native_button_pressed(state, name, deadzone) {
+        return true;
+    }
+    let token = match button {
+        input_config::Button::Right => input_config::StickToken::dir(source, true, true),
+        input_config::Button::Left => input_config::StickToken::dir(source, true, false),
+        input_config::Button::Up => input_config::StickToken::dir(source, false, true),
+        input_config::Button::Down => input_config::StickToken::dir(source, false, false),
+        _ => None,
+    };
+    token.is_some_and(|token| {
+        let value = native_axis(state, token);
+        if token.axis().1 { value > deadzone } else { value < -deadzone }
+    })
+}
+
 /// All play-session state. Pre-window state is built in [`cmd_play`] and moved
 /// in; the window, GPU presenter, and software-blit surface are created in
 /// [`ApplicationHandler::resumed`] (window creation is only valid once the
@@ -145,6 +209,10 @@ struct PlayApp {
     icfg: input_config::InputConfig,
     key_pairs: Vec<(KeyCode, u16)>,
     pad: Option<gilrs::Gilrs>,
+    /// Shared native direct-USB backend (wired Xbox GIP devices on macOS).
+    /// It is opened alongside gilrs and sampled only when no selected gilrs
+    /// controller is live, so ordinary SDL/HID controllers stay preferred.
+    gip_pad: Option<native_gamepad::Gamepad>,
     /// Physical keys currently held, reconstructed from key press/release
     /// events — winit's event-driven equivalent of minifb's `is_key_down`.
     held: HashSet<KeyCode>,
@@ -303,6 +371,7 @@ impl PlayApp {
             cancel: self.held.contains(&KeyCode::Escape),
             open: self.held.contains(&KeyCode::Escape),
         };
+        let mut physical_pad = false;
         if let Some(g) = self.pad.as_mut() {
             while g.next_event().is_some() {}
             let chosen = g
@@ -310,6 +379,7 @@ impl PlayApp {
                 .find(|(_, gp)| gp.name() == self.icfg.gamepad_name)
                 .or_else(|| g.gamepads().next());
             if let Some((_, gp)) = chosen {
+                physical_pad = true;
                 let dz = self.icfg.stick_deadzone;
                 for b in input_config::Button::ALL {
                     if pad_pressed(&gp, &self.icfg.pads[b.index()], dz) {
@@ -356,6 +426,31 @@ impl PlayApp {
                 // too.) A chord like Start+Select is deliberately NOT a
                 // default: those are real in-game buttons.
                 nav.open |= gp.is_pressed(Gb::Mode);
+            }
+        }
+        if !physical_pad {
+            if let Some(state) = self.gip_pad.as_ref().and_then(native_gamepad::Gamepad::state) {
+                let dz = self.icfg.stick_deadzone;
+                for button in input_config::Button::ALL {
+                    if native_pad_active(
+                        &state,
+                        &self.icfg.pads[button.index()],
+                        self.icfg.dpad_source,
+                        dz,
+                        button,
+                    ) {
+                        keys &= !button.bit();
+                    }
+                }
+                use native_gamepad::button as b;
+                let threshold = (dz * 32767.0) as i16;
+                nav.up |= state.buttons & b::DPAD_UP != 0 || state.left_y < -threshold;
+                nav.down |= state.buttons & b::DPAD_DOWN != 0 || state.left_y > threshold;
+                nav.left |= state.buttons & b::DPAD_LEFT != 0 || state.left_x < -threshold;
+                nav.right |= state.buttons & b::DPAD_RIGHT != 0 || state.left_x > threshold;
+                nav.confirm |= state.buttons & b::A != 0;
+                nav.cancel |= state.buttons & b::B != 0;
+                nav.open |= state.guide;
             }
         }
         (keys, nav)
@@ -1148,9 +1243,16 @@ Place your own dump as gba_bios.bin next to the executable:\n  {}",
             (key, b.bit())
         })
         .collect();
-    let pad = match icfg.device {
-        input_config::Device::Gamepad => build_gilrs(),
-        input_config::Device::Keyboard => None,
+    let (pad, gip_pad) = match icfg.device {
+        input_config::Device::Gamepad if icfg.gamepad_id.starts_with("gip:") => (
+            None,
+            native_gamepad::Gamepad::open(&icfg.gamepad_id),
+        ),
+        input_config::Device::Gamepad => (
+            build_gilrs(),
+            native_gamepad::Gamepad::open("gip:auto"),
+        ),
+        input_config::Device::Keyboard => (None, None),
     };
 
     // Screen simulation (see crates/screen): temporal response on the emulated-
@@ -1199,8 +1301,7 @@ Place your own dump as gba_bios.bin next to the executable:\n  {}",
             .unwrap_or_else(|| screen::blend::default_rho(screen_kind)),
     );
     let grid_params = screen::present::GridParams::with_strength(
-        input_config::AvConfig::knob(&av.grid)
-            .unwrap_or_else(|| screen_kind.default_grid_strength()),
+        av.resolved_grid_strength(screen_kind.default_grid_strength()),
     );
 
     // In-game menu (Escape / pad Mode). Available unless a package pins it off,
@@ -1219,6 +1320,7 @@ Place your own dump as gba_bios.bin next to the executable:\n  {}",
         icfg,
         key_pairs,
         pad,
+        gip_pad,
         held: HashSet::new(),
         av,
         screen_kind,

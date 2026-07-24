@@ -125,6 +125,14 @@ fn reset_audio_counters(streams: &Arc<Mutex<AudioStreams>>) {
     st.clipped = 0;
 }
 
+fn required_bios_pin(
+    manifest: Option<&crate::packfile::Manifest>,
+) -> Option<(&crate::packfile::Manifest, &str)> {
+    manifest
+        .filter(|m| !m.skip_bios)
+        .and_then(|m| m.bios_sha256.as_deref().map(|want| (m, want)))
+}
+
 fn native_axis(state: &native_gamepad::State, token: input_config::StickToken) -> f32 {
     let raw = match (token.left(), token.axis().0) {
         (true, true) => state.left_x,
@@ -1160,11 +1168,7 @@ image hashes to {}…",
         } else if sha != input_config::BIOS_SHA256 {
             eprintln!("bios: image is not the canonical dump (sha256 {sha}) — trying it as-is");
         }
-    } else if let Some((m, want)) = manifest.as_ref().and_then(|m| {
-        (!m.skip_bios)
-            .then_some(())
-            .and_then(|_| m.bios_sha256.as_ref().map(|want| (m, want)))
-    }) {
+    } else if let Some((m, want)) = required_bios_pin(manifest.as_ref()) {
         return Err(format!(
             "this package requires a BIOS image (sha256 {}…) and none is installed.\n\
 Place your own dump as gba_bios.bin next to the executable:\n  {}",
@@ -1414,4 +1418,30 @@ Place your own dump as gba_bios.bin next to the executable:\n  {}",
         return Err(e);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packaged_hle_boot_does_not_require_pinned_bios_file() {
+        let mut manifest = crate::packfile::Manifest {
+            name: "test".into(),
+            rom_sha256: "a".repeat(64),
+            bios_sha256: Some("b".repeat(64)),
+            skip_bios: true,
+            interpreter: true,
+            menu: true,
+            translation: None,
+            engine_hle: None,
+            dir: std::path::PathBuf::from("/tmp/test"),
+        };
+        assert!(required_bios_pin(Some(&manifest)).is_none());
+        manifest.skip_bios = false;
+        assert_eq!(
+            required_bios_pin(Some(&manifest)).map(|(_, pin)| pin),
+            Some(manifest.bios_sha256.as_deref().unwrap())
+        );
+    }
 }

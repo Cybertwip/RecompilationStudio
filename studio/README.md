@@ -20,11 +20,10 @@ grid/scanline filter is off by default. Both remain explicit runtime choices.
 GBA builds do not invoke Ghidra. Batch mode scans recursively for `.gba` files.
 
 CMake remains the CI entrypoint (`gba-runtime`). It orchestrates the locked Cargo
-workspace and `gba-pack`, emits a thin package, and uses a shared Studio Cargo
-cache so the Rust runtime is compiled once rather than once per title. Native
-translation is created in the per-user cache on first launch using the packaged
-function database; Studio does not generate a multi-gigabyte translation work
-tree during export. Personal Studio packages include the selected ROM and canonical
+workspace and `gba-pack`, pretranslates the selected title using the packaged
+function database, and uses a shared Studio Cargo cache so the Rust runtime is
+compiled once rather than once per title. The completed native translation ships
+inside the app; temporary emitted-C/object work is cleaned after packaging. Personal Studio packages include the selected ROM and canonical
 BIOS in the app resources; BIOS execution remains skipped/HLE by default.
 
 The GBA runtime provides automatic keyboard/gamepad input, the shared static

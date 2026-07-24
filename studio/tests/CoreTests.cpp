@@ -229,7 +229,7 @@ int main(int argc, char** argv) {
           gbaCmake.contains(QStringLiteral("gba-pack")) &&
           gbaCmake.contains(QStringLiteral("add_custom_target(gba-runtime")) &&
           gbaCmake.contains(QStringLiteral("steganos-package/gba-runtime")) &&
-          gbaCmake.contains(QStringLiteral("--defer-translation")) &&
+          !gbaCmake.contains(QStringLiteral("--defer-translation")) &&
           gbaCmake.contains(QStringLiteral("GBA_CARGO_TARGET_DIR")) &&
           gbaCmake.contains(QStringLiteral("CARGO_PROFILE_DIST_STRIP=none")) &&
           gbaCmake.contains(QStringLiteral("package_inputs/gba_bios.bin")) &&

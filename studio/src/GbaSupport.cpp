@@ -453,8 +453,8 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"[1/2] Building locked Rust runtime and packager\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_PACK_OUT}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} ${GBA_CARGO} build --manifest-path \"${_GBA_RUST_ROOT}/Cargo.toml\" --profile dist --locked -p recomp -p gba-pack\n");
-  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"[2/2] Assembling thin Rust GBA package (translation deferred)\"\n");
-  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} \"${_GBA_CARGO_TARGET}/dist/gba-pack${_GBA_EXE_SUFFIX}\" build \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" --rom \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" --bios \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" --out \"${_GBA_PACK_OUT}\" --recomp \"${_GBA_CARGO_TARGET}/dist/recomp${_GBA_EXE_SUFFIX}\" --gamedb \"${_GBA_RUST_ROOT}/gamedb.sqlite\" --defer-translation --no-soak\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E echo \"[2/2] Pretranslating and assembling Rust GBA package\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E env ${_GBA_ENV} \"${_GBA_CARGO_TARGET}/dist/gba-pack${_GBA_EXE_SUFFIX}\" build \"${CMAKE_CURRENT_SOURCE_DIR}/pack.toml\" --rom \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba\" --bios \"${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/gba_bios.bin\" --out \"${_GBA_PACK_OUT}\" --recomp \"${_GBA_CARGO_TARGET}/dist/recomp${_GBA_EXE_SUFFIX}\" --gamedb \"${_GBA_RUST_ROOT}/gamedb.sqlite\" --no-soak\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_GBA_PACK_OUT}/${_GBA_PACKAGE_NAME}\" \"${_GBA_STEGANOS_PACKAGE_DIR}\"\n");

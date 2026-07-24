@@ -12,7 +12,7 @@
     "bios": "skipped via HLE boot path",
     "pixel_grid_scanlines": false,
     "controller": "automatic gamepad with keyboard merge",
-    "studio_package": "thin; native translation deferred to first-launch user cache"
+    "studio_package": "pretranslated during export; no first-launch compilation"
   },
   "manifest": {
     "shared_component": "lib/recomp_gamepad",
@@ -35,6 +35,6 @@
       "_psx_gip_gamepad_close"
     ],
     "rust_gip_dynamic_libusb_dependency": false,
-    "thin_package_smoke": "passed; package contained recomp.pack.toml, gamedb.sqlite, ROM, and BIOS resources; no translation work directory"
+    "package_smoke": "package contains recomp.pack.toml, gamedb.sqlite, prebuilt translation, ROM, and BIOS resources; temporary translation work is cleaned"
   }
 }

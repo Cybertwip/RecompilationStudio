@@ -948,6 +948,21 @@ bool HostWindow::audio_debug_state(AudioDebugState& out) const {
     return true;
 }
 
+bool HostWindow::audio_clock_available() const {
+    if (!open_ || !impl_) return false;
+    const auto* b = static_cast<const Backend*>(impl_);
+    return b->audio_dev != 0 && b->bridge_ready && b->audio_mtx != nullptr;
+}
+
+double HostWindow::audio_fill_ms() const {
+    if (!audio_clock_available()) return 0.0;
+    auto* b = static_cast<Backend*>(impl_);
+    SDL_LockMutex(b->audio_mtx);
+    const double fill = rab_fill_ms(&b->bridge);
+    SDL_UnlockMutex(b->audio_mtx);
+    return fill;
+}
+
 bool HostWindow::capture_host_audio(uint64_t start, std::size_t count,
                                     std::vector<int16_t>& samples,
                                     uint64_t& first, uint64_t& head,
@@ -1150,6 +1165,8 @@ bool HostWindow::audio_debug_state(AudioDebugState& out) const {
     out = {};
     return false;
 }
+bool HostWindow::audio_clock_available() const { return false; }
+double HostWindow::audio_fill_ms() const { return 0.0; }
 bool HostWindow::capture_host_audio(uint64_t /*start*/, std::size_t /*count*/,
                                     std::vector<int16_t>& samples,
                                     uint64_t& first, uint64_t& head,

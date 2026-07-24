@@ -1,7 +1,8 @@
 //! Packaged-binary manifest: `recomp.pack.toml` next to the executable.
 //!
-//! A packaged recomp is this same binary shipped beside a manifest and
-//! a prebuilt translation. The manifest pins the cartridge and BIOS by
+//! A packaged recomp is this same binary shipped beside a manifest. Release
+//! packages may carry a prebuilt translation; thin Studio packages build the
+//! same translation into the per-user cache on first launch. The manifest pins the cartridge and BIOS by
 //! SHA-256 — the package carries no image bytes, and play refuses to
 //! start until the user supplies files hashing to the pins. With
 //! `interpreter = false` the package is a *full recomp*: a dispatch
@@ -29,8 +30,9 @@ pub struct Manifest {
     /// before the menu existed and the binary is configured by its
     /// config file only.
     pub menu: bool,
-    /// Translation library file name, relative to the manifest.
-    pub translation: String,
+    /// Optional prebuilt translation library file name, relative to the
+    /// manifest. `None` means a thin package: build/cache it on first launch.
+    pub translation: Option<String>,
     /// Engine-HLE pin from packaging: `None` = auto-detect, `"off"` =
     /// never arm, or an engine name (`m4a`/`gax`/`rdrv`) the packager
     /// verified — detection of other engines is skipped at runtime.
@@ -93,7 +95,11 @@ fn parse(path: &Path, dir: PathBuf) -> Result<Manifest, String> {
             .and_then(|t| t.get("menu"))
             .and_then(toml::Value::as_bool)
             .unwrap_or(true),
-        translation: s(["translation", "file"])?,
+        translation: doc
+            .get("translation")
+            .and_then(|t| t.get("file"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
         engine_hle: doc
             .get("runtime")
             .and_then(|t| t.get("engine-hle"))

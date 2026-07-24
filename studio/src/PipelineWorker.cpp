@@ -3312,6 +3312,8 @@ void PipelineWorker::run(PipelineRequest request) {
 }
 
 void PipelineWorker::runGba(const PipelineRequest& request) {
+  constexpr auto kCanonicalGbaBiosSha256 = "fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570";
+  constexpr auto kZeroGbaBiosSha256 = "4fe7b59af6de3b665b67788cc2f99892ab827efae3a467342b3bb4e3bc8e5bfe";
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
@@ -3420,6 +3422,15 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const quint32 biosCrc32 = crc32File(request.biosPath, error);
   if (romSha1.isEmpty() || romSha256.isEmpty() || biosSha1.isEmpty() || biosSha256.isEmpty()) {
     fail(error.isEmpty() ? QStringLiteral("The GBA inputs could not be hashed.") : error);
+    return;
+  }
+  if (biosSha256.compare(QString::fromLatin1(kCanonicalGbaBiosSha256),
+                         Qt::CaseInsensitive) != 0) {
+    const bool zeroImage = biosSha256.compare(QString::fromLatin1(kZeroGbaBiosSha256),
+                                              Qt::CaseInsensitive) == 0;
+    fail(zeroImage
+      ? QStringLiteral("The selected GBA BIOS is the old all-zero placeholder. Select the canonical gba_bios.bin dump (SHA-256 fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570).")
+      : QStringLiteral("The selected GBA BIOS is not the canonical dump. Expected SHA-256 fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570, got %1.").arg(biosSha256));
     return;
   }
   emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · entry %4")
@@ -3697,13 +3708,11 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     : QDir(stageDir).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()));
   const QString runtimeData = macosTarget
     ? QDir(stagedApp).filePath(QStringLiteral("Contents/MacOS")) : stageDir;
-  const QString translation = QDir(runtimeData).filePath(
-    QStringLiteral("translation.") + (windowsTarget ? QStringLiteral("dll")
-      : macosTarget ? QStringLiteral("dylib") : QStringLiteral("so")));
   const QString packManifest = QDir(runtimeData).filePath(QStringLiteral("recomp.pack.toml"));
-  if (!QFileInfo(mainExecutable).isFile() || !QFileInfo(translation).isFile() ||
-      !QFileInfo(packManifest).isFile()) {
-    fail(QStringLiteral("The Rust GBA package is missing its executable, native translation, or recomp.pack.toml."));
+  const QString packagedGameDb = QDir(runtimeData).filePath(QStringLiteral("gamedb.sqlite"));
+  if (!QFileInfo(mainExecutable).isFile() || !QFileInfo(packManifest).isFile() ||
+      !QFileInfo(packagedGameDb).isFile()) {
+    fail(QStringLiteral("The thin Rust GBA package is missing its executable, gamedb, or recomp.pack.toml."));
     return;
   }
 
@@ -3747,7 +3756,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("platform"), targetPlatformDisplayName(request.targetPlatform) },
     { QStringLiteral("runtime"), QStringLiteral("rust") },
     { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
-    { QStringLiteral("translation"), QFileInfo(translation).fileName() },
+    { QStringLiteral("translation"), QStringLiteral("deferred to first-launch user cache") },
     { QStringLiteral("pre_sign_executable_sha256"), preSignExecutableHash },
     { QStringLiteral("macos_gip_compiled"), macosTarget && request.macosGipGamepad },
     { QStringLiteral("scanlines_optional"), true },

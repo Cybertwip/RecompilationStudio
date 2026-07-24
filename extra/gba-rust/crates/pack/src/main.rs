@@ -27,7 +27,8 @@ const LIB_EXT: &str = if cfg!(windows) {
 
 const USAGE: &str = "usage: gba-pack <pack.toml> [--rom FILE] [--bios FILE]
        gba-pack build <pack.toml> --rom FILE --bios FILE [--out DIR]
-                      [--recomp PATH] [--soak FRAMES] [--no-soak]
+                      [--recomp PATH] [--gamedb FILE] [--defer-translation]
+                      [--soak FRAMES] [--no-soak]
 
 Plan mode validates the package description and (with --rom/--bios) the
 inputs, then prints the build plan.
@@ -127,6 +128,8 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     let mut bios = None;
     let mut out_dir = std::path::PathBuf::from("pack-out");
     let mut recomp_flag = None;
+    let mut gamedb_file: Option<String> = None;
+    let mut defer_translation = false;
     // A deeper default soak than a quick smoke test: the gate proves
     // covered paths, so a shallow window (a single boot) lets deep-play
     // code slip through. 7200 frames (~2 min of play) exercises menus
@@ -146,6 +149,8 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
             "--bios" => bios = Some(it.next().ok_or("--bios needs a value")?.clone()),
             "--out" => out_dir = it.next().ok_or("--out needs a value")?.into(),
             "--recomp" => recomp_flag = Some(it.next().ok_or("--recomp needs a value")?.clone()),
+            "--gamedb" => gamedb_file = Some(it.next().ok_or("--gamedb needs a value")?.clone()),
+            "--defer-translation" => defer_translation = true,
             "--no-soak" => no_soak = true,
             "--soak" => {
                 soak = it
@@ -180,6 +185,15 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
             return Err(format!("labels.file not found: {}", f.display()));
         }
     }
+    if defer_translation && !cfg.runtime.interpreter {
+        return Err("--defer-translation requires [runtime] interpreter = true".into());
+    }
+    if defer_translation && cfg.output.c_source {
+        return Err("--defer-translation cannot emit translated C source".into());
+    }
+    let gamedb_file = gamedb_file
+        .map(|p| std::fs::canonicalize(&p).map_err(|e| format!("{p}: {e}")))
+        .transpose()?;
     let host = if cfg!(target_os = "macos") {
         Platform::Macos
     } else if cfg!(target_os = "windows") {
@@ -193,139 +207,151 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let recomp = find_recomp(recomp_flag.as_deref())?;
     let work = out_dir.join("work");
-    std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let stem = rom
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or("bad ROM name")?
         .to_string();
-    // The package is BIOS-coherent by construction: the runtime boots
-    // the end user's real BIOS (pin-enforced), so the translation is
-    // built and soaked against the same image — an HLE translation
-    // would have no native blocks for region 0 and a full recomp
-    // would trap at the reset vector.
     let translation = work.join(format!("out/{stem}-bios.{LIB_EXT}"));
-    let rom_str = rom.to_str().ok_or("non-UTF8 rom path")?;
-    let bios_str = bios.to_str().ok_or("non-UTF8 bios path")?;
-    // Full recomp builds seed every decode point inside every bounded
-    // function (the mapper's `end` records): computed jump-table
-    // targets the soak never reaches still get native blocks. The
-    // soak gate stays as the proof, this makes it pass for paths
-    // nobody drove.
-    let mut build_envs: Vec<(&str, &str)> = Vec::new();
-    if cfg.output.c_source {
-        build_envs.push(("RECOMP_KEEP_C", "1"));
-    }
-    if !cfg.runtime.interpreter {
-        build_envs.push(("RECOMP_EXHAUSTIVE", "1"));
-    }
-    // A packager can pin a real compiler (e.g. clang) instead of the
-    // recompiler's default cc->TinyCC fallback; recomp honors $GBA_RECOMP_CC
-    // first in its detection order.
-    if let Some(c) = cfg.build.compiler.as_deref() {
-        build_envs.push(("GBA_RECOMP_CC", c));
-        println!("      compiler: {c} (pinned via [build] compiler)");
-    }
-    let keep_c: &[(&str, &str)] = &build_envs;
-    // Pass the label map EXPLICITLY rather than relying on the
-    // recompiler's beside-the-image discovery: the build runs against
-    // the canonicalized (symlink-resolved) image path, so a map named
-    // for the symlink would never be found. A full recomp's exhaustive
-    // in-function seeding depends on the map's `end` records, so a
-    // silently-missed map would ship a soak-only package.
-    let labels_abs = match &cfg.labels.file {
-        Some(f) => Some(
-            std::fs::canonicalize(f)
-                .map_err(|e| format!("{}: {e}", f.display()))?
-                .to_str()
-                .ok_or("non-UTF8 labels path")?
-                .to_string(),
-        ),
-        None => {
-            if !cfg.runtime.interpreter {
-                return Err(
-                    "[runtime] interpreter = false requires a [labels] file — a full \
-recomp needs the function map's boundaries for exhaustive coverage"
-                        .into(),
-                );
-            }
-            None
+    if !defer_translation {
+        let recomp = find_recomp(recomp_flag.as_deref())?;
+        std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
+        // The package is BIOS-coherent by construction: the runtime boots
+        // the end user's real BIOS (pin-enforced), so the translation is
+        // built and soaked against the same image — an HLE translation
+        // would have no native blocks for region 0 and a full recomp
+        // would trap at the reset vector.
+        let rom_str = rom.to_str().ok_or("non-UTF8 rom path")?;
+        let bios_str = bios.to_str().ok_or("non-UTF8 bios path")?;
+        // Full recomp builds seed every decode point inside every bounded
+        // function (the mapper's `end` records): computed jump-table
+        // targets the soak never reaches still get native blocks. The
+        // soak gate stays as the proof, this makes it pass for paths
+        // nobody drove.
+        let mut build_envs: Vec<(&str, &str)> = Vec::new();
+        if cfg.output.c_source {
+            build_envs.push(("RECOMP_KEEP_C", "1"));
         }
-    };
-    // --ram is always on: it profiles an interpreter run to translate
-    // RAM-resident code the static map can't address (see --no-soak above).
-    let mut build_args: Vec<&str> = vec!["build", rom_str, "--ram", "--bios", bios_str];
-    if let Some(l) = &labels_abs {
-        build_args.push("--labels");
-        build_args.push(l);
-    }
+        if !cfg.runtime.interpreter {
+            build_envs.push(("RECOMP_EXHAUSTIVE", "1"));
+        }
+        // A packager can pin a real compiler (e.g. clang) instead of the
+        // recompiler's default cc->TinyCC fallback; recomp honors $GBA_RECOMP_CC
+        // first in its detection order.
+        if let Some(c) = cfg.build.compiler.as_deref() {
+            build_envs.push(("GBA_RECOMP_CC", c));
+            println!("      compiler: {c} (pinned via [build] compiler)");
+        }
+        let keep_c: &[(&str, &str)] = &build_envs;
+        // Pass the label map EXPLICITLY rather than relying on the
+        // recompiler's beside-the-image discovery: the build runs against
+        // the canonicalized (symlink-resolved) image path, so a map named
+        // for the symlink would never be found. A full recomp's exhaustive
+        // in-function seeding depends on the map's `end` records, so a
+        // silently-missed map would ship a soak-only package.
+        let labels_abs = match &cfg.labels.file {
+            Some(f) => Some(
+                std::fs::canonicalize(f)
+                    .map_err(|e| format!("{}: {e}", f.display()))?
+                    .to_str()
+                    .ok_or("non-UTF8 labels path")?
+                    .to_string(),
+            ),
+            None => {
+                if !cfg.runtime.interpreter {
+                    return Err(
+                        "[runtime] interpreter = false requires a [labels] file — a full \
+    recomp needs the function map's boundaries for exhaustive coverage"
+                            .into(),
+                    );
+                }
+                None
+            }
+        };
+        // --ram is always on: it profiles an interpreter run to translate
+        // RAM-resident code the static map can't address (see --no-soak above).
+        let mut build_args: Vec<&str> = vec!["build", rom_str, "--ram", "--bios", bios_str];
+        if let Some(l) = &labels_abs {
+            build_args.push("--labels");
+            build_args.push(l);
+        } else if let Some(db) = gamedb_file.as_ref().and_then(|p| p.to_str()) {
+            build_args.push("--gamedb");
+            build_args.push(db);
+        }
 
-    println!("[1/3] translating (recomp build --ram --bios; exhaustive seeding from the map)...");
-    if !build_envs.is_empty() {
         println!(
-            "      build env: {}",
-            build_envs
-                .iter()
-                .map(|(k, _)| *k)
-                .collect::<Vec<_>>()
-                .join(" ")
+            "[1/3] translating (recomp build --ram --bios; exhaustive seeding from the map)..."
         );
-    }
-    recomp_run(&recomp, &work, &build_args, keep_c)?;
-    if !translation.is_file() {
-        return Err(format!(
-            "translation did not produce {}",
-            translation.display()
-        ));
-    }
+        if !build_envs.is_empty() {
+            println!(
+                "      build env: {}",
+                build_envs
+                    .iter()
+                    .map(|(k, _)| *k)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        recomp_run(&recomp, &work, &build_args, keep_c)?;
+        if !translation.is_file() {
+            return Err(format!(
+                "translation did not produce {}",
+                translation.display()
+            ));
+        }
 
-    if no_soak {
-        println!("[2/3] soak skipped (--no-soak): trusting the map's exhaustive coverage");
-    } else {
-        println!("[2/3] soak: {soak} frames with fallback tracing...");
-        let frames = soak.to_string();
-        let soak_args = ["runc", rom_str, "--frames", &frames, "--bios", bios_str];
-        let mut steps = fallback_steps(&recomp_run(
-            &recomp,
-            &work,
-            &soak_args,
-            &[("RECOMP_TRACE_FALLBACK", "1")],
-        )?)?;
-        println!("      fallback_steps: {steps}");
-        if !cfg.runtime.interpreter && steps > 0 {
-            println!("      full recomp requires zero — recording the gaps and rebuilding once...");
-            recomp_run(
-                &recomp,
-                &work,
-                &[
-                    "runc",
-                    rom_str,
-                    "--frames",
-                    &frames,
-                    "--bios",
-                    bios_str,
-                    "--record-labels",
-                ],
-                &[],
-            )?;
-            recomp_run(&recomp, &work, &build_args, keep_c)?;
-            steps = fallback_steps(&recomp_run(
+        if no_soak {
+            println!("[2/3] soak skipped (--no-soak): trusting the map's exhaustive coverage");
+        } else {
+            println!("[2/3] soak: {soak} frames with fallback tracing...");
+            let frames = soak.to_string();
+            let soak_args = ["runc", rom_str, "--frames", &frames, "--bios", bios_str];
+            let mut steps = fallback_steps(&recomp_run(
                 &recomp,
                 &work,
                 &soak_args,
                 &[("RECOMP_TRACE_FALLBACK", "1")],
             )?)?;
-            println!("      fallback_steps after rebuild: {steps}");
-            if steps > 0 {
-                return Err(format!(
-                    "full recomp gate failed: {steps} interpreter steps remain after a \
-record-and-rebuild pass. Extend coverage (longer/recorded soak input, more labels) \
-or set [runtime] interpreter = true.",
-                ));
+            println!("      fallback_steps: {steps}");
+            if !cfg.runtime.interpreter && steps > 0 {
+                println!(
+                    "      full recomp requires zero — recording the gaps and rebuilding once..."
+                );
+                recomp_run(
+                    &recomp,
+                    &work,
+                    &[
+                        "runc",
+                        rom_str,
+                        "--frames",
+                        &frames,
+                        "--bios",
+                        bios_str,
+                        "--record-labels",
+                    ],
+                    &[],
+                )?;
+                recomp_run(&recomp, &work, &build_args, keep_c)?;
+                steps = fallback_steps(&recomp_run(
+                    &recomp,
+                    &work,
+                    &soak_args,
+                    &[("RECOMP_TRACE_FALLBACK", "1")],
+                )?)?;
+                println!("      fallback_steps after rebuild: {steps}");
+                if steps > 0 {
+                    return Err(format!(
+                        "full recomp gate failed: {steps} interpreter steps remain after a \
+    record-and-rebuild pass. Extend coverage (longer/recorded soak input, more labels) \
+    or set [runtime] interpreter = true.",
+                    ));
+                }
             }
         }
+    } else {
+        println!("[1/3] translation deferred to the first launch cache");
+        println!("[2/3] soak not required for a thin package");
     }
 
     println!("[3/3] assembling package...");
@@ -366,28 +392,39 @@ or set [runtime] interpreter = true.",
         _ => (pkg.join(name), pkg.clone()),
     };
 
-    std::fs::copy(&recomp, &exe).map_err(|e| format!("{}: {e}", exe.display()))?;
+    let runtime_bin = find_recomp(recomp_flag.as_deref())?;
+    std::fs::copy(&runtime_bin, &exe).map_err(|e| format!("{}: {e}", exe.display()))?;
     let translation_name = format!("translation.{LIB_EXT}");
-    std::fs::copy(&translation, data_dir.join(&translation_name)).map_err(|e| e.to_string())?;
+    if !defer_translation {
+        std::fs::copy(&translation, data_dir.join(&translation_name)).map_err(|e| e.to_string())?;
+    }
+    if let Some(db) = &gamedb_file {
+        std::fs::copy(db, data_dir.join("gamedb.sqlite")).map_err(|e| e.to_string())?;
+    }
     // The engine-HLE pin travels only when it pins something — `auto`
     // is the runtime's own default discovery.
     let engine_pin = match cfg.runtime.engine_hle {
         EngineHle::Auto => String::new(),
         e => format!("engine-hle = \"{}\"\n", e.as_str()),
     };
+    let translation_section = if defer_translation {
+        String::new()
+    } else {
+        format!("\n[translation]\nfile = \"{translation_name}\"\n")
+    };
     std::fs::write(
         data_dir.join("recomp.pack.toml"),
         format!(
             "# Generated by gba-pack — pins only, no image content.\n\
 [package]\nname = \"{}\"\n\n[image]\nrom-sha256 = \"{}\"\nbios-sha256 = \"{}\"\n\n\
-[runtime]\ninterpreter = {}\nmenu = {}\n{}\n[translation]\nfile = \"{}\"\n",
+[runtime]\ninterpreter = {}\nmenu = {}\n{}{}",
             name,
             cfg.image.rom_sha256,
             cfg.image.bios_sha256,
             cfg.runtime.interpreter,
             cfg.runtime.menu,
             engine_pin,
-            translation_name,
+            translation_section,
         ),
     )
     .map_err(|e| e.to_string())?;
@@ -480,15 +517,21 @@ next to the executable:\n\n  1. your cartridge image (.gba), sha256 {rom}\n\
         }
         println!("      C source: {n} translation units -> {}", src.display());
     }
-    if std::env::var_os("GBA_PACK_KEEP_WORK").is_none() {
+    if work.is_dir() && std::env::var_os("GBA_PACK_KEEP_WORK").is_none() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| format!("could not remove {}: {e}", work.display()))?;
     }
     println!();
     println!("package ready: {}", pkg.display());
     println!(
-        "  {} + translation.{} + recomp.pack.toml (interpreter = {})",
-        name, LIB_EXT, cfg.runtime.interpreter
+        "  {} + {}recomp.pack.toml (interpreter = {})",
+        name,
+        if defer_translation {
+            "first-launch cache + "
+        } else {
+            "native translation + "
+        },
+        cfg.runtime.interpreter
     );
     println!(
         "  end user supplies: ROM {}…, BIOS {}…",

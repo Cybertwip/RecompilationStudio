@@ -1063,7 +1063,7 @@ pub fn cmd_play(args: &[String]) -> Result<(), String> {
     // The function-boundary source for a first-launch build: open it once
     // here so on-demand translation seeds exhaustively from the map (and
     // --ram profiling captures RAM-resident code the map can't carry).
-    let gamedb = gamedb_arg
+    let mut gamedb = gamedb_arg
         .as_deref()
         .map(|p| gamedb::GameDb::open(std::path::Path::new(p)))
         .transpose()?;
@@ -1075,6 +1075,15 @@ pub fn cmd_play(args: &[String]) -> Result<(), String> {
         Some(Err(e)) => return Err(e),
         None => None,
     };
+    if gamedb.is_none() {
+        if let Some(path) = manifest
+            .as_ref()
+            .map(|m| m.dir.join("gamedb.sqlite"))
+            .filter(|p| p.is_file())
+        {
+            gamedb = Some(gamedb::GameDb::open(&path)?);
+        }
+    }
     let rom_path = match (&rom_path, &manifest) {
         (Some(p), _) => p.clone(),
         (None, Some(m)) => {
@@ -1163,16 +1172,30 @@ Place your own dump as gba_bios.bin next to the executable:\n  {}",
         if !m.interpreter {
             NO_INTERP.store(true, Ordering::Relaxed);
         }
-        let lib_path = m.dir.join(&m.translation);
-        match load_native(&lib_path).inspect(|v| {
-            eprintln!("native translation: {} blocks (packaged)", v.1.len);
-        }) {
-            Ok(v) if !interp_only => Some(v),
-            Ok(_) => None,
-            Err(e) if !m.interpreter => return Err(e),
-            Err(e) => {
-                eprintln!("DEGRADED: packaged translation unavailable ({e}); interpreter only");
-                None
+        if let Some(file) = &m.translation {
+            let lib_path = m.dir.join(file);
+            match load_native(&lib_path).inspect(|v| {
+                eprintln!("native translation: {} blocks (packaged)", v.1.len);
+            }) {
+                Ok(v) if !interp_only => Some(v),
+                Ok(_) => None,
+                Err(e) if !m.interpreter => return Err(e),
+                Err(e) => {
+                    eprintln!("DEGRADED: packaged translation unavailable ({e}); rebuilding cache");
+                    ensure_native(&rom_path, &rom, status, bios.as_deref(), gamedb.as_ref()).ok()
+                }
+            }
+        } else if interp_only {
+            None
+        } else {
+            match ensure_native(&rom_path, &rom, status, bios.as_deref(), gamedb.as_ref()) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!(
+                        "DEGRADED: first-launch translation unavailable ({e}); interpreter only"
+                    );
+                    None
+                }
             }
         }
     } else if interp_only {

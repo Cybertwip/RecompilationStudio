@@ -1786,7 +1786,7 @@ time_t time(time_t* timer) {
     return now;
 }
 
-VIRTUA_WEAK_SYMBOL struct tm* gmtime_r(time_t* timer, struct tm* result) {
+VIRTUA_WEAK_SYMBOL struct tm* gmtime_r(const time_t* timer, struct tm* result) {
     if (!timer || !result) {
         errno = EINVAL;
         return nullptr;
@@ -1799,11 +1799,10 @@ VIRTUA_WEAK_SYMBOL struct tm* localtime_r(const time_t* timer, struct tm* result
         errno = EINVAL;
         return nullptr;
     }
-    time_t copy = *timer;
-    return gmtime_r(&copy, result);
+    return gmtime_r(timer, result);
 }
 
-VIRTUA_WEAK_SYMBOL struct tm* gmtime(time_t* timer) {
+VIRTUA_WEAK_SYMBOL struct tm* gmtime(const time_t* timer) {
     static struct tm shared;
     return gmtime_r(timer, &shared);
 }

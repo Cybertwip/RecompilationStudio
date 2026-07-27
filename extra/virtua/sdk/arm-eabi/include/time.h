@@ -42,7 +42,7 @@ double difftime(time_t, time_t) __NOEXCEPT;
 
 int gettimeofday(struct timeval *, void *) __NOEXCEPT;
 
-struct tm *gmtime(time_t *) __NOEXCEPT;
+struct tm *gmtime(const time_t *) __NOEXCEPT;
 
 struct tm *gmtime_r(time_t *, struct tm *) __NOEXCEPT;
 

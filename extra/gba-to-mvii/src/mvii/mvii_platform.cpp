@@ -99,6 +99,96 @@ uint16_t bits_for_keycode(uint16_t code) {
     return bits;
 }
 
+// ── the smallest font that can print a path ────────────────────────────────
+//
+// ASCII 0x20..0x5F — space, punctuation, digits, uppercase. Lowercase is
+// folded to uppercase on the way in, which costs nothing and halves the table.
+// Five bytes a glyph, one per column, bit 0 at the top; the sixth column is
+// the inter-character gap and is not stored. 320 bytes of .rodata, which the
+// .virtua packager carries in the blob it already carries.
+constexpr int kGlyphWidth   = 5;
+constexpr int kGlyphHeight  = 7;
+constexpr int kGlyphAdvance = kGlyphWidth + 1;
+constexpr int kLineAdvance  = kGlyphHeight + 2;
+constexpr int kTextMargin   = 2;
+
+constexpr uint8_t kFont5x7[][kGlyphWidth] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00},  // ' '
+    {0x00, 0x00, 0x5F, 0x00, 0x00},  // '!'
+    {0x00, 0x07, 0x00, 0x07, 0x00},  // '"'
+    {0x14, 0x7F, 0x14, 0x7F, 0x14},  // '#'
+    {0x24, 0x2A, 0x7F, 0x2A, 0x12},  // '$'
+    {0x23, 0x13, 0x08, 0x64, 0x62},  // '%'
+    {0x36, 0x49, 0x55, 0x22, 0x50},  // '&'
+    {0x00, 0x05, 0x03, 0x00, 0x00},  // '\''
+    {0x00, 0x1C, 0x22, 0x41, 0x00},  // '('
+    {0x00, 0x41, 0x22, 0x1C, 0x00},  // ')'
+    {0x14, 0x08, 0x3E, 0x08, 0x14},  // '*'
+    {0x08, 0x08, 0x3E, 0x08, 0x08},  // '+'
+    {0x00, 0x50, 0x30, 0x00, 0x00},  // ','
+    {0x08, 0x08, 0x08, 0x08, 0x08},  // '-'
+    {0x00, 0x60, 0x60, 0x00, 0x00},  // '.'
+    {0x20, 0x10, 0x08, 0x04, 0x02},  // '/'
+    {0x3E, 0x51, 0x49, 0x45, 0x3E},  // '0'
+    {0x00, 0x42, 0x7F, 0x40, 0x00},  // '1'
+    {0x42, 0x61, 0x51, 0x49, 0x46},  // '2'
+    {0x21, 0x41, 0x45, 0x4B, 0x31},  // '3'
+    {0x18, 0x14, 0x12, 0x7F, 0x10},  // '4'
+    {0x27, 0x45, 0x45, 0x45, 0x39},  // '5'
+    {0x3C, 0x4A, 0x49, 0x49, 0x30},  // '6'
+    {0x01, 0x71, 0x09, 0x05, 0x03},  // '7'
+    {0x36, 0x49, 0x49, 0x49, 0x36},  // '8'
+    {0x06, 0x49, 0x49, 0x29, 0x1E},  // '9'
+    {0x00, 0x36, 0x36, 0x00, 0x00},  // ':'
+    {0x00, 0x56, 0x36, 0x00, 0x00},  // ';'
+    {0x00, 0x08, 0x14, 0x22, 0x41},  // '<'
+    {0x14, 0x14, 0x14, 0x14, 0x14},  // '='
+    {0x41, 0x22, 0x14, 0x08, 0x00},  // '>'
+    {0x02, 0x01, 0x51, 0x09, 0x06},  // '?'
+    {0x32, 0x49, 0x79, 0x41, 0x3E},  // '@'
+    {0x7E, 0x11, 0x11, 0x11, 0x7E},  // 'A'
+    {0x7F, 0x49, 0x49, 0x49, 0x36},  // 'B'
+    {0x3E, 0x41, 0x41, 0x41, 0x22},  // 'C'
+    {0x7F, 0x41, 0x41, 0x22, 0x1C},  // 'D'
+    {0x7F, 0x49, 0x49, 0x49, 0x41},  // 'E'
+    {0x7F, 0x09, 0x09, 0x01, 0x01},  // 'F'
+    {0x3E, 0x41, 0x41, 0x51, 0x32},  // 'G'
+    {0x7F, 0x08, 0x08, 0x08, 0x7F},  // 'H'
+    {0x00, 0x41, 0x7F, 0x41, 0x00},  // 'I'
+    {0x20, 0x40, 0x41, 0x3F, 0x01},  // 'J'
+    {0x7F, 0x08, 0x14, 0x22, 0x41},  // 'K'
+    {0x7F, 0x40, 0x40, 0x40, 0x40},  // 'L'
+    {0x7F, 0x02, 0x04, 0x02, 0x7F},  // 'M'
+    {0x7F, 0x04, 0x08, 0x10, 0x7F},  // 'N'
+    {0x3E, 0x41, 0x41, 0x41, 0x3E},  // 'O'
+    {0x7F, 0x09, 0x09, 0x09, 0x06},  // 'P'
+    {0x3E, 0x41, 0x51, 0x21, 0x5E},  // 'Q'
+    {0x7F, 0x09, 0x19, 0x29, 0x46},  // 'R'
+    {0x46, 0x49, 0x49, 0x49, 0x31},  // 'S'
+    {0x01, 0x01, 0x7F, 0x01, 0x01},  // 'T'
+    {0x3F, 0x40, 0x40, 0x40, 0x3F},  // 'U'
+    {0x1F, 0x20, 0x40, 0x20, 0x1F},  // 'V'
+    {0x7F, 0x20, 0x18, 0x20, 0x7F},  // 'W'
+    {0x63, 0x14, 0x08, 0x14, 0x63},  // 'X'
+    {0x03, 0x04, 0x78, 0x04, 0x03},  // 'Y'
+    {0x61, 0x51, 0x49, 0x45, 0x43},  // 'Z'
+    {0x00, 0x00, 0x7F, 0x41, 0x41},  // '['
+    {0x02, 0x04, 0x08, 0x10, 0x20},  // '\\'
+    {0x41, 0x41, 0x7F, 0x00, 0x00},  // ']'
+    {0x04, 0x02, 0x01, 0x02, 0x04},  // '^'
+    {0x40, 0x40, 0x40, 0x40, 0x40},  // '_'
+};
+
+constexpr int kFontFirst = 0x20;
+constexpr int kFontCount = static_cast<int>(sizeof(kFont5x7) / sizeof(kFont5x7[0]));
+
+const uint8_t* glyph_for(char ch) {
+    int c = static_cast<unsigned char>(ch);
+    if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
+    if (c < kFontFirst || c >= kFontFirst + kFontCount) c = '?';
+    return kFont5x7[c - kFontFirst];
+}
+
 }  // namespace
 
 // ── Video ──────────────────────────────────────────────────────────────────
@@ -174,26 +264,14 @@ bool Video::remap() {
     return true;
 }
 
-void Video::present(const uint16_t* bgr555) {
-    if (fd_ < 0 || !bgr555 || !lut_) return;
+uint8_t* Video::surface(int& span_pixels) {
+    if (fd_ < 0) return nullptr;
+    span_pixels = mapped_ ? pitch_ : width_;
+    return mapped_ ? mapped_ : staging_;
+}
 
-    uint8_t* dst   = mapped_ ? mapped_ : staging_;
-    const int span = mapped_ ? pitch_ : width_;
-    if (!dst) return;
-
-    // One row at a time: the destination stride is the kernel's (1280 pixels
-    // for the shared surface), not ours, so this cannot be a single linear
-    // pass. Writing 32 bits at a time rather than four bytes matters here —
-    // this loop runs 38400 times a frame.
-    for (int y = 0; y < height_; ++y) {
-        const uint16_t* src = bgr555 + static_cast<std::size_t>(y) * width_;
-        uint32_t* out = reinterpret_cast<uint32_t*>(dst) +
-                        static_cast<std::size_t>(y) * span;
-        for (int x = 0; x < width_; ++x) {
-            out[x] = lut_[src[x] & 0x7FFFu];
-        }
-    }
-
+void Video::flush() {
+    if (fd_ < 0) return;
     if (mapped_) {
         (void)::ioctl(fd_, FB_IOCTL_PRESENT, nullptr);
         // The pair was just exchanged, so the pointer we held is now the image
@@ -209,6 +287,7 @@ void Video::present(const uint16_t* bgr555) {
         }
         return;
     }
+    if (!staging_) return;
 
     fb_draw_rgba8 draw{};
     draw.x = 0;
@@ -219,42 +298,95 @@ void Video::present(const uint16_t* bgr555) {
     (void)::ioctl(fd_, FB_IOCTL_SWAP_RGBA8, &draw);
 }
 
-void Video::fill(uint8_t r, uint8_t g, uint8_t b) {
-    if (fd_ < 0) return;
-    uint8_t* dst   = mapped_ ? mapped_ : staging_;
-    const int span = mapped_ ? pitch_ : width_;
+void Video::present(const uint16_t* bgr555) {
+    if (!bgr555 || !lut_) return;
+    int span = 0;
+    uint8_t* dst = surface(span);
     if (!dst) return;
 
+    // One row at a time: the destination stride is the kernel's (1280 pixels
+    // for the shared surface), not ours, so this cannot be a single linear
+    // pass. Writing 32 bits at a time rather than four bytes matters here —
+    // this loop runs 38400 times a frame.
     for (int y = 0; y < height_; ++y) {
-        uint8_t* out = dst + static_cast<std::size_t>(y) * span * 4;
+        const uint16_t* src = bgr555 + static_cast<std::size_t>(y) * width_;
+        uint32_t* out = reinterpret_cast<uint32_t*>(dst) +
+                        static_cast<std::size_t>(y) * span;
         for (int x = 0; x < width_; ++x) {
-            out[0] = r;
-            out[1] = g;
-            out[2] = b;
-            out[3] = 0xFF;
-            out += 4;
+            out[x] = lut_[src[x] & 0x7FFFu];
         }
     }
+    flush();
+}
 
-    if (mapped_) {
-        (void)::ioctl(fd_, FB_IOCTL_PRESENT, nullptr);
-        if (!remap()) {
-            mapped_ = nullptr;
-            if (!staging_) {
-                staging_ = new (std::nothrow)
-                    uint8_t[static_cast<std::size_t>(width_) * height_ * 4];
+void Video::fill(uint8_t r, uint8_t g, uint8_t b) {
+    int span = 0;
+    uint8_t* dst = surface(span);
+    if (!dst) return;
+
+    const uint32_t packed = static_cast<uint32_t>(r) |
+                            (static_cast<uint32_t>(g) << 8) |
+                            (static_cast<uint32_t>(b) << 16) | 0xFF000000u;
+    for (int y = 0; y < height_; ++y) {
+        uint32_t* out = reinterpret_cast<uint32_t*>(dst) +
+                        static_cast<std::size_t>(y) * span;
+        for (int x = 0; x < width_; ++x) out[x] = packed;
+    }
+    flush();
+}
+
+int Video::text_columns() const {
+    const int usable = width_ - 2 * kTextMargin;
+    return usable > 0 ? usable / kGlyphAdvance : 0;
+}
+
+void Video::message(uint8_t r, uint8_t g, uint8_t b,
+                    const char* const* lines, int count) {
+    int span = 0;
+    uint8_t* dst = surface(span);
+    if (!dst) return;
+
+    const uint32_t bg = static_cast<uint32_t>(r) |
+                        (static_cast<uint32_t>(g) << 8) |
+                        (static_cast<uint32_t>(b) << 16) | 0xFF000000u;
+    for (int y = 0; y < height_; ++y) {
+        uint32_t* out = reinterpret_cast<uint32_t*>(dst) +
+                        static_cast<std::size_t>(y) * span;
+        for (int x = 0; x < width_; ++x) out[x] = bg;
+    }
+
+    const int columns = text_columns();
+    const int rows    = (height_ - 2 * kTextMargin) / kLineAdvance;
+    if (columns <= 0 || rows <= 0) { flush(); return; }
+
+    constexpr uint32_t kInk = 0xFFFFFFFFu;
+    int row = 0;
+    for (int i = 0; i < count && row < rows; ++i) {
+        const char* text = lines[i] ? lines[i] : "";
+        int consumed = 0;
+        // An empty line is a blank row, not a skipped one: it is how the
+        // caller separates the headline from the detail.
+        do {
+            const int top = kTextMargin + row * kLineAdvance;
+            for (int col = 0; col < columns && text[consumed]; ++col, ++consumed) {
+                const uint8_t* glyph = glyph_for(text[consumed]);
+                const int left = kTextMargin + col * kGlyphAdvance;
+                for (int gx = 0; gx < kGlyphWidth; ++gx) {
+                    const uint8_t bits = glyph[gx];
+                    if (!bits) continue;
+                    for (int gy = 0; gy < kGlyphHeight; ++gy) {
+                        if ((bits & (1u << gy)) == 0) continue;
+                        uint32_t* out = reinterpret_cast<uint32_t*>(dst) +
+                                        static_cast<std::size_t>(top + gy) * span +
+                                        (left + gx);
+                        *out = kInk;
+                    }
+                }
             }
-        }
-        return;
+            ++row;
+        } while (text[consumed] && row < rows);
     }
-
-    fb_draw_rgba8 draw{};
-    draw.x = 0;
-    draw.y = 0;
-    draw.w = static_cast<uint16_t>(width_);
-    draw.h = static_cast<uint16_t>(height_);
-    draw.data = staging_;
-    (void)::ioctl(fd_, FB_IOCTL_SWAP_RGBA8, &draw);
+    flush();
 }
 
 // ── Input ──────────────────────────────────────────────────────────────────

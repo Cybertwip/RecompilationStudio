@@ -22,6 +22,7 @@
 // requires. Speed on a Cortex-A7 at 845 MHz is the open question, and the
 // reason the loop reports its frame rate.
 
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +31,7 @@
 #include <string>
 #include <vector>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -106,6 +108,51 @@ std::string directory_of(const char* path) {
     return s.substr(0, slash + 1);
 }
 
+std::string file_name_of(const std::string& path) {
+    const std::size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+bool ends_with_fold(const std::string& s, const char* suffix) {
+    const std::size_t n = std::strlen(suffix);
+    if (s.size() < n) return false;
+    for (std::size_t i = 0; i < n; ++i) {
+        char a = s[s.size() - n + i];
+        char b = suffix[i];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + ('a' - 'A'));
+        if (a != b) return false;
+    }
+    return true;
+}
+
+// Names a cartridge plausibly arrives under. `.gba` is what the packager
+// stages; the rest are what a hand-copied folder tends to contain.
+bool looks_like_a_cartridge(const std::string& name) {
+    return ends_with_fold(name, ".gba") || ends_with_fold(name, ".agb") ||
+           ends_with_fold(name, ".bin") || ends_with_fold(name, ".rom");
+}
+
+// Every regular name in `dir`, in whatever order the filesystem gives them.
+//
+// MVII's readdir reaches the guest through Dash, which leaves d_type at
+// DT_UNKNOWN — the shim's <dirent.h> does not define _DIRENT_HAVE_D_TYPE, so
+// the wire value is dropped on the way in. Nothing here may test it; the only
+// way to tell a file from a directory is to try opening it.
+std::vector<std::string> list_directory(const std::string& dir) {
+    std::vector<std::string> names;
+    DIR* d = ::opendir(dir.empty() ? "." : dir.c_str());
+    if (!d) return names;
+    while (const struct dirent* entry = ::readdir(d)) {
+        const std::string name(entry->d_name);
+        if (name == "." || name == "..") continue;
+        names.push_back(name);
+        if (names.size() >= 64) break;   // a package directory, not a library
+    }
+    ::closedir(d);
+    return names;
+}
+
 // ── the machine ────────────────────────────────────────────────────────────
 
 class Runtime {
@@ -120,18 +167,28 @@ public:
     bool load(int argc, char** argv);
     int  run();
 
-    // Paint a flat colour and hold it, so a fatal startup error is visible on
-    // the device rather than only on a serial cable.
+    // Put the failure on the panel and hold it, so a fatal startup error is
+    // legible on the device rather than only over a serial cable. MVII shows a
+    // guest's stderr in the Terminal view and only while it is attached, so
+    // for an app launched from the dashboard this screen is the only report
+    // the user will ever see.
     void hold_failure();
 
 private:
+    bool find_rom(int argc, char** argv);
     bool load_rom(const std::string& path);
     void present_frame();
     void pump_audio();
     void flush_save_if_settled(uint64_t now);
     void write_save();
 
+    // Say something once, to the serial console and to the failure screen.
+    void note(const char* fmt, ...);
+
     GbaMvii* machine_ = nullptr;
+
+    std::string rom_path_;
+    std::vector<std::string> notes_;   // the failure screen, one line each
 
     std::string save_path_;
     bool     save_supported_     = false;
@@ -159,6 +216,17 @@ Runtime::~Runtime() {
     }
 }
 
+void Runtime::note(const char* fmt, ...) {
+    char line[128];
+    va_list args;
+    va_start(args, fmt);
+    const int n = vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+    if (n < 0) return;
+    notes_.push_back(std::string(line));
+    logf("gba: %s\n", line);
+}
+
 // Read the cartridge straight into storage the core owns.
 //
 // The alternative — read into a vector of ours, then hand the bytes over —
@@ -169,7 +237,11 @@ Runtime::~Runtime() {
 // and failing to.
 bool Runtime::load_rom(const std::string& path) {
     const int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) return false;
+    if (fd < 0) {
+        // Expected for most candidates — this is the search, not the failure.
+        logf("gba: no '%s' (errno %d)\n", path.c_str(), errno);
+        return false;
+    }
 
     const off_t end = ::lseek(fd, 0, SEEK_END);
     if (end <= 0 || ::lseek(fd, 0, SEEK_SET) != 0) { ::close(fd); return false; }
@@ -183,10 +255,21 @@ bool Runtime::load_rom(const std::string& path) {
 
     uint8_t* rom = gba_mvii_rom_alloc(size);
     if (!rom) {
-        logf("gba: cannot allocate %u bytes for the cartridge\n",
-             static_cast<unsigned>(size));
+        note("OUT OF MEMORY FOR A %u MB CARTRIDGE",
+             static_cast<unsigned>(size >> 20));
         ::close(fd);
         return false;
+    }
+
+    // A 16 MB cartridge off eMMC is not instant, and a window that sits on one
+    // colour for several seconds reads as a hang. Say what is happening.
+    const std::string leaf = file_name_of(path);
+    {
+        char line[96];
+        std::snprintf(line, sizeof(line), "LOADING %s (%u MB)",
+                      leaf.c_str(), static_cast<unsigned>(size >> 20));
+        const char* lines[] = {"GBA RUNTIME", "", line};
+        video_.message(0x10, 0x10, 0x18, lines, 3);
     }
 
     std::size_t done = 0;
@@ -196,7 +279,7 @@ bool Runtime::load_rom(const std::string& path) {
         const std::size_t want = size - done < 64u * 1024u ? size - done : 64u * 1024u;
         const ssize_t got = ::read(fd, rom + done, want);
         if (got < 0) {
-            logf("gba: read error on '%s' (errno %d)\n", path.c_str(), errno);
+            note("READ ERROR ON %s (ERRNO %d)", leaf.c_str(), errno);
             ::close(fd);
             gba_mvii_rom_free(rom, size);
             return false;
@@ -214,41 +297,117 @@ bool Runtime::load_rom(const std::string& path) {
     // Ownership of `rom` transfers here whether or not the machine is built.
     machine_ = gba_mvii_create(rom, size);
     if (!machine_) {
-        logf("gba: the core refused the cartridge\n");
+        note("THE CORE REFUSED %s", leaf.c_str());
         return false;
     }
+    logf("gba: loaded '%s' (%u bytes)\n", path.c_str(), static_cast<unsigned>(done));
     return true;
+}
+
+// Find the cartridge and build the machine around it.
+//
+// This is deliberately more forgiving than "open the path the packager was
+// told to write". MVII launches a package with argv[0] set to the .virtua's
+// own path and the working directory set to the folder containing it
+// (set_process_working_directory in mvii_arm_process_manager.cpp), so the
+// staged layout — game.gba beside the executable — resolves two different
+// ways, and both are tried. But a package assembled by hand keeps whatever
+// name the ROM already had, and the first version of this runtime failed with
+// nothing on screen but a flat red rectangle when it did. So after the exact
+// names comes a scan of the package directory for anything that looks like a
+// cartridge, and if that also comes up empty the directory listing goes on the
+// failure screen, where the user can compare it against what they meant to
+// copy.
+bool Runtime::find_rom(int argc, char** argv) {
+    // Two ways to name the package directory, because they can disagree.
+    // argv[0] is whatever the launcher passed — the shell passes the .virtua's
+    // path, but Dashboard.cpp lets a caller supply its own argv, in which case
+    // argv[0] is that caller's idea of the program name. The working directory
+    // is set from the executable path unconditionally, so it is the more
+    // reliable of the two; it is also relative-path-resolvable, which is why
+    // the bare "game.gba" candidate below is not redundant.
+    std::string dir = directory_of(argc > 0 ? argv[0] : nullptr);
+
+    char cwd[512] = {};
+    if (::getcwd(cwd, sizeof(cwd)) && cwd[0]) {
+        const std::size_t len = std::strlen(cwd);
+        if (len + 1 < sizeof(cwd) && cwd[len - 1] != '/') {
+            cwd[len] = '/';
+            cwd[len + 1] = '\0';
+        }
+    } else {
+        cwd[0] = '\0';
+    }
+
+    std::vector<std::string> candidates;
+    auto consider = [&candidates](const std::string& path) {
+        if (path.empty()) return;
+        for (const std::string& seen : candidates) {
+            if (seen == path) return;
+        }
+        candidates.push_back(path);
+    };
+
+    // An explicit argument wins: that is what the desktop tools pass.
+    if (argc > 1 && argv[1] && argv[1][0] != '\0') consider(argv[1]);
+    consider(dir + "game.gba");
+    consider("game.gba");
+
+    // Then whatever the directory actually holds. The listing is taken once
+    // and kept, because it is also what the failure screen reports.
+    std::vector<std::string> entries = list_directory(dir);
+    if (entries.empty() && !dir.empty()) {
+        // argv[0] did not name a directory we can read; fall back to the one
+        // MVII actually put us in.
+        dir = cwd;
+        entries = list_directory(dir);
+    }
+    for (const std::string& name : entries) {
+        if (looks_like_a_cartridge(name)) consider(dir + name);
+    }
+
+    for (const std::string& path : candidates) {
+        if (load_rom(path)) {
+            rom_path_ = path;
+            return true;
+        }
+    }
+
+    // The screen is 17 rows of 39 columns, and a path costs two of them, so
+    // this is written to fit rather than to be complete — the serial log has
+    // every candidate and its errno.
+    note("NO CARTRIDGE FOUND");
+    note("");
+    note("IN %s", dir.empty() ? cwd : dir.c_str());
+    if (entries.empty()) {
+        note("  (EMPTY, OR NOT READABLE)");
+    } else {
+        constexpr std::size_t kMaxShown = 6;
+        for (std::size_t i = 0; i < entries.size() && i < kMaxShown; ++i) {
+            note("  %s", entries[i].c_str());
+        }
+        if (entries.size() > kMaxShown) {
+            note("  ... AND %u MORE",
+                 static_cast<unsigned>(entries.size() - kMaxShown));
+        }
+    }
+    note("");
+    note("COPY THE ROM HERE AS GAME.GBA");
+    return false;
 }
 
 bool Runtime::load(int argc, char** argv) {
     if (gba_mvii_abi_version() != GBA_MVII_ABI_VERSION) {
         // A stale object file that links but disagrees about a signature fails
         // far more quietly than one that refuses to start.
-        logf("gba: core ABI %u, runtime expects %u — refusing to run\n",
+        note("CORE ABI %u, RUNTIME EXPECTS %u",
              static_cast<unsigned>(gba_mvii_abi_version()),
              static_cast<unsigned>(GBA_MVII_ABI_VERSION));
         return false;
     }
 
-    // The shell launches a package with argv[0] = the full path of the .virtua
-    // file, so the ROM staged beside it is the package directory + "game.gba".
-    // An explicit argv[1] overrides that, which is what the desktop tools pass.
-    std::string rom_path;
-    if (argc > 1 && argv[1] && argv[1][0] != '\0') {
-        rom_path = argv[1];
-    } else {
-        rom_path = directory_of(argc > 0 ? argv[0] : nullptr) + "game.gba";
-    }
-
-    if (!load_rom(rom_path)) {
-        // Fall back to the working directory, which is what the old stub
-        // assumed and what a hand-run package may still rely on.
-        if (!load_rom("game.gba")) {
-            logf("gba: cannot open ROM '%s' (errno %d)\n", rom_path.c_str(), errno);
-            return false;
-        }
-        rom_path = "game.gba";
-    }
+    if (!find_rom(argc, argv)) return false;
+    const std::string& rom_path = rom_path_;
 
     uint8_t title[16] = {};
     gba_mvii_rom_title(machine_, title, sizeof(title));
@@ -368,17 +527,29 @@ void Runtime::open_devices() {
         // A first present as soon as the surface exists. The shell composites
         // whatever the guest last presented, so this is what puts the window on
         // screen before the cartridge read starts.
-        video_.fill(0x10, 0x10, 0x18);
+        const char* lines[] = {"GBA RUNTIME", "", "LOOKING FOR THE CARTRIDGE..."};
+        video_.message(0x10, 0x10, 0x18, lines, 3);
     }
 }
 
 void Runtime::hold_failure() {
     if (!video_.opened()) return;
-    const uint64_t until = gbamvii::now_us() + 4000000ull;
+
+    std::vector<const char*> lines;
+    for (const std::string& n : notes_) lines.push_back(n.c_str());
+    lines.push_back("");
+    lines.push_back("PRESS ESC TO CLOSE");
+
+    // Long enough to read a directory listing and copy a filename down, and it
+    // ends the moment the user asks it to. Repainting every frame rather than
+    // once is deliberate: the compositor owns the buffer pair, so a guest that
+    // presents once and then sleeps can have its image exchanged out from
+    // under it by an unrelated window.
+    const uint64_t until = gbamvii::now_us() + 30000000ull;
     while (gbamvii::now_us() < until) {
-        video_.fill(0x60, 0x10, 0x10);
+        video_.message(0x50, 0x0C, 0x0C, lines.data(), static_cast<int>(lines.size()));
         if (!input_.poll()) break;
-        gbamvii::sleep_until(gbamvii::now_us() + 33000ull);
+        gbamvii::sleep_until(gbamvii::now_us() + 100000ull);
     }
 }
 

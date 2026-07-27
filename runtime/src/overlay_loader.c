@@ -79,7 +79,11 @@ typedef struct {
  * kept) and never executes native live. */
 #define OVERLAY_DIFF_BUDGET 32u
 
-#define CAND_CAP   16384
+#if defined(PSX_VIRTUA)
+#define CAND_CAP 1024
+#else
+#define CAND_CAP 16384
+#endif
 static Candidate s_cand[CAND_CAP];
 static int       s_cand_n = 0;
 
@@ -99,7 +103,11 @@ static int       s_range_index_overflow = 0;
 /* Cache the selected owner of hot CPS continuation PCs. The cached candidate
  * is still generation/CRC validated on every lookup; this only avoids walking
  * hundreds of historical, currently-invalid owners in a reused region. */
+#if defined(PSX_VIRTUA)
+#define RANGE_PC_CACHE_CAP 1024u
+#else
 #define RANGE_PC_CACHE_CAP 16384u
+#endif
 #define RANGE_PC_CACHE_MASK (RANGE_PC_CACHE_CAP - 1u)
 typedef struct { uint32_t phys; int cand; } RangePcCache;
 static RangePcCache s_range_pc_cache[RANGE_PC_CACHE_CAP];
@@ -142,7 +150,11 @@ int g_psx_cps_mode = 0;
 
 /* Open-addressed index: phys entry addr -> head candidate index (-1 sentinel
  * stored as chain terminator on each Candidate). addr 0 = empty slot. */
-#define IDX_CAP  32768u
+#if defined(PSX_VIRTUA)
+#define IDX_CAP 2048u
+#else
+#define IDX_CAP 32768u
+#endif
 #define IDX_MASK (IDX_CAP - 1u)
 typedef struct { uint32_t addr; int head; } IdxSlot;
 static IdxSlot s_idx[IDX_CAP];
@@ -178,7 +190,11 @@ static int s_active_depth = 0;
  * interest — never "arm a trace then hope". s_native_inprogress holds the entry
  * currently executing (nonzero at dump => a native fn was entered and never
  * returned: a freeze INSIDE native code, the strongest single suspect). */
+#if defined(PSX_VIRTUA)
+#define NRING_CAP 1024
+#else
 #define NRING_CAP 16384
+#endif
 typedef struct { uint32_t addr; uint32_t crc; uint32_t frame; uint64_t seq; int returned; } NRingEnt;
 static NRingEnt s_nring[NRING_CAP];
 static uint32_t s_nring_pos = 0;
@@ -681,7 +697,11 @@ const char *overlay_loader_last_msg(void) { return s_last_msg; }
  * TRUNCATED SILENTLY — every entry past the cap was invisible to the loader
  * (region ran interpreted forever, no diagnostic). Found by the ABI-sweep
  * negative test. scan_one_cache_dir now shouts if even 4096 is hit. */
+#if defined(PSX_VIRTUA)
+#define CACHE_IDX_CAP 512
+#else
 #define CACHE_IDX_CAP 4096
+#endif
 typedef struct {
     uint32_t region_start;
     uint64_t mtime;
@@ -821,7 +841,11 @@ static void overlay_image_warm_seed_boot_text(void);
  * variant. This is the scalable alternative to trial-loading hundreds of DLLs
  * that share one reused RAM region. */
 #define LAZY_MAN_CAP (CAND_CAP * 2)
+#if defined(PSX_VIRTUA)
+#define LAZY_ENTRY_CAP 2048u
+#else
 #define LAZY_ENTRY_CAP 32768u
+#endif
 #define LAZY_ENTRY_MASK (LAZY_ENTRY_CAP - 1u)
 #define LAZY_RANGE_LINK_CAP (LAZY_MAN_CAP * 8)
 typedef struct {
@@ -2795,7 +2819,11 @@ typedef struct {
     uint32_t in_regs[34];    /* r0..r31, hi, lo at entry                       */
     uint32_t out_regs[34];   /* r0..r31, hi, lo at exit                        */
 } FpEnt;
-#define FP_CAP (1u << 16)   /* ~19 MB with full reg files; ~65K executions     */
+#if defined(PSX_VIRTUA)
+#define FP_CAP (1u << 11)
+#else
+#define FP_CAP (1u << 16)
+#endif   /* ~19 MB with full reg files; ~65K executions     */
 static FpEnt    s_fp[FP_CAP];
 static uint64_t s_fp_seq = 0;
 

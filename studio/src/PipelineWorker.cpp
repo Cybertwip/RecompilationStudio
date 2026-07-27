@@ -304,11 +304,61 @@ QString makeLinuxToolchain(const QString& gcc,
   return cmake;
 }
 
+QString makeVirtuaProjectCMake(const PipelineRequest& request,
+                                const GameDescription& game,
+                                const QString& bundleName,
+                                quint32 expectedBiosCrc) {
+  const QString appSupportName = QStringLiteral("PSXRecomp/%1").arg(
+    game.serial.isEmpty() ? sanitizedFileStem(request.windowTitle) : game.serial);
+  QString cmake;
+  cmake += QStringLiteral("cmake_minimum_required(VERSION 3.20)\n");
+  cmake += QStringLiteral("project(GeneratedPSXVirtuaApp C CXX ASM)\n");
+  cmake += QStringLiteral("set(CMAKE_C_STANDARD 11)\nset(CMAKE_CXX_STANDARD 17)\n");
+  cmake += QStringLiteral("set(PSXRECOMP_ROOT \"${CMAKE_CURRENT_SOURCE_DIR}/framework\" CACHE PATH \"\" FORCE)\n");
+  cmake += QStringLiteral("set(PSXRECOMP_SKIP_BIOS_STALE_CHECK ON CACHE BOOL \"\" FORCE)\n");
+  cmake += QStringLiteral("set(PSX_VIRTUA ON CACHE BOOL \"\" FORCE)\n");
+  cmake += QStringLiteral("set(PSX_LAUNCHER OFF CACHE BOOL \"\" FORCE)\n");
+  cmake += QStringLiteral("set(PSX_SETTINGS_MENU OFF CACHE BOOL \"\" FORCE)\n");
+  cmake += QStringLiteral("set(PSX_DEBUG_TOOLS OFF CACHE BOOL \"\" FORCE)\n");
+  cmake += QStringLiteral("include(${PSXRECOMP_ROOT}/runtime/runtime.cmake)\n");
+  cmake += QStringLiteral("psxrecomp_add_runtime_target(psx-runtime\n");
+  cmake += QStringLiteral("  BIOS_GENERATED_FULL_C \"${CMAKE_CURRENT_SOURCE_DIR}/generated/bios/SCPH1001_full.c\"\n");
+  cmake += QStringLiteral("  BIOS_GENERATED_DISPATCH_C \"${CMAKE_CURRENT_SOURCE_DIR}/generated/bios/SCPH1001_dispatch.c\"\n");
+  cmake += QStringLiteral("  GAME_GENERATED_FULL_C \"${CMAKE_CURRENT_SOURCE_DIR}/generated/%1_full.c\"\n").arg(game.bootFileName);
+  cmake += QStringLiteral("  GAME_GENERATED_DISPATCH_C \"${CMAKE_CURRENT_SOURCE_DIR}/generated/%1_dispatch.c\"\n").arg(game.bootFileName);
+  cmake += QStringLiteral("  WINDOW_TITLE %1\n").arg(cmakeQuoted(request.windowTitle));
+  cmake += QStringLiteral("  EXE_NAME %1\n").arg(cmakeQuoted(bundleName));
+  cmake += QStringLiteral("  DEFAULT_BIOS_PATH \"bios/SCPH1001.BIN\"\n");
+  cmake += QStringLiteral("  DEFAULT_GAME_CONFIG_PATH \"game.toml\"\n");
+  cmake += QStringLiteral("  APP_SUPPORT_DIR_NAME %1)\n").arg(cmakeQuoted(appSupportName));
+  cmake += QStringLiteral("target_compile_definitions(psx-runtime PRIVATE PSX_EXPECTED_BIOS_CRC32=0x%1u)\n")
+             .arg(expectedBiosCrc, 8, 16, QLatin1Char('0'));
+  cmake += QStringLiteral("include(${PSXRECOMP_ROOT}/extra/virtua/CMake/GoTooling.cmake)\n");
+  cmake += QStringLiteral("virtua_prepare_go_tool(PSX_VIRTUA_TOOL ${PSXRECOMP_ROOT}/extra/virtua ${PSXRECOMP_ROOT}/extra/virtua/binary virtua)\n");
+  cmake += QStringLiteral("add_custom_target(psx-virtua-tool DEPENDS \"${PSX_VIRTUA_TOOL}\")\n");
+  cmake += QStringLiteral("add_dependencies(psx-runtime psx-virtua-tool)\n");
+  cmake += QStringLiteral("set(_PSX_PACKAGE_RESOURCES \"${CMAKE_CURRENT_SOURCE_DIR}/package-resources\")\n");
+  cmake += QStringLiteral("set(_PSX_GAME_MANIFEST \"${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json\")\n");
+  cmake += QStringLiteral("set(_PSX_STAGE \"${CMAKE_BINARY_DIR}/steganos-package/psx-runtime/$<CONFIG>\")\n");
+  cmake += QStringLiteral("set(_PSX_VIRTUA \"${CMAKE_CURRENT_BINARY_DIR}/%1.virtua\")\n").arg(bundleName);
+  cmake += QStringLiteral("add_custom_command(TARGET psx-runtime POST_BUILD\n");
+  cmake += QStringLiteral("  COMMAND \"${PSX_VIRTUA_TOOL}\" -kind exec -app-mode gui -scheduler cooperative \"$<TARGET_FILE:psx-runtime>\" \"${_PSX_VIRTUA}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_PSX_STAGE}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_PSX_STAGE}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_VIRTUA}\" \"${_PSX_STAGE}/%1.virtua\"\n").arg(bundleName);
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_PSX_PACKAGE_RESOURCES}\" \"${_PSX_STAGE}\"\n");
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_GAME_MANIFEST}\" \"${_PSX_STAGE}/game.manifest.json\"\n");
+  cmake += QStringLiteral("  VERBATIM)\n");
+  return cmake;
+}
+
 QString makeProjectCMake(const PipelineRequest& request,
                          const GameDescription& game,
                          const QString& bundleName,
                          const QString& bundleId,
                          quint32 expectedBiosCrc) {
+  if (request.targetPlatform == TargetPlatform::VirtuaArm)
+    return makeVirtuaProjectCMake(request, game, bundleName, expectedBiosCrc);
   const QString appSupportName = QStringLiteral("PSXRecomp/%1").arg(game.serial.isEmpty()
     ? sanitizedFileStem(request.windowTitle)
     : game.serial);
@@ -701,6 +751,7 @@ bool replicateFrameworkSources(const QString& frameworkRoot,
     { QStringLiteral("lib/RmlUi"), QStringLiteral("lib/RmlUi") },
     { QStringLiteral("lib/freetype"), QStringLiteral("lib/freetype") },
     { QStringLiteral("lib/recomp_gamepad"), QStringLiteral("lib/recomp_gamepad") },
+    { QStringLiteral("extra/virtua"), QStringLiteral("extra/virtua") },
   };
   for (const auto& directory : directories) {
     const QString source = QDir(frameworkRoot).filePath(directory.first);
@@ -869,15 +920,21 @@ bool PipelineWorker::runCommand(const QString& program,
 void PipelineWorker::run(PipelineRequest request) {
   cancelRequested_.store(false, std::memory_order_relaxed);
   if (request.system == SystemKind::GameBoyAdvance) {
-    if (request.targetPlatform == TargetPlatform::VirtuaArm && request.nativeExecution)
-      runGbaNative(request);
-    else
+    if (request.targetPlatform == TargetPlatform::VirtuaArm) {
+      if (request.nativeExecution) {
+        runGbaNative(request);
+      } else {
+        emit failed(QStringLiteral("Virtua ARM GBA exports require the Native option; ARM ROM recompilation is intentionally not part of this target."), {});
+      }
+    } else {
       runGba(request);
+    }
     return;
   }
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
+  const bool virtuaTarget = request.targetPlatform == TargetPlatform::VirtuaArm;
   const bool sourceExport = request.exportMode == ExportMode::Source;
   const bool remoteCiBuild = request.exportMode == ExportMode::Build &&
                              request.buildBackend == BuildBackend::RemoteCi;
@@ -888,7 +945,7 @@ void PipelineWorker::run(PipelineRequest request) {
     hostTargetPlatform() == TargetPlatform::Linux;
   const bool crossWindowsTarget = localBuild && windowsTarget && !nativeWindowsTarget;
   const bool crossLinuxTarget = localBuild && linuxTarget && !nativeLinuxTarget;
-  const bool directoryPackageTarget = windowsTarget || linuxTarget;
+  const bool directoryPackageTarget = windowsTarget || linuxTarget || virtuaTarget;
   const bool hasCertificate = !request.certificatePath.trimmed().isEmpty();
   const bool hasCertificatePassword = !request.certificatePassword.isEmpty();
   const bool signingRequested = localBuild && macosTarget &&
@@ -1008,6 +1065,8 @@ void PipelineWorker::run(PipelineRequest request) {
     ? QString() : QDir(javaHome).filePath(QStringLiteral("bin/java"));
 #endif
   const QString git = findExecutable(QStringLiteral("git"));
+  const QString go = localBuild && virtuaTarget
+    ? findExecutable(QStringLiteral("go")) : QString();
   const QString pkgConfig = localBuild && macosTarget
     ? findExecutable(QStringLiteral("pkg-config")) : QString();
   const QString nm = localBuild && macosTarget ? QStringLiteral("/usr/bin/nm") : QString();
@@ -1093,6 +1152,9 @@ void PipelineWorker::run(PipelineRequest request) {
     requiredTools.append({ QStringLiteral("MinGW ranlib"), mingwRanlib });
     requiredTools.append({ QStringLiteral("MinGW strip"), mingwStrip });
     requiredTools.append({ QStringLiteral("MinGW objdump"), mingwObjdump });
+  }
+  if (localBuild && virtuaTarget) {
+    requiredTools.append({ QStringLiteral("Go for the Virtua packager"), go });
   }
   if (localBuild && linuxTarget) {
     requiredTools.append({ nativeLinuxTarget ? QStringLiteral("GCC C compiler")
@@ -1974,6 +2036,9 @@ void PipelineWorker::run(PipelineRequest request) {
     return;
   }
   const QString cmakeListsPath = QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt"));
+  const QString configureExample = virtuaTarget
+    ? QStringLiteral("cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=framework/extra/virtua/CMake/VirtuaArmToolchain.cmake -DCMAKE_BUILD_TYPE=Release")
+    : QStringLiteral("cmake -S . -B build -DCMAKE_BUILD_TYPE=Release");
   const QString sourceReadme = QStringLiteral(
     "# %1 — PSXRecomp source export\n\n"
     "This repository was generated by PSXRecomp Studio for **%2**. It contains "
@@ -1981,14 +2046,14 @@ void PipelineWorker::run(PipelineRequest request) {
     "disc/BIOS package inputs, and the CMake packaging pipeline.\n\n"
     "## Build\n\n"
     "```sh\n"
-    "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
+    "%3\n"
     "cmake --build build --target psx-runtime --parallel\n"
     "```\n\n"
     "The target creates a complete Steganos artifact directory at "
     "`build/steganos-package/psx-runtime/<configuration>/`, including "
     "`game.manifest.json` during the build itself.\n")
       .arg(request.windowTitle,
-           targetPlatformDisplayName(request.targetPlatform));
+           targetPlatformDisplayName(request.targetPlatform), configureExample);
   if (!writeText(cmakeListsPath,
                  generatedProjectCMake(request, game, bundleName, bundleId,
                                        effectiveBiosCrc),
@@ -2163,7 +2228,7 @@ void PipelineWorker::run(PipelineRequest request) {
     return;
   }
 
-  const bool crossCompilationTarget = crossWindowsTarget || crossLinuxTarget;
+  const bool crossCompilationTarget = crossWindowsTarget || crossLinuxTarget || virtuaTarget;
   nextStage(crossCompilationTarget
     ? QStringLiteral("Cross-compile %1 app")
         .arg(targetPlatformDisplayName(request.targetPlatform))
@@ -2182,7 +2247,14 @@ void PipelineWorker::run(PipelineRequest request) {
                      << QStringLiteral("-DPSX_DEBUG_TOOLS=OFF")
                      << QStringLiteral("-DPSXRECOMP_DEPENDENCY_CACHE=%1")
                           .arg(dependencyCachePath);
-  if (crossWindowsTarget) {
+  if (virtuaTarget) {
+    configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1")
+                           .arg(QDir(projectDir).filePath(QStringLiteral(
+                             "framework/extra/virtua/CMake/VirtuaArmToolchain.cmake")))
+                       << QStringLiteral("-DPSX_VIRTUA=ON")
+                       << QStringLiteral("-DPSX_SETTINGS_MENU=OFF")
+                       << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
+  } else if (crossWindowsTarget) {
     configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(mingwToolchainPath)
                        << QStringLiteral("-DPSX_STATIC_RUNTIME=ON")
                        << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
@@ -2230,11 +2302,11 @@ void PipelineWorker::run(PipelineRequest request) {
                   workspace,
                   QStringLiteral("cmake --build <build> --target psx-runtime"),
                   2 * 60 * 60 * 1000) ||
-      !runCommand(cmake,
+      (!virtuaTarget && !runCommand(cmake,
                   appInstallArguments,
                   workspace,
                   QStringLiteral("cmake --install <build> --prefix <stage>"),
-                  20 * 60 * 1000)) {
+                  20 * 60 * 1000))) {
     if (cancellationRequested()) {
       QDir(workspace).removeRecursively();
       emit cancelled();
@@ -2248,17 +2320,22 @@ void PipelineWorker::run(PipelineRequest request) {
     }
     return;
   }
+  const QString effectiveStageDir = virtuaTarget
+    ? QDir(buildDir).filePath(QStringLiteral("steganos-package/psx-runtime/Release"))
+    : stageDir;
   const QString stagedApp = directoryPackageTarget
-    ? stageDir
-    : QDir(stageDir).filePath(bundleName + QStringLiteral(".app"));
+    ? effectiveStageDir
+    : QDir(effectiveStageDir).filePath(bundleName + QStringLiteral(".app"));
   if ((!directoryPackageTarget && !QFileInfo(stagedApp).isDir()) ||
-      (directoryPackageTarget && !QFileInfo(stageDir).isDir())) {
+      (directoryPackageTarget && !QFileInfo(effectiveStageDir).isDir())) {
     fail(QStringLiteral("CMake did not stage the expected %1 output: %2")
            .arg(targetPlatformDisplayName(request.targetPlatform), stagedApp), workspace);
     return;
   }
   const QString mainExecutable = directoryPackageTarget
-    ? QDir(stageDir).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()))
+    ? QDir(effectiveStageDir).filePath(bundleName +
+        (windowsTarget ? QStringLiteral(".exe") :
+         virtuaTarget ? QStringLiteral(".virtua") : QString()))
     : QDir(stagedApp).filePath(QStringLiteral("Contents/MacOS/") + bundleName);
   if (!QFileInfo(mainExecutable).isFile()) {
     fail(QStringLiteral("CMake did not stage the expected executable: %1").arg(mainExecutable), workspace);
@@ -2316,12 +2393,7 @@ void PipelineWorker::run(PipelineRequest request) {
   const QString resourcesDir = directoryPackageTarget
     ? stagedApp
     : QDir(stagedApp).filePath(QStringLiteral("Contents/Resources"));
-  const QStringList requiredResources{
-    QStringLiteral("launcher.rml"),
-    QStringLiteral("fonts/LatoLatin-Regular.ttf"),
-    QStringLiteral("fonts/LatoLatin-Bold.ttf"),
-    QStringLiteral("img/logo.png"),
-    QStringLiteral("img/caret.png"),
+  QStringList requiredResources{
     QStringLiteral("bios/SCPH1001.BIN"),
     QStringLiteral("game/%1").arg(game.bootFileName),
     QStringLiteral("disc/%1").arg(sourcePackagedDiscName),
@@ -2329,6 +2401,13 @@ void PipelineWorker::run(PipelineRequest request) {
     QStringLiteral("game.toml"),
     QStringLiteral("PSXRecomp-Proof.zip"),
   };
+  if (!virtuaTarget) {
+    requiredResources.prepend(QStringLiteral("img/caret.png"));
+    requiredResources.prepend(QStringLiteral("img/logo.png"));
+    requiredResources.prepend(QStringLiteral("fonts/LatoLatin-Bold.ttf"));
+    requiredResources.prepend(QStringLiteral("fonts/LatoLatin-Regular.ttf"));
+    requiredResources.prepend(QStringLiteral("launcher.rml"));
+  }
   for (const auto& relativePath : requiredResources) {
     const QString installedPath = QDir(resourcesDir).filePath(relativePath);
     if (!QFileInfo(installedPath).isFile()) {
@@ -2339,7 +2418,7 @@ void PipelineWorker::run(PipelineRequest request) {
     }
   }
   const QString stagedGameManifest =
-    QDir(stageDir).filePath(QStringLiteral("game.manifest.json"));
+    QDir(effectiveStageDir).filePath(QStringLiteral("game.manifest.json"));
   if (!QFileInfo(stagedGameManifest).isFile()) {
     fail(QStringLiteral("CMake did not stage game.manifest.json during the build."), workspace);
     return;
@@ -2365,13 +2444,19 @@ void PipelineWorker::run(PipelineRequest request) {
   runCommand(git,
              { QStringLiteral("-C"), request.frameworkRoot, QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
              request.frameworkRoot, QStringLiteral("git -C <framework> rev-parse HEAD"), 15000, &gitOutput);
-  const QString targetArchitecture = nativeWindowsTarget
+  const QString targetArchitecture = virtuaTarget
+    ? QStringLiteral("armv7a-none-eabi")
+    : nativeWindowsTarget
     ? QStringLiteral("x86_64-pc-windows-msvc")
     : crossWindowsTarget ? QStringLiteral("x86_64-w64-mingw32")
     : nativeLinuxTarget ? QStringLiteral("x86_64-linux-gnu")
     : crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu")
                   : QSysInfo::currentCpuArchitecture();
-  const QString compilerVersion = nativeWindowsTarget
+  const QString compilerVersion = virtuaTarget
+    ? versionText(QFileInfo(QStringLiteral("/usr/local/opt/llvm/bin/clang")).isExecutable()
+                    ? QStringLiteral("/usr/local/opt/llvm/bin/clang") : hostClang,
+                  { QStringLiteral("--version") }).section('\n', 0, 0)
+    : nativeWindowsTarget
     ? versionText(msvcCl, {}).section('\n', 0, 0)
     : crossWindowsTarget
       ? versionText(mingwGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
@@ -2379,14 +2464,18 @@ void PipelineWorker::run(PipelineRequest request) {
       ? versionText(linuxGcc, { QStringLiteral("--version") }).section('\n', 0, 0)
       : versionText(hostClang,
                     { QStringLiteral("--version") }).section('\n', 0, 0);
-  const QString sdl2Source = nativeWindowsTarget
+  const QString sdl2Source = virtuaTarget
+    ? QStringLiteral("bundled Virtua SDL compatibility surface")
+    : nativeWindowsTarget
     ? QStringLiteral("SDL2-2.32.10.tar.gz (MSVC static source build)")
     : crossWindowsTarget
       ? QStringLiteral("SDL2-devel-2.32.10-mingw.tar.gz")
     : linuxTarget
       ? QStringLiteral("pysdl2_dll-2.32.10-py2.py3-none-manylinux_2_28_x86_64.whl")
       : QStringLiteral("host pkg-config");
-  const QString sdl2Sha256 = nativeWindowsTarget
+  const QString sdl2Sha256 = virtuaTarget
+    ? QString()
+    : nativeWindowsTarget
     ? QString::fromLatin1(kSdl2SourceSha256)
     : crossWindowsTarget
       ? QStringLiteral("83a5d74012311edc3c0d40ea6faecbe57ad692aa033fa5dc273cc937e3938ff2")
@@ -2457,6 +2546,113 @@ void PipelineWorker::run(PipelineRequest request) {
   const QString proofArchive = QDir(resourcesDir).filePath(QStringLiteral("PSXRecomp-Proof.zip"));
   if (!createProofArchive(proofDir, proofArchive, error)) {
     fail(error, workspace);
+    return;
+  }
+
+  if (virtuaTarget) {
+    nextStage(QStringLiteral("Verify Virtua ARM package"));
+    QFile executableFile(mainExecutable);
+    if (!executableFile.open(QIODevice::ReadOnly)) {
+      fail(QStringLiteral("The staged Virtua ARM executable could not be read."), workspace);
+      return;
+    }
+    const QByteArray virtuaHeader = executableFile.read(56);
+    executableFile.close();
+    if (virtuaHeader.size() != 56 ||
+        qFromLittleEndian<quint32>(virtuaHeader.constData()) != 0x56495254u ||
+        qFromLittleEndian<quint32>(virtuaHeader.constData() + 4) != 3u) {
+      fail(QStringLiteral("The staged executable is not a Virtua v3 image."), workspace);
+      return;
+    }
+    const quint64 virtuaFlags = qFromLittleEndian<quint64>(virtuaHeader.constData() + 48);
+    const bool arm32 = ((virtuaFlags >> 8u) & 0xffu) == 4u;
+    const bool cooperative = (virtuaFlags & (1u << 1u)) != 0u;
+    if (!arm32 || !cooperative) {
+      fail(QStringLiteral("The staged Virtua image is not cooperative ARM32 code."), workspace);
+      return;
+    }
+    const QString executableHash = sha256File(mainExecutable, error);
+    const QJsonObject virtuaProof{
+      { QStringLiteral("schema"), 1 },
+      { QStringLiteral("platform"), QStringLiteral("virtua") },
+      { QStringLiteral("architecture"), QStringLiteral("arm32") },
+      { QStringLiteral("format"), QStringLiteral("virtua-v3") },
+      { QStringLiteral("cooperative_scheduler"), cooperative },
+      { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
+      { QStringLiteral("executable_sha256"), executableHash },
+      { QStringLiteral("renderer"), QStringLiteral("software via /dev/fb0") },
+      { QStringLiteral("audio"), QStringLiteral("queued PCM via /dev/dac0") },
+      { QStringLiteral("input"), QStringLiteral("event-backed /dev/input0") },
+      { QStringLiteral("executed_during_verification"), false },
+    };
+    if (executableHash.isEmpty() ||
+        !writeJson(QDir(proofDir).filePath(QStringLiteral("virtua_binary_verification.json")),
+                   virtuaProof, error) ||
+        !createProofArchive(proofDir, proofArchive, error)) {
+      fail(error, workspace);
+      return;
+    }
+
+    nextStage(QStringLiteral("Deliver Virtua ARM package"));
+    if (request.exportAsZip) {
+      const QString outputArchive = QDir(request.outputDirectory).filePath(exportOutputName(request));
+      if (!publishPackageZip(effectiveStageDir, {}, outputArchive)) {
+        if (cancellationRequested()) {
+          QDir(workspace).removeRecursively();
+          emit cancelled();
+        } else {
+          fail(error.isEmpty() ? QStringLiteral("The Virtua ARM ZIP could not be delivered.") : error,
+               workspace);
+        }
+        return;
+      }
+      emit logLine(QStringLiteral("Virtua ARM ZIP created: %1").arg(outputArchive));
+      QDir(workspace).removeRecursively();
+      emit completed(outputArchive);
+      return;
+    }
+
+    const QString outputPackage = QDir(request.outputDirectory).filePath(exportOutputName(request));
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString stagingPackage = outputPackage + QStringLiteral(".psxrecomp-new-") + token;
+    const QString backupPackage = outputPackage + QStringLiteral(".psxrecomp-old-") + token;
+    removeExportEntry(stagingPackage);
+    removeExportEntry(backupPackage);
+    if (!copyDirectoryTree(effectiveStageDir, stagingPackage, error)) {
+      fail(error, workspace);
+      return;
+    }
+    const bool existed = QFileInfo::exists(outputPackage) || QFileInfo(outputPackage).isSymLink();
+    if (existed && !request.overwriteOutput) {
+      removeExportEntry(stagingPackage);
+      fail(QStringLiteral("The Virtua ARM output already exists and overwrite was not approved: %1")
+             .arg(outputPackage), workspace);
+      return;
+    }
+    if (existed && !QDir().rename(outputPackage, backupPackage)) {
+      removeExportEntry(stagingPackage);
+      fail(QStringLiteral("Could not preserve the previous Virtua ARM package."), workspace);
+      return;
+    }
+    if (!QDir().rename(stagingPackage, outputPackage)) {
+      if (existed) QDir().rename(backupPackage, outputPackage);
+      fail(QStringLiteral("Could not publish the verified Virtua ARM package."), workspace);
+      return;
+    }
+    const QString deliveredExecutable = QDir(outputPackage).filePath(
+      bundleName + QStringLiteral(".virtua"));
+    if (sha256File(deliveredExecutable, error) != executableHash) {
+      const QString failedPackage = outputPackage + QStringLiteral(".failed-") + token;
+      QDir().rename(outputPackage, failedPackage);
+      if (existed) QDir().rename(backupPackage, outputPackage);
+      fail(QStringLiteral("The delivered Virtua ARM executable changed during publication; the failed copy remains at %1")
+             .arg(failedPackage), workspace);
+      return;
+    }
+    if (existed) QDir(backupPackage).removeRecursively();
+    emit logLine(QStringLiteral("Virtua ARM package created: %1").arg(outputPackage));
+    QDir(workspace).removeRecursively();
+    emit completed(outputPackage);
     return;
   }
 
@@ -3390,8 +3586,7 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   emit logLine(QStringLiteral("Virtua native bridge ABI: v1 · header SHA-256 %1").arg(bridgeSha256));
 
   nextStage(QStringLiteral("Create Virtua ARM native source repository"));
-  QString root = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-  if (root.isEmpty()) root = QDir::tempPath();
+  const QString root = QDir::tempPath();
   QTemporaryDir temporary(QDir(root).filePath(QStringLiteral("psxrecomp-gba-virtua-native-XXXXXX")));
   temporary.setAutoRemove(false);
   if (!temporary.isValid()) {

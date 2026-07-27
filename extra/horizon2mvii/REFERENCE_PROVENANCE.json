@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "captured_on": "2026-07-27",
+  "sources": [
+    {
+      "path": "Reference/horizon-linux/include/uapi/linux/horizon.h",
+      "sha256": "16a223de42d9700e03c5ec8168062741022f43717018a4b83a741af25c63aa5f"
+    },
+    {
+      "path": "Reference/horizon-linux/kernel/horizon/servctl.c",
+      "sha256": "4b0874ae083ffea613d2dc5498f62a3f26d3f9f0289e9f528822390ef1f497ae"
+    },
+    {
+      "path": "Reference/mizu/horizon_servctl.h",
+      "sha256": "3e6369fbd3461aad022fbc2107e610b839f8ab0ae6c73d43e6518da082a8ffc7"
+    }
+  ],
+  "horizon_magic": "0x70417020",
+  "servctl_command_count": 13,
+  "launch_tested": false
+}

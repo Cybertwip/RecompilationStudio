@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "target": "virtua-arm",
+  "format": "Virtua v3",
+  "architecture_flag": 4,
+  "cooperative_required": true,
+  "playstation": {
+    "mode": "static-recompiled-runtime",
+    "recompilation": true
+  },
+  "gba": {
+    "mode": "native-bridge",
+    "guest_kind": "MVII_NATIVE_GUEST_GBA_ARM7TDMI",
+    "recompilation": false
+  },
+  "vita": {
+    "mode": "native-bridge",
+    "guest_kind": "MVII_NATIVE_GUEST_VITA_ARMV7",
+    "recompilation": false
+  },
+  "horizon": {
+    "mode": "native-bridge",
+    "guest_kind": "MVII_NATIVE_GUEST_HORIZON_AARCH64",
+    "recompilation": false,
+    "servctl_commands": 13
+  },
+  "proof": "runtime/proofs/virtua_platform_smoke.json"
+}

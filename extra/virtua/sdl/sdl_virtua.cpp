@@ -33,8 +33,10 @@ struct SDL_Texture {
     int width;
     int height;
     int pitch;
+    int bytes_per_pixel;
+    Uint32 format;
     SDL_ScaleMode scale_mode;
-    Uint32 *pixels;
+    Uint8 *pixels;
 };
 
 struct SDL_Renderer {
@@ -78,8 +80,11 @@ struct AudioState {
     int fd;
     SDL_AudioSpec format;
     SDL_mutex *mutex;
+    SDL_Thread *thread;
+    volatile int running;
+    volatile int paused;
 };
-static AudioState audio_state = {-1, {}, nullptr};
+static AudioState audio_state = {-1, {}, nullptr, nullptr, 0, 1};
 
 static void set_error(const char *message)
 {
@@ -200,6 +205,12 @@ static SDL_Keycode scancode_to_keycode(SDL_Scancode scancode)
     if (scancode == SDL_SCANCODE_RETURN || scancode == SDL_SCANCODE_KP_ENTER)
         return SDLK_RETURN;
     if (scancode == SDL_SCANCODE_ESCAPE) return SDLK_ESCAPE;
+    if (scancode == SDL_SCANCODE_BACKSPACE) return SDLK_BACKSPACE;
+    if (scancode == SDL_SCANCODE_SPACE) return SDLK_SPACE;
+    if (scancode == SDL_SCANCODE_RIGHT) return SDLK_RIGHT;
+    if (scancode == SDL_SCANCODE_LEFT) return SDLK_LEFT;
+    if (scancode == SDL_SCANCODE_DOWN) return SDLK_DOWN;
+    if (scancode == SDL_SCANCODE_UP) return SDLK_UP;
     if (scancode >= SDL_SCANCODE_F1 && scancode <= SDL_SCANCODE_F12)
         return SDLK_F1 + (scancode - SDL_SCANCODE_F1);
     return SDLK_UNKNOWN;
@@ -278,6 +289,55 @@ static void *thread_trampoline(void *opaque)
     return nullptr;
 }
 
+static void texture_pixel_rgba(const SDL_Texture *texture, int x, int y, Uint8 out[4])
+{
+    const Uint8 *pixel = texture->pixels + (size_t)y * texture->pitch +
+                         (size_t)x * texture->bytes_per_pixel;
+    if (texture->format == SDL_PIXELFORMAT_RGB24) {
+        out[0] = pixel[0]; out[1] = pixel[1]; out[2] = pixel[2]; out[3] = 255;
+    } else if (texture->format == SDL_PIXELFORMAT_RGB565) {
+        const Uint16 value = (Uint16)(pixel[0] | ((Uint16)pixel[1] << 8u));
+        out[0] = (Uint8)(((value >> 11u) & 31u) * 255u / 31u);
+        out[1] = (Uint8)(((value >> 5u) & 63u) * 255u / 63u);
+        out[2] = (Uint8)((value & 31u) * 255u / 31u);
+        out[3] = 255;
+    } else if (texture->format == SDL_PIXELFORMAT_ARGB1555) {
+        const Uint16 value = (Uint16)(pixel[0] | ((Uint16)pixel[1] << 8u));
+        out[0] = (Uint8)(((value >> 10u) & 31u) * 255u / 31u);
+        out[1] = (Uint8)(((value >> 5u) & 31u) * 255u / 31u);
+        out[2] = (Uint8)((value & 31u) * 255u / 31u);
+        out[3] = (value & 0x8000u) ? 255 : 0;
+    } else {
+        Uint32 value = 0;
+        memcpy(&value, pixel, sizeof(value));
+        argb_to_rgba(value, out);
+    }
+}
+
+static int audio_callback_thread(void *)
+{
+    const Uint32 bytes = audio_state.format.size ? audio_state.format.size : 4096u;
+    Uint8 *buffer = (Uint8 *)malloc(bytes);
+    if (!buffer) return -1;
+    while (__atomic_load_n(&audio_state.running, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(&audio_state.paused, __ATOMIC_ACQUIRE)) {
+            SDL_Delay(1);
+            continue;
+        }
+        memset(buffer, 0, bytes);
+        audio_state.format.callback(audio_state.format.userdata, buffer, (int)bytes);
+        Uint32 written = 0;
+        while (written < bytes && __atomic_load_n(&audio_state.running, __ATOMIC_ACQUIRE)) {
+            const ssize_t result = write(audio_state.fd, buffer + written, bytes - written);
+            if (result > 0) written += (Uint32)result;
+            else if (result < 0 && (errno == EINTR || errno == EAGAIN)) cooperative_yield();
+            else break;
+        }
+    }
+    free(buffer);
+    return 0;
+}
+
 static const char *scancode_name(SDL_Scancode scancode)
 {
     static const char *const letters[] = {
@@ -338,6 +398,11 @@ Uint32 SDL_WasInit(Uint32 flags) { return flags ? initialized_flags & flags : in
 void SDL_Quit(void)
 {
     if (input_fd >= 0) { close(input_fd); input_fd = -1; }
+    if (audio_state.thread) {
+        __atomic_store_n(&audio_state.running, 0, __ATOMIC_RELEASE);
+        SDL_WaitThread(audio_state.thread, nullptr);
+        audio_state.thread = nullptr;
+    }
     if (audio_state.fd >= 0) { close(audio_state.fd); audio_state.fd = -1; }
     if (audio_state.mutex) { SDL_DestroyMutex(audio_state.mutex); audio_state.mutex = nullptr; }
     initialized_flags = 0;
@@ -345,6 +410,8 @@ void SDL_Quit(void)
 
 const char *SDL_GetError(void) { return last_error[0] ? last_error : ""; }
 SDL_bool SDL_SetHint(const char *, const char *) { return SDL_TRUE; }
+SDL_bool SDL_SetHintWithPriority(const char *name, const char *value, SDL_HintPriority) { return SDL_SetHint(name, value); }
+void SDL_SetMainReady(void) {}
 Uint64 SDL_GetPerformanceCounter(void) { return monotonic_microseconds(); }
 Uint64 SDL_GetPerformanceFrequency(void) { return 1000000ull; }
 Uint32 SDL_GetTicks(void) { return (Uint32)(monotonic_microseconds() / 1000ull); }
@@ -378,6 +445,9 @@ void SDL_RaiseWindow(SDL_Window *) {}
 Uint32 SDL_GetWindowFlags(SDL_Window *window) { return window ? window->flags : 0; }
 void SDL_GetWindowSize(SDL_Window *window, int *w, int *h) { if (w) *w = window ? window->width : 0; if (h) *h = window ? window->height : 0; }
 void SDL_GetWindowPosition(SDL_Window *window, int *x, int *y) { if (x) *x = window ? window->x : 0; if (y) *y = window ? window->y : 0; }
+void SDL_SetWindowPosition(SDL_Window *window, int x, int y) { if (window) { window->x = x; window->y = y; } }
+void SDL_SetWindowSize(SDL_Window *window, int w, int h) { if (window && w > 0 && h > 0) { window->width = w; window->height = h; } }
+void SDL_SetWindowTitle(SDL_Window *, const char *) {}
 int SDL_SetWindowFullscreen(SDL_Window *window, Uint32 flags) { if (!window) return -1; window->flags &= ~SDL_WINDOW_FULLSCREEN_DESKTOP; window->flags |= flags & SDL_WINDOW_FULLSCREEN_DESKTOP; return 0; }
 int SDL_GetWindowDisplayIndex(SDL_Window *window) { return window ? 0 : -1; }
 int SDL_GetCurrentDisplayMode(int display_index, SDL_DisplayMode *mode) { if (display_index != 0 || !mode) return -1; mode->format = SDL_PIXELFORMAT_ARGB8888; mode->w = VIRTUA_DISPLAY_WIDTH; mode->h = VIRTUA_DISPLAY_HEIGHT; mode->refresh_rate = 60; mode->driverdata = nullptr; return 0; }
@@ -416,6 +486,8 @@ void SDL_DestroyRenderer(SDL_Renderer *renderer)
 
 int SDL_RenderSetLogicalSize(SDL_Renderer *renderer, int w, int h) { if (!renderer || w <= 0 || h <= 0) return -1; renderer->logical_width = w; renderer->logical_height = h; return 0; }
 int SDL_RenderSetVSync(SDL_Renderer *renderer, int vsync) { if (!renderer) return -1; renderer->vsync = vsync != 0; return 0; }
+int SDL_GetRendererInfo(SDL_Renderer *renderer, SDL_RendererInfo *info) { if (!renderer || !info) return -1; memset(info, 0, sizeof(*info)); info->name = "virtua"; info->flags = SDL_RENDERER_SOFTWARE | (renderer->vsync ? SDL_RENDERER_PRESENTVSYNC : 0u); info->num_texture_formats = 4; info->texture_formats[0] = SDL_PIXELFORMAT_RGB24; info->texture_formats[1] = SDL_PIXELFORMAT_ARGB8888; info->texture_formats[2] = SDL_PIXELFORMAT_RGB565; info->texture_formats[3] = SDL_PIXELFORMAT_ARGB1555; info->max_texture_width = 4096; info->max_texture_height = 4096; return 0; }
+int SDL_GetRendererOutputSize(SDL_Renderer *renderer, int *w, int *h) { if (!renderer || !renderer->window) return -1; if (w) *w = renderer->window->width; if (h) *h = renderer->window->height; return 0; }
 int SDL_SetRenderDrawColor(SDL_Renderer *renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a) { if (!renderer) return -1; renderer->clear_r = r; renderer->clear_g = g; renderer->clear_b = b; renderer->clear_a = a; return 0; }
 int SDL_RenderClear(SDL_Renderer *renderer) { if (!renderer) return -1; fill_renderer(renderer, renderer->clear_r, renderer->clear_g, renderer->clear_b, renderer->clear_a); return 0; }
 
@@ -439,9 +511,10 @@ int SDL_RenderCopy(SDL_Renderer *renderer, SDL_Texture *texture,
             if (dx < 0 || dx >= renderer->window->width) continue;
             const int sx = src.x + (int)((int64_t)x * src.w / dst.w);
             if (sx < 0 || sx >= texture->width) continue;
-            const Uint32 pixel = texture->pixels[(size_t)sy * texture->width + sx];
-            argb_to_rgba(pixel, renderer->framebuffer +
-                         ((size_t)dy * renderer->window->width + dx) * 4u);
+            Uint8 rgba[4];
+            texture_pixel_rgba(texture, sx, sy, rgba);
+            memcpy(renderer->framebuffer +
+                   ((size_t)dy * renderer->window->width + dx) * 4u, rgba, 4u);
         }
     }
     return 0;
@@ -480,15 +553,23 @@ void SDL_RenderPresent(SDL_Renderer *renderer)
 
 SDL_Texture *SDL_CreateTexture(SDL_Renderer *, Uint32 format, int access, int w, int h)
 {
-    if (format != SDL_PIXELFORMAT_ARGB8888 || access != SDL_TEXTUREACCESS_STREAMING || w <= 0 || h <= 0) {
-        set_error("unsupported Virtua texture format");
+    if (access != SDL_TEXTUREACCESS_STREAMING || w <= 0 || h <= 0) {
+        set_error("unsupported Virtua texture access");
         return nullptr;
     }
+    int bytes_per_pixel = 0;
+    if (format == SDL_PIXELFORMAT_RGB24) bytes_per_pixel = 3;
+    else if (format == SDL_PIXELFORMAT_ARGB8888) bytes_per_pixel = 4;
+    else if (format == SDL_PIXELFORMAT_RGB565 || format == SDL_PIXELFORMAT_ARGB1555) bytes_per_pixel = 2;
+    else { set_error("unsupported Virtua texture format"); return nullptr; }
     SDL_Texture *texture = (SDL_Texture *)calloc(1, sizeof(*texture));
     if (!texture) return nullptr;
-    texture->width = w; texture->height = h; texture->pitch = w * 4;
+    texture->width = w; texture->height = h;
+    texture->bytes_per_pixel = bytes_per_pixel;
+    texture->pitch = w * bytes_per_pixel;
+    texture->format = format;
     texture->scale_mode = SDL_ScaleModeNearest;
-    texture->pixels = (Uint32 *)calloc((size_t)w * h, sizeof(Uint32));
+    texture->pixels = (Uint8 *)calloc((size_t)texture->pitch * h, 1u);
     if (!texture->pixels) { free(texture); return nullptr; }
     return texture;
 }
@@ -504,8 +585,10 @@ int SDL_UpdateTexture(SDL_Texture *texture, const SDL_Rect *rect, const void *pi
         area.x + area.w > texture->width || area.y + area.h > texture->height) return -1;
     const Uint8 *source = (const Uint8 *)pixels;
     for (int row = 0; row < area.h; ++row) {
-        memcpy((Uint8 *)texture->pixels + ((size_t)(area.y + row) * texture->width + area.x) * 4u,
-               source + (size_t)row * pitch, (size_t)area.w * 4u);
+        memcpy(texture->pixels + (size_t)(area.y + row) * texture->pitch +
+                         (size_t)area.x * texture->bytes_per_pixel,
+               source + (size_t)row * pitch,
+               (size_t)area.w * texture->bytes_per_pixel);
     }
     return 0;
 }
@@ -535,6 +618,11 @@ int SDL_PollEvent(SDL_Event *event)
 }
 
 void SDL_PumpEvents(void) { pump_input(); }
+
+const Uint8 *SDL_GetKeyboardState(int *count) { if (count) *count = SDL_NUM_SCANCODES; SDL_PumpEvents(); return keyboard_state; }
+Uint16 SDL_GetModState(void) { return keyboard_modifiers; }
+SDL_Keycode SDL_GetKeyFromName(const char *name) { return scancode_to_keycode(SDL_GetScancodeFromName(name)); }
+int SDL_strcasecmp(const char *left, const char *right) { if (!left || !right) return left ? 1 : right ? -1 : 0; while (*left && *right) { int a = ascii_lower((unsigned char)*left++), b = ascii_lower((unsigned char)*right++); if (a != b) return a - b; } return (unsigned char)*left - (unsigned char)*right; }
 
 SDL_Scancode SDL_GetScancodeFromKey(SDL_Keycode key)
 {
@@ -610,6 +698,8 @@ SDL_GameControllerButton SDL_GameControllerGetButtonFromString(const char *text)
 }
 
 void SDL_GameControllerUpdate(void) { SDL_PumpEvents(); }
+int SDL_GameControllerEventState(int state) { return state; }
+const char *SDL_GameControllerName(SDL_GameController *) { return nullptr; }
 int SDL_GameControllerAddMappingsFromFile(const char *) { return 0; }
 
 SDL_AudioDeviceID SDL_OpenAudioDevice(const char *, int iscapture,
@@ -617,8 +707,8 @@ SDL_AudioDeviceID SDL_OpenAudioDevice(const char *, int iscapture,
                                       SDL_AudioSpec *obtained, int)
 {
     if (iscapture || !desired || desired->format != AUDIO_S16SYS ||
-        desired->channels == 0 || desired->callback) {
-        set_error("Virtua audio supports queued signed-16 PCM playback");
+        desired->channels == 0) {
+        set_error("Virtua audio supports signed-16 PCM playback");
         return 0;
     }
     if (audio_state.fd >= 0) return 1;
@@ -638,6 +728,17 @@ SDL_AudioDeviceID SDL_OpenAudioDevice(const char *, int iscapture,
     audio_state.format.size = (Uint32)audio_state.format.samples * audio_state.format.channels * 2u;
     if (obtained) *obtained = audio_state.format;
     if (!audio_state.mutex) audio_state.mutex = SDL_CreateMutex();
+    audio_state.paused = 1;
+    if (audio_state.format.callback) {
+        audio_state.running = 1;
+        audio_state.thread = SDL_CreateThread(audio_callback_thread, "virtua-audio", nullptr);
+        if (!audio_state.thread) {
+            audio_state.running = 0;
+            close(audio_state.fd); audio_state.fd = -1;
+            set_error("Virtua audio callback thread could not be created");
+            return 0;
+        }
+    }
     initialized_flags |= SDL_INIT_AUDIO;
     return 1;
 }
@@ -645,9 +746,14 @@ SDL_AudioDeviceID SDL_OpenAudioDevice(const char *, int iscapture,
 void SDL_CloseAudioDevice(SDL_AudioDeviceID device)
 {
     if (device != 1 || audio_state.fd < 0) return;
+    if (audio_state.thread) {
+        __atomic_store_n(&audio_state.running, 0, __ATOMIC_RELEASE);
+        SDL_WaitThread(audio_state.thread, nullptr);
+        audio_state.thread = nullptr;
+    }
     close(audio_state.fd); audio_state.fd = -1;
 }
-void SDL_PauseAudioDevice(SDL_AudioDeviceID, int) {}
+void SDL_PauseAudioDevice(SDL_AudioDeviceID device, int pause_on) { if (device == 1) __atomic_store_n(&audio_state.paused, pause_on != 0, __ATOMIC_RELEASE); }
 
 int SDL_QueueAudio(SDL_AudioDeviceID device, const void *data, Uint32 len)
 {

@@ -41,7 +41,7 @@ enum {
     SDL_CONTROLLERDEVICEREMOVED = 0x651,
 };
 
-enum { SDL_WINDOWEVENT_FOCUS_LOST = 13 };
+enum { SDL_WINDOWEVENT_CLOSE = 7, SDL_WINDOWEVENT_FOCUS_LOST = 13 };
 
 enum {
     SDL_WINDOW_FULLSCREEN = 0x00000001u,
@@ -66,6 +66,9 @@ enum {
 
 enum { SDL_TEXTUREACCESS_STREAMING = 1 };
 #define SDL_PIXELFORMAT_ARGB8888 0x16362004u
+#define SDL_PIXELFORMAT_RGB24 0x17101803u
+#define SDL_PIXELFORMAT_RGB565 0x15151002u
+#define SDL_PIXELFORMAT_ARGB1555 0x15331002u
 
 typedef enum SDL_ScaleMode {
     SDL_ScaleModeNearest = 0,
@@ -136,7 +139,13 @@ enum {
     SDLK_UNKNOWN = 0,
     SDLK_RETURN = '\r',
     SDLK_ESCAPE = 27,
+    SDLK_BACKSPACE = '\b',
+    SDLK_SPACE = ' ',
     SDLK_f = 'f',
+    SDLK_RIGHT = 0x4000004f,
+    SDLK_LEFT = 0x40000050,
+    SDLK_DOWN = 0x40000051,
+    SDLK_UP = 0x40000052,
     SDLK_F1 = 0x4000003a,
     SDLK_F2,
     SDLK_F3,
@@ -219,6 +228,14 @@ typedef struct SDL_DisplayMode {
     int refresh_rate;
     void *driverdata;
 } SDL_DisplayMode;
+typedef struct SDL_RendererInfo {
+    const char *name;
+    Uint32 flags;
+    Uint32 num_texture_formats;
+    Uint32 texture_formats[16];
+    int max_texture_width;
+    int max_texture_height;
+} SDL_RendererInfo;
 
 typedef struct SDL_Window SDL_Window;
 typedef struct SDL_Renderer SDL_Renderer;
@@ -300,7 +317,8 @@ enum {
     SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG = 0x0002,
 };
 
-enum { SDL_MESSAGEBOX_ERROR = 0x10 };
+enum { SDL_MESSAGEBOX_ERROR = 0x10, SDL_ENABLE = 1, SDL_DISABLE = 0 };
+typedef enum SDL_HintPriority { SDL_HINT_DEFAULT = 0 } SDL_HintPriority;
 
 #define SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"
 #define SDL_HINT_JOYSTICK_HIDAPI "SDL_JOYSTICK_HIDAPI"
@@ -310,6 +328,7 @@ enum { SDL_MESSAGEBOX_ERROR = 0x10 };
 #define SDL_HINT_RENDER_SCALE_QUALITY "SDL_RENDER_SCALE_QUALITY"
 
 #define SDL_zero(value) memset(&(value), 0, sizeof(value))
+#define SDL_memset memset
 
 int SDL_Init(Uint32 flags);
 int SDL_InitSubSystem(Uint32 flags);
@@ -317,6 +336,8 @@ Uint32 SDL_WasInit(Uint32 flags);
 void SDL_Quit(void);
 const char *SDL_GetError(void);
 SDL_bool SDL_SetHint(const char *name, const char *value);
+SDL_bool SDL_SetHintWithPriority(const char *name, const char *value, SDL_HintPriority priority);
+void SDL_SetMainReady(void);
 
 Uint64 SDL_GetPerformanceCounter(void);
 Uint64 SDL_GetPerformanceFrequency(void);
@@ -331,6 +352,9 @@ void SDL_RaiseWindow(SDL_Window *window);
 Uint32 SDL_GetWindowFlags(SDL_Window *window);
 void SDL_GetWindowSize(SDL_Window *window, int *w, int *h);
 void SDL_GetWindowPosition(SDL_Window *window, int *x, int *y);
+void SDL_SetWindowPosition(SDL_Window *window, int x, int y);
+void SDL_SetWindowSize(SDL_Window *window, int w, int h);
+void SDL_SetWindowTitle(SDL_Window *window, const char *title);
 int SDL_SetWindowFullscreen(SDL_Window *window, Uint32 flags);
 int SDL_GetWindowDisplayIndex(SDL_Window *window);
 int SDL_GetCurrentDisplayMode(int display_index, SDL_DisplayMode *mode);
@@ -341,6 +365,8 @@ SDL_Renderer *SDL_CreateRenderer(SDL_Window *window, int index, Uint32 flags);
 void SDL_DestroyRenderer(SDL_Renderer *renderer);
 int SDL_RenderSetLogicalSize(SDL_Renderer *renderer, int w, int h);
 int SDL_RenderSetVSync(SDL_Renderer *renderer, int vsync);
+int SDL_GetRendererInfo(SDL_Renderer *renderer, SDL_RendererInfo *info);
+int SDL_GetRendererOutputSize(SDL_Renderer *renderer, int *w, int *h);
 int SDL_SetRenderDrawColor(SDL_Renderer *renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
 int SDL_RenderClear(SDL_Renderer *renderer);
 int SDL_RenderCopy(SDL_Renderer *renderer, SDL_Texture *texture,
@@ -367,7 +393,11 @@ int SDL_Vulkan_LoadLibrary(const char *path);
 
 int SDL_PollEvent(SDL_Event *event);
 void SDL_PumpEvents(void);
+const Uint8 *SDL_GetKeyboardState(int *count);
+Uint16 SDL_GetModState(void);
+SDL_Keycode SDL_GetKeyFromName(const char *name);
 SDL_Scancode SDL_GetScancodeFromKey(SDL_Keycode key);
+int SDL_strcasecmp(const char *left, const char *right);
 SDL_Scancode SDL_GetScancodeFromName(const char *name);
 const char *SDL_GetScancodeName(SDL_Scancode scancode);
 
@@ -390,6 +420,8 @@ Uint8 SDL_GameControllerGetButton(SDL_GameController *controller, SDL_GameContro
 SDL_GameControllerAxis SDL_GameControllerGetAxisFromString(const char *text);
 SDL_GameControllerButton SDL_GameControllerGetButtonFromString(const char *text);
 void SDL_GameControllerUpdate(void);
+int SDL_GameControllerEventState(int state);
+const char *SDL_GameControllerName(SDL_GameController *controller);
 int SDL_GameControllerAddMappingsFromFile(const char *path);
 
 SDL_AudioDeviceID SDL_OpenAudioDevice(const char *device, int iscapture,

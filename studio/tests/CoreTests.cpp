@@ -112,8 +112,10 @@ int main(int argc, char** argv) {
     if (argc >= 7) {
       request.targetPlatform = psxstudio::targetPlatformFromKey(QString::fromLocal8Bit(argv[6]));
     }
-    request.exportMode = QString::fromLocal8Bit(argv[5]).startsWith(QStringLiteral("source"))
+    const QString smokeMode = QString::fromLocal8Bit(argv[5]);
+    request.exportMode = smokeMode.startsWith(QStringLiteral("source"))
       ? psxstudio::ExportMode::Source : psxstudio::ExportMode::Build;
+    request.nativeExecution = smokeMode.contains(QStringLiteral("native"));
     request.romPath = QString::fromLocal8Bit(argv[2]);
     request.biosPath = QString::fromLocal8Bit(argv[3]);
     request.outputDirectory = QString::fromLocal8Bit(argv[4]);
@@ -236,6 +238,20 @@ int main(int argc, char** argv) {
           gbaCmake.contains(QStringLiteral("USES_TERMINAL")) &&
           !gbaCmake.contains(QStringLiteral("add_executable(psx-runtime")),
         QStringLiteral("generated GBA CMake drives the Rust runtime and target-specific CI package"));
+  psxstudio::PipelineRequest gbaNativeRequest = gbaRequest;
+  gbaNativeRequest.targetPlatform = psxstudio::TargetPlatform::VirtuaArm;
+  gbaNativeRequest.nativeExecution = true;
+  check(gbaNativeRequest.toJson().value(QStringLiteral("native")).toBool() &&
+          gbaNativeRequest.toJson().value(QStringLiteral("platform")).toString() ==
+            QStringLiteral("virtua-arm"),
+        QStringLiteral("Virtua ARM native GBA request serialization"));
+  const QString gbaNativeCmake = psxstudio::generatedGbaNativeProjectCMake(
+    QStringLiteral("Studio Test Advance"));
+  check(gbaNativeCmake.contains(QStringLiteral("VirtuaArmApp.cmake")) &&
+          gbaNativeCmake.contains(QStringLiteral("gba_native_main.c")) &&
+          gbaNativeCmake.contains(QStringLiteral("Studio Test Advance.virtua")) &&
+          gbaNativeCmake.contains(QStringLiteral("add_custom_target(gba-runtime")),
+        QStringLiteral("generated native GBA CMake stages a Virtua ARM package"));
   const QString gbaProject = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-project"));
   const QString gbaBuild = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-build"));
   check(psxstudio::writeText(QDir(gbaProject).filePath(QStringLiteral("CMakeLists.txt")),
@@ -595,6 +611,20 @@ int main(int argc, char** argv) {
         QStringLiteral("Linux platform selection round-trips through the request"));
 
 
+  gipRequest.targetPlatform = psxstudio::TargetPlatform::VirtuaArm;
+  gipRequest.exportMode = psxstudio::ExportMode::Build;
+  gipRequest.exportAsZip = true;
+  check(psxstudio::targetPlatformFromKey(QStringLiteral("VIRTUA-ARM")) ==
+          psxstudio::TargetPlatform::VirtuaArm &&
+          psxstudio::targetPlatformDisplayName(gipRequest.targetPlatform) ==
+            QStringLiteral("Virtua ARM") &&
+          psxstudio::exportOutputName(gipRequest) ==
+            QStringLiteral("Evil Zone (Europe)-Virtua-ARM.zip") &&
+          psxstudio::gameManifestForRequest(gipRequest)
+            .value(QStringLiteral("executable")).toString() ==
+              QStringLiteral("Evil Zone (Europe).virtua"),
+        QStringLiteral("Virtua ARM platform, output, and manifest round-trip"));
+
   psxstudio::GameDescription generatedGame;
   generatedGame.bootFileName = QStringLiteral("SLUS_000.00");
   generatedGame.serial = QStringLiteral("SLUS-00000");
@@ -605,7 +635,8 @@ int main(int argc, char** argv) {
   generatedRequest.frameworkRoot = QStringLiteral("/host-only/framework-root");
   for (const auto platform : { psxstudio::TargetPlatform::MacOS,
                                psxstudio::TargetPlatform::Windows,
-                               psxstudio::TargetPlatform::Linux }) {
+                               psxstudio::TargetPlatform::Linux,
+                               psxstudio::TargetPlatform::VirtuaArm }) {
     generatedRequest.targetPlatform = platform;
     const QString generatedCmake = psxstudio::generatedProjectCMake(
       generatedRequest, generatedGame, QStringLiteral("Portable Test Game"),
@@ -624,6 +655,11 @@ int main(int argc, char** argv) {
       check(generatedCmake.contains(QStringLiteral(
               "INTERFACE_INCLUDE_DIRECTORIES \"${sdl2source_SOURCE_DIR}/include\")\nset(SDL2_INCLUDE_DIRS")),
             QStringLiteral("generated Linux CMake closes imported SDL target properties"));
+    } else if (platform == psxstudio::TargetPlatform::VirtuaArm) {
+      check(generatedCmake.contains(QStringLiteral("set(PSX_VIRTUA ON")) &&
+              generatedCmake.contains(QStringLiteral("-scheduler cooperative")) &&
+              generatedCmake.contains(QStringLiteral("Portable Test Game.virtua")),
+            QStringLiteral("generated PlayStation CMake emits cooperative Virtua packaging"));
     }
   }
 

@@ -71,10 +71,14 @@ static inline void psx_atomic_u32_store_relaxed(PsxAtomicU32 *value, uint32_t de
 #endif
 
 /* 2^22 frames @ 44100 ~= 95 s per tap. Power of two so wrap is a mask. */
+#if defined(PSX_VIRTUA)
+#define PCM_RING_FRAMES (1u << 13)
+#define EV_RING_CAP  (1u << 11)
+#else
 #define PCM_RING_FRAMES (1u << 22)
-#define PCM_RING_MASK   (PCM_RING_FRAMES - 1u)
-
 #define EV_RING_CAP  (1u << 19)
+#endif
+#define PCM_RING_MASK   (PCM_RING_FRAMES - 1u)
 #define EV_RING_MASK (EV_RING_CAP - 1u)
 
 /* Audibility threshold shared with snesrecomp's dropped_audible metric:

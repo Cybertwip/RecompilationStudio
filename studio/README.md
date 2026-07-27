@@ -1,11 +1,11 @@
 # PSXRecomp Studio
 
 PSXRecomp Studio is the Qt front end for producing self-contained macOS,
-Windows, or Linux PlayStation **and Game Boy Advance** recompilation apps without
-creating a permanent per-title repository. A Windows Studio build exports
+Windows, Linux, or **Virtua ARM** PlayStation apps and Game Boy Advance packages
+without creating a permanent per-title repository. A Windows Studio build exports
 Windows packages and a Linux Studio build exports Linux packages. macOS can
-select macOS, Windows, Linux, or **All**; All queues every available target into
-one output directory.
+select macOS, Windows, Linux, Virtua ARM, or **All**; All queues the three
+desktop targets into one output directory.
 
 It uses Qt 6 Widgets, Oclero Qlementine, Qlementine Icons,
 QtAppInstanceManager, and QuaZip. Work happens in a temporary directory; the
@@ -14,8 +14,9 @@ selected output directory receives only the final platform package.
 ## Game Boy Advance flow
 
 Choose **Game Boy Advance** in the System selector, then provide one `.gba`
-cartridge image. Studio packages the Rust runtime under `extra/gba-rust`; BIOS
-execution is skipped through the HLE boot path by default, and the LCD pixel
+cartridge image. For macOS, Windows, and Linux, Studio packages the Rust runtime
+under `extra/gba-rust`; BIOS execution is skipped through the HLE boot path by
+default, and the LCD pixel
 grid/scanline filter is off by default. Both remain explicit runtime choices.
 GBA builds do not invoke Ghidra. Batch mode scans recursively for `.gba` files.
 
@@ -29,6 +30,11 @@ BIOS in the app resources; BIOS execution remains skipped/HLE by default.
 The GBA runtime provides automatic keyboard/gamepad input, the shared static
 macOS Xbox/PDP GIP backend, keyboard rebinding, an in-game settings menu, and
 persistent audio/video/controller settings.
+
+For **Virtua ARM**, check **Native**. Studio then emits a tiny cooperative ARM
+launcher that opens `game.gba` and submits it to MVII's versioned `/dev/native0`
+bridge as `MVII_NATIVE_GUEST_GBA_ARM7TDMI`. This path does not recompile or
+interpret the GBA ROM and does not require a GBA BIOS input.
 
 ## Required inputs
 
@@ -76,14 +82,16 @@ Linux archives contain the package contents directly at ZIP root, so the native
 executable is not hidden inside an extra package-directory layer. Disable the
 option to retain the unpacked `.app`, `-Windows`, and `-Linux` outputs.
 Every archive also contains a root `game.manifest.json` with `name` set to the
-edited game title, `executable` set to the root `.app`, `.exe`, or Linux
-executable name, and `platform` set to `macOS`, `Windows`, or `Linux`.
+edited game title and `executable` set to the root `.app`, `.exe`, Linux binary,
+or `.virtua` entry point. Virtua ARM packages use the `Virtua ARM` platform
+label.
 
 ## Host tools
 
 Every export requires CMake; non-Windows hosts also require Ninja. PlayStation
 exports additionally require Python 3, Ghidra 11.3.2, and OpenJDK 21. GBA
-exports do not use Ghidra or Java. On macOS, Studio detects both registered JDK bundles
+exports do not use Ghidra or Java. Virtua ARM builds additionally require Go and
+the bundled PowerEngine-derived LLVM/MVII SDK under `extra/virtua`. On macOS, Studio detects both registered JDK bundles
 and keg-only Homebrew `openjdk@21` installations, then passes that exact
 `JAVA_HOME` to Ghidra.
 macOS exports additionally require:

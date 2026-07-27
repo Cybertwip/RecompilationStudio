@@ -41,7 +41,11 @@ extern "C" {
 #endif
 
 /* 64K entries * 48 bytes ~= 3 MB. Covers many frames of transition activity. */
+#if defined(PSX_VIRTUA)
+#define EVENT_RING_CAP (1u << 11)
+#else
 #define EVENT_RING_CAP (1u << 16)
+#endif
 
 typedef enum {
     EV_NONE        = 0,

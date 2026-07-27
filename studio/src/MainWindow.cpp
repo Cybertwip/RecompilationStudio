@@ -1853,7 +1853,7 @@ void MainWindow::updatePlatformControls() {
   } else if (selectedPlatform == TargetPlatform::VirtuaArm) {
     signingNote_->setText(nativeSelected
       ? QStringLiteral("Native emits a cooperative ARM .virtua launcher that opens game.gba and submits it through the versioned MVII native bridge ABI.")
-      : QStringLiteral("Virtua ARM recompilation uses the bundled LLVM/MVII SDK and produces a cooperative .virtua application."));
+      : QStringLiteral("Enable Native to emit the MVII runtime bridge. GBA ROM recompilation is intentionally not used for Virtua ARM."));
     outputEdit_->setPlaceholderText(zip
       ? QStringLiteral("Destination for the Virtua ARM ZIP")
       : QStringLiteral("Destination for the Virtua ARM package folder"));
@@ -1908,7 +1908,10 @@ void MainWindow::updateBuildButton() {
                          selectedPlatform == TargetPlatform::VirtuaArm &&
                          nativeExecution_->isChecked();
   const bool biosReady = nativeGba || !biosEdit_->text().isEmpty();
-  const bool ready = gameReady && biosReady &&
+  const bool virtuaGbaModeReady = currentSystem_ != SystemKind::GameBoyAdvance ||
+                                  selectedPlatform != TargetPlatform::VirtuaArm ||
+                                  nativeExecution_->isChecked();
+  const bool ready = gameReady && biosReady && virtuaGbaModeReady &&
                      !outputEdit_->text().isEmpty() && analysisReady &&
                      signingReady && brandingReady && ciReady && localPlatformReady;
   buildButton_->setText(QStringLiteral("Export"));

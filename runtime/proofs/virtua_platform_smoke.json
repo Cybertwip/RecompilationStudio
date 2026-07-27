@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "created_utc": "2026-07-27T07:02:04+00:00",
+  "repository_commit": "f5a6f3e0eda0730ca0456ac9a3b5243ca5de7997",
+  "bridge_abi": 1,
+  "native_device": "/dev/native0",
+  "horizon_service_device": "/dev/horizon0",
+  "artifacts": {
+    "playstation_runtime": {
+      "path": "/private/tmp/psx-virtua-runtime-smoke/build/PSXVirtuaSmoke.virtua",
+      "sha256": "06b37cbf41f352b8aaa02c8279988553249bb4861febc97a9cebc899110d5109",
+      "size": 51834058,
+      "magic": "0x56495254",
+      "version": 3,
+      "entry_offset": 7888,
+      "blob_size": 51792426,
+      "relocation_count": 5197,
+      "bss_size": 50114482,
+      "gp_offset": 0,
+      "flags": "0x403",
+      "architecture": "arm32",
+      "gui": true,
+      "cooperative": true,
+      "executed": false
+    },
+    "gba_native": {
+      "path": "/private/tmp/gba-native-studio-smoke/out/Studio Native Test-Virtua-ARM/Studio Native Test.virtua",
+      "sha256": "d4f2c682c28b1f42a769e3044b2e2f09b0d274d19913a0f392b75f77dfd8feb7",
+      "size": 1388,
+      "magic": "0x56495254",
+      "version": 3,
+      "entry_offset": 784,
+      "blob_size": 1292,
+      "relocation_count": 5,
+      "bss_size": 4,
+      "gp_offset": 0,
+      "flags": "0x403",
+      "architecture": "arm32",
+      "gui": true,
+      "cooperative": true,
+      "executed": false
+    },
+    "vita_native": {
+      "path": "/private/tmp/vita2mvii-build/steganos-package/vita2mvii/Release/vita2mvii.virtua",
+      "sha256": "eef83523689caae6059ba79fbc0e5193214d7551960343695cc45a9c2adea379",
+      "size": 1480,
+      "magic": "0x56495254",
+      "version": 3,
+      "entry_offset": 864,
+      "blob_size": 1384,
+      "relocation_count": 5,
+      "bss_size": 4,
+      "gp_offset": 0,
+      "flags": "0x403",
+      "architecture": "arm32",
+      "gui": true,
+      "cooperative": true,
+      "executed": false
+    },
+    "horizon_native": {
+      "path": "/private/tmp/horizon2mvii-build/steganos-package/horizon2mvii/Release/horizon2mvii.virtua",
+      "sha256": "aa058704f27f7163081e99ed641cbd6d2f9b71296f3b0e3b26fee592e799f1dd",
+      "size": 1416,
+      "magic": "0x56495254",
+      "version": 3,
+      "entry_offset": 768,
+      "blob_size": 1320,
+      "relocation_count": 5,
+      "bss_size": 4,
+      "gp_offset": 0,
+      "flags": "0x403",
+      "architecture": "arm32",
+      "gui": true,
+      "cooperative": true,
+      "executed": false
+    }
+  },
+  "source_hashes": {
+    "extra/virtua/include/native_bridge.h": "083ed96652871d2ae8881900b6696d4d9287999f6e1179965977490aeb434fd2",
+    "extra/virtua/native/gba_native_main.c": "22ad431d72403dc2eb73cc9cf4d605cf4a1978a54d239c780c8b8938f140d1d3",
+    "extra/vita2hos/source/mvii_main.c": "3aaf7bd6279a4f93fa2677ead1d3698ceebd954dff585b515b9ab4ed7142e48d",
+    "extra/horizon2mvii/source/main.c": "6752f26ea4b42ac044cfa658f58edbf0b3863d44e180d2e8976b1a6a8bdb7b56",
+    "extra/horizon2mvii/source/horizon_servctl_mvii.c": "dccf48d0f94ed1cfb0cdd688b79a914a335cca7d751614156e31bc1e57ef5b87"
+  },
+  "vita_payload_staging": {
+    "source": "branding/vita/terraria.pkg",
+    "source_sha256": "da7fb890f5e67d783a3838819c0ce62427cbf59a09c8869d77f76bccc7ec3f97",
+    "staged_sha256": "da7fb890f5e67d783a3838819c0ce62427cbf59a09c8869d77f76bccc7ec3f97",
+    "executed": false
+  },
+  "verification": {
+    "studio_ctest": "passed",
+    "psx_runtime_cross_link": "passed",
+    "gba_native_pipeline_build": "passed",
+    "vita2mvii_build": "passed",
+    "horizon2mvii_build": "passed",
+    "runtime_launch_performed": false,
+    "virtua_packager_go_tests": "passed",
+    "horizon_servctl_command_match": "13_of_13"
+  },
+  "horizon_payload_staging": {
+    "source": "branding/switch/Undertale.nsp",
+    "source_sha256": "ccd1851c55ab97e2f358705bbf44de9480b3415102db6a855663a3660ed05fba",
+    "staged_sha256": "ccd1851c55ab97e2f358705bbf44de9480b3415102db6a855663a3660ed05fba",
+    "executed": false
+  }
+}

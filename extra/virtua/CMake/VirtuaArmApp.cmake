@@ -17,7 +17,7 @@ function(virtua_add_armv7_app target)
         set(VAPP_OUTPUT_NAME "${target}")
     endif()
 
-    get_filename_component(_virtua_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+    get_filename_component(_virtua_root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
     set(_elf_target "${target}_elf")
     add_executable(${_elf_target}
         ${VAPP_SOURCES}

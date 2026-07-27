@@ -108,13 +108,18 @@ Known follow-up work:
 
 ## PSXRecomp Studio
 
+Studio also supports **Virtua ARM / MVII** exports. PlayStation titles use the
+static-recompiled runtime with Virtua framebuffer/audio/input backends. GBA,
+Vita, and Horizon ARM programs use small native bridge launchers rather than a
+new recompilation path; see `docs/VIRTUA_PLATFORM.md`.
+
 `studio/` is the primary way to turn a legally obtained Titus Interactive
 (or other PS1) BIN/CUE set into a signed native app:
 
 - Disc analysis and evidence-backed MIPS→C generation
 - Optional BIOS branding patch and direct-to-game boot
 - Fixed controller pad type (Hybrid / Analog / D-Pad) baked into the package
-- macOS / Windows / Linux packaging
+- macOS / Windows / Linux / Virtua ARM packaging
 
 See [`studio/README.md`](studio/README.md).
 

@@ -185,6 +185,7 @@ private:
     void pump_audio();
     void flush_save_if_settled(uint64_t now);
     void write_save();
+    void report_stall(uint64_t now);
 
     // Say something once, to the serial console and to the failure screen.
     void note(const char* fmt, ...);
@@ -209,6 +210,9 @@ private:
 
     uint64_t frames_  = 0;
     bool     running_ = true;
+
+    uint64_t stall_report_us_ = 0;
+    uint64_t stall_last_clock_ = 0;
 
     int16_t audio_buffer_[kAudioBufferSamples];
 };

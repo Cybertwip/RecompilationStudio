@@ -186,7 +186,10 @@ pub mod shim {
             fn atan2(y: f64, x: f64) -> f64;
             fn pow(x: f64, y: f64) -> f64;
             fn exp(x: f64) -> f64;
+            fn exp2(x: f64) -> f64;
             fn log(x: f64) -> f64;
+            fn sin(x: f64) -> f64;
+            fn cos(x: f64) -> f64;
 
             fn sqrtf(x: f32) -> f32;
             fn floorf(x: f32) -> f32;
@@ -198,7 +201,10 @@ pub mod shim {
             fn atan2f(y: f32, x: f32) -> f32;
             fn powf(x: f32, y: f32) -> f32;
             fn expf(x: f32) -> f32;
+            fn exp2f(x: f32) -> f32;
             fn logf(x: f32) -> f32;
+            fn sinf(x: f32) -> f32;
+            fn cosf(x: f32) -> f32;
         }
 
         pub trait FloatOps: Sized + Copy {
@@ -213,7 +219,11 @@ pub mod shim {
             fn powf(self, other: Self) -> Self;
             fn powi(self, n: i32) -> Self;
             fn exp(self) -> Self;
+            fn exp2(self) -> Self;
             fn ln(self) -> Self;
+            fn sin(self) -> Self;
+            fn cos(self) -> Self;
+            fn sin_cos(self) -> (Self, Self);
         }
 
         impl FloatOps for f64 {
@@ -250,8 +260,20 @@ pub mod shim {
             fn exp(self) -> f64 {
                 unsafe { exp(self) }
             }
+            fn exp2(self) -> f64 {
+                unsafe { exp2(self) }
+            }
             fn ln(self) -> f64 {
                 unsafe { log(self) }
+            }
+            fn sin(self) -> f64 {
+                unsafe { sin(self) }
+            }
+            fn cos(self) -> f64 {
+                unsafe { cos(self) }
+            }
+            fn sin_cos(self) -> (f64, f64) {
+                unsafe { (sin(self), cos(self)) }
             }
         }
 
@@ -289,8 +311,20 @@ pub mod shim {
             fn exp(self) -> f32 {
                 unsafe { expf(self) }
             }
+            fn exp2(self) -> f32 {
+                unsafe { exp2f(self) }
+            }
             fn ln(self) -> f32 {
                 unsafe { logf(self) }
+            }
+            fn sin(self) -> f32 {
+                unsafe { sinf(self) }
+            }
+            fn cos(self) -> f32 {
+                unsafe { cosf(self) }
+            }
+            fn sin_cos(self) -> (f32, f32) {
+                unsafe { (sinf(self), cosf(self)) }
             }
         }
     }

@@ -15,6 +15,10 @@
 // modules below still have `eprintln!`, and its prelude carries the `alloc`
 // containers `#![no_std]` takes out of scope.
 #![no_std]
+// The `use crate::nostd::*;` at the top of each module is applied uniformly so
+// that no file needs a bespoke import list; in the ones that never allocate it
+// is dead, which is fine and not worth a per-file exception.
+#![allow(unused_imports)]
 
 extern crate alloc;
 

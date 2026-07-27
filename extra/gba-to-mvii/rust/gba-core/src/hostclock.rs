@@ -47,50 +47,30 @@ const FALLBACK: Civil = Civil {
     sec: 0,
 };
 
-#[cfg(unix)]
-pub fn now_local() -> Civil {
-    // SAFETY: `time` takes a nullable out-pointer; `localtime_r` fills a
-    // caller-owned `tm` and is thread-safe (unlike `localtime`).
-    unsafe {
-        let t: libc::time_t = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&t, &mut tm).is_null() {
-            return FALLBACK;
-        }
-        Civil {
-            year: tm.tm_year + 1900,
-            month: (tm.tm_mon + 1) as u8,
-            day: tm.tm_mday as u8,
-            dow: tm.tm_wday as u8,
-            hour: tm.tm_hour as u8,
-            min: tm.tm_min as u8,
-            sec: tm.tm_sec as u8,
-        }
-    }
+extern "C" {
+    /// Local civil time as seconds on the same proleptic-Gregorian timeline
+    /// `to_linear`/`from_linear` use — i.e. already zone-adjusted, because
+    /// there is nothing on this side that could adjust it. Supplied by the
+    /// runtime (rust/gba-mvii/src/lib.rs), which reads MVII's clock.
+    /// A negative return means "no clock", and we fall back.
+    fn gba_mvii_host_epoch() -> i64;
 }
 
-#[cfg(windows)]
+/// MVII replaces the upstream `localtime_r`/`GetLocalTime` split.
+///
+/// The handheld has one clock and no timezone database: `time()` on MVII
+/// already returns local wall time (see the `time` stub in
+/// Dash/llvm_libc_stubs.cpp), so the zone conversion the desktop build does
+/// has nothing left to do here. Breaking it down is Hinnant's day-count
+/// arithmetic below, which is the same code the set-clock path uses — so a
+/// game that reads the clock and a game that sets it agree by construction.
 pub fn now_local() -> Civil {
-    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-    // SAFETY: `GetLocalTime` fills a caller-owned SYSTEMTIME; cannot fail.
-    unsafe {
-        let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = std::mem::zeroed();
-        GetLocalTime(&mut st);
-        Civil {
-            year: st.wYear as i32,
-            month: st.wMonth as u8,
-            day: st.wDay as u8,
-            dow: st.wDayOfWeek as u8,
-            hour: st.wHour as u8,
-            min: st.wMinute as u8,
-            sec: st.wSecond as u8,
-        }
+    // SAFETY: a plain integer-returning C function with no arguments.
+    let secs = unsafe { gba_mvii_host_epoch() };
+    if secs < 0 {
+        return FALLBACK;
     }
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn now_local() -> Civil {
-    FALLBACK
+    from_linear(secs)
 }
 
 /// Civil time -> seconds on a single proleptic-Gregorian timeline. Used only

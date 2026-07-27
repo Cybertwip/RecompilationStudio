@@ -20,17 +20,18 @@
 // crate installs. `nostd` must come first so its prelude is in scope for the
 // modules below.
 #![no_std]
+// The `use crate::nostd::*;` at the top of each module is applied uniformly so
+// that no file needs a bespoke import list; in the ones that never allocate it
+// is dead, which is fine and not worth a per-file exception.
+#![allow(unused_imports)]
 
 extern crate alloc;
 
-#[macro_use]
 mod nostd;
 
 mod arm;
 mod disasm;
 mod thumb;
-
-use crate::nostd::*;
 
 pub use arm::decode_arm;
 pub use thumb::{decode_thumb, fuse_thumb_bl};

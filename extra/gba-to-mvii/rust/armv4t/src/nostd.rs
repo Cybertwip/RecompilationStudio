@@ -15,3 +15,12 @@ pub use alloc::format;
 pub use alloc::string::{String, ToString};
 pub use alloc::vec;
 pub use alloc::vec::Vec;
+
+/// Aliased over the `std` path by the glob import, so the disassembler's
+/// `use std::fmt::Write` keeps resolving — `core::fmt` is the same trait, and
+/// `alloc` is what implements it for `String`.
+pub use self::shim as std;
+
+pub mod shim {
+    pub use core::{cmp, fmt, iter, mem, ops, slice, str};
+}

@@ -51,6 +51,14 @@ typedef struct mvii_native_launch {
     uint64_t argv_address;
 } mvii_native_launch;
 
+#if defined(__cplusplus)
+static_assert(sizeof(mvii_native_query) == 24, "MVII native query ABI changed");
+static_assert(sizeof(mvii_native_launch) == 64, "MVII native launch ABI changed");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(mvii_native_query) == 24, "MVII native query ABI changed");
+_Static_assert(sizeof(mvii_native_launch) == 64, "MVII native launch ABI changed");
+#endif
+
 #ifdef __cplusplus
 }
 #endif

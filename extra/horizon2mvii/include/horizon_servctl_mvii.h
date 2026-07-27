@@ -34,19 +34,25 @@ typedef struct mvii_horizon_servctl_request {
     int64_t result;
 } mvii_horizon_servctl_request;
 
-long mvii_horizon_servctl(unsigned int command,
-                          unsigned long argument1,
-                          unsigned long argument2,
-                          unsigned long argument3,
-                          unsigned long argument4,
-                          unsigned long argument5);
+#if defined(__cplusplus)
+static_assert(sizeof(mvii_horizon_servctl_request) == 56, "MVII Horizon service ABI changed");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(mvii_horizon_servctl_request) == 56, "MVII Horizon service ABI changed");
+#endif
 
-long mvii_horizon_write_buffer(unsigned long horizon_address,
-                               const void *local_buffer, size_t size);
-long mvii_horizon_read_buffer(unsigned long horizon_address,
-                              void *local_buffer, size_t size);
-long mvii_horizon_map_memory(unsigned long horizon_address,
-                             unsigned long local_address, size_t size);
+int64_t mvii_horizon_servctl(uint32_t command,
+                              uint64_t argument1,
+                              uint64_t argument2,
+                              uint64_t argument3,
+                              uint64_t argument4,
+                              uint64_t argument5);
+
+int64_t mvii_horizon_write_buffer(uint64_t horizon_address,
+                                  const void *local_buffer, size_t size);
+int64_t mvii_horizon_read_buffer(uint64_t horizon_address,
+                                 void *local_buffer, size_t size);
+int64_t mvii_horizon_map_memory(uint64_t horizon_address,
+                                uint64_t local_address, size_t size);
 
 #ifdef __cplusplus
 }

@@ -24,12 +24,12 @@ static int open_service_device(void)
     return (int)result;
 }
 
-long mvii_horizon_servctl(unsigned int command,
-                          unsigned long argument1,
-                          unsigned long argument2,
-                          unsigned long argument3,
-                          unsigned long argument4,
-                          unsigned long argument5)
+int64_t mvii_horizon_servctl(uint32_t command,
+                              uint64_t argument1,
+                              uint64_t argument2,
+                              uint64_t argument3,
+                              uint64_t argument4,
+                              uint64_t argument5)
 {
     if (command > HZN_SCTL_MEMWATCH_GET_CLEAR) return -22;
     const minos_user_abi *abi = minos_current_user_abi;
@@ -45,25 +45,25 @@ long mvii_horizon_servctl(unsigned int command,
     request.arguments[3] = argument4;
     request.arguments[4] = argument5;
     const long status = abi->ioctl_fn(fd, MVII_HORIZON_IOCTL_SERVCTL, &request);
-    return status < 0 ? status : (long)request.result;
+    return status < 0 ? status : request.result;
 }
 
-long mvii_horizon_write_buffer(unsigned long horizon_address,
-                               const void *local_buffer, size_t size)
+int64_t mvii_horizon_write_buffer(uint64_t horizon_address,
+                                  const void *local_buffer, size_t size)
 {
     return mvii_horizon_servctl(HZN_SCTL_WRITE_BUFFER, horizon_address,
-        (unsigned long)(uintptr_t)local_buffer, size, 0, 0);
+        (uint64_t)(uintptr_t)local_buffer, size, 0, 0);
 }
 
-long mvii_horizon_read_buffer(unsigned long horizon_address,
-                              void *local_buffer, size_t size)
+int64_t mvii_horizon_read_buffer(uint64_t horizon_address,
+                                 void *local_buffer, size_t size)
 {
     return mvii_horizon_servctl(HZN_SCTL_READ_BUFFER, horizon_address,
-        (unsigned long)(uintptr_t)local_buffer, size, 0, 0);
+        (uint64_t)(uintptr_t)local_buffer, size, 0, 0);
 }
 
-long mvii_horizon_map_memory(unsigned long horizon_address,
-                             unsigned long local_address, size_t size)
+int64_t mvii_horizon_map_memory(uint64_t horizon_address,
+                                uint64_t local_address, size_t size)
 {
     return mvii_horizon_servctl(HZN_SCTL_MAP_MEMORY, horizon_address,
         local_address, size, 0, 0);

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "created_utc": "2026-07-27T07:02:04+00:00",
+  "created_utc": "2026-07-27T07:32:15+00:00",
   "repository_commit": "f5a6f3e0eda0730ca0456ac9a3b5243ca5de7997",
   "bridge_abi": 2,
   "native_device": "/dev/native0",
@@ -25,12 +25,12 @@
     },
     "gba_native": {
       "path": "/private/tmp/gba-native-studio-smoke/out/Studio Native Test-Virtua-ARM/Studio Native Test.virtua",
-      "sha256": "d4f2c682c28b1f42a769e3044b2e2f09b0d274d19913a0f392b75f77dfd8feb7",
-      "size": 1388,
+      "sha256": "1a1bcb13e8f2f4efdb73042c89781587cdf638cb2520a53676ab00abcaf372e2",
+      "size": 1404,
       "magic": "0x56495254",
       "version": 3,
-      "entry_offset": 784,
-      "blob_size": 1292,
+      "entry_offset": 800,
+      "blob_size": 1308,
       "relocation_count": 5,
       "bss_size": 4,
       "gp_offset": 0,
@@ -42,12 +42,12 @@
     },
     "vita_native": {
       "path": "/private/tmp/vita2mvii-build/steganos-package/vita2mvii/Release/vita2mvii.virtua",
-      "sha256": "eef83523689caae6059ba79fbc0e5193214d7551960343695cc45a9c2adea379",
-      "size": 1480,
+      "sha256": "cf91c08118bcc2e73ac799f6e9a1c7c4f66c06efbb2b7eaa3448b4c99b5a2f7d",
+      "size": 1512,
       "magic": "0x56495254",
       "version": 3,
-      "entry_offset": 864,
-      "blob_size": 1384,
+      "entry_offset": 896,
+      "blob_size": 1416,
       "relocation_count": 5,
       "bss_size": 4,
       "gp_offset": 0,
@@ -76,11 +76,11 @@
     }
   },
   "source_hashes": {
-    "extra/virtua/include/native_bridge.h": "083ed96652871d2ae8881900b6696d4d9287999f6e1179965977490aeb434fd2",
-    "extra/virtua/native/gba_native_main.c": "22ad431d72403dc2eb73cc9cf4d605cf4a1978a54d239c780c8b8938f140d1d3",
-    "extra/vita2hos/source/mvii_main.c": "3aaf7bd6279a4f93fa2677ead1d3698ceebd954dff585b515b9ab4ed7142e48d",
-    "extra/horizon2mvii/source/main.c": "6752f26ea4b42ac044cfa658f58edbf0b3863d44e180d2e8976b1a6a8bdb7b56",
-    "extra/horizon2mvii/source/horizon_servctl_mvii.c": "447865887f4dafda08c8b9f4b7b45d110af0669046232cd2de1e5c6fafefbef6"
+    "extra/virtua/include/native_bridge.h": "960cec69b18c2a6f24011a3ab70e7570d86b8cad504228c051d75968bfa991c1",
+    "extra/virtua/native/gba_native_main.c": "9339c150fd42f519d503c3ba2360ce2859713d2f37f8c9aded3373ff74e27439",
+    "extra/vita2hos/source/mvii_main.c": "1760257b89b4616709e4c5ce5f7866a08bbeb0dedbd33119ad8a9e34b7d4a95f",
+    "extra/horizon2mvii/source/main.c": "8c04e7dbccc0a82b95135f0d3dc452cf61fd5e9164cf23e81206e4e321fa7c6a",
+    "extra/horizon2mvii/source/horizon_servctl_mvii.c": "00302ba2f6ef4125d4de454c7bc848a52028204eeda67a2345ca2a0d3b4b8494"
   },
   "vita_payload_staging": {
     "source": "branding/vita/terraria.pkg",

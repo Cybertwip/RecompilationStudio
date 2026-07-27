@@ -59,6 +59,10 @@ constexpr uint32_t kStallPollSlices = 1024;
 // The GBA's real refresh: 16777216 / (308 * 228 * 4) = 59.727 Hz.
 constexpr uint64_t kFrameUs = 16743;
 
+// How often a stalled machine describes itself. Slow on purpose: stderr goes
+// out the serial console a byte at a time here.
+constexpr uint64_t kStallReportUs = 2000000ull;
+
 // Save-flush policy. See flush_save_if_settled() for why this exists at all.
 constexpr uint64_t kSaveProbeUs  = 1000000ull;   // how often we look
 constexpr uint64_t kSaveSettleUs = 1000000ull;   // quiet before we write

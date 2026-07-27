@@ -50,6 +50,10 @@ using gbamvii::logf;
 // whether the slice is actually spent belongs to the kernel, not to us.
 constexpr uint32_t kStepsPerYield = 256;
 
+// Consecutive yields with no frame in sight before the loop stops trusting the
+// frame boundary to poll input. See the note at the use site.
+constexpr uint32_t kStallPollSlices = 1024;
+
 // The GBA's real refresh: 16777216 / (308 * 228 * 4) = 59.727 Hz.
 constexpr uint64_t kFrameUs = 16743;
 
@@ -282,16 +286,17 @@ void Runtime::present_frame() {
 }
 
 void Runtime::pump_audio() {
-    for (;;) {
-        // Drained even with no DAC: the core's queue is unbounded, and an
-        // emulator that never empties it grows for as long as it runs.
-        const std::size_t got = audio_.enabled()
-            ? gba_mvii_drain_audio(machine_, audio_buffer_, kAudioBufferSamples)
-            : gba_mvii_drain_audio(machine_, nullptr, 0);
-        if (got == 0) return;
-        audio_.submit(audio_buffer_, got);
-        if (got < kAudioBufferSamples) return;
+    // Drained even with no DAC: the core's queue is unbounded, and an emulator
+    // that never empties it grows for as long as it runs.
+    if (!audio_.enabled()) {
+        (void)gba_mvii_drain_audio(machine_, nullptr, 0);
+        return;
     }
+    // One call, never a loop. The core empties its queue whether or not all of
+    // it fit, and that is the behaviour we want: a backlog kept for the next
+    // frame would drift audio behind video forever rather than glitch once.
+    audio_.submit(audio_buffer_,
+                  gba_mvii_drain_audio(machine_, audio_buffer_, kAudioBufferSamples));
 }
 
 void Runtime::write_save() {
@@ -391,13 +396,28 @@ int Runtime::run() {
     uint64_t report_us     = gbamvii::now_us() + 5000000ull;
     uint64_t report_frames = 0;
     save_next_probe_us_    = gbamvii::now_us() + kSaveProbeUs;
+    uint32_t stalled_slices = 0;
 
     while (running_) {
         // Bounded work, then a turn for everything else. run_steps returns as
         // soon as the PPU finishes a frame, so this never overshoots one.
         const uint32_t frame_ready = gba_mvii_run_steps(machine_, kStepsPerYield);
         gbamvii::yield_now();
-        if (!frame_ready) continue;
+        if (!frame_ready) {
+            // Input is polled on frame boundaries, which is the right cadence
+            // while frames are arriving — nothing on screen changes faster. A
+            // guest that stops producing them (a BIOS wait loop with the LCD
+            // off, or an emulation bug) would otherwise become unquittable, so
+            // this catches that case and only that case: 1024 slices is a
+            // quarter of a million instructions, well past two frames' worth of
+            // work, so it never fires while the emulator is making progress.
+            if (++stalled_slices >= kStallPollSlices) {
+                stalled_slices = 0;
+                if (!input_.poll()) running_ = false;
+            }
+            continue;
+        }
+        stalled_slices = 0;
 
         present_frame();
         pump_audio();

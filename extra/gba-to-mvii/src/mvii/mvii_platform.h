@@ -59,6 +59,24 @@ public:
     // the packaged image.
     void fill(uint8_t r, uint8_t g, uint8_t b);
 
+    // Present `count` lines of text on a flat background.
+    //
+    // This exists because MVII shows a guest's stderr only in the Terminal
+    // view, and only while it is attached to that process — so an app launched
+    // from the dashboard that fails at startup has no way to say why. It used
+    // to paint a flat red and exit, which told the user precisely that
+    // something went wrong and nothing about what. 39 columns of 5x7 glyphs is
+    // enough for a path, and a path is usually the whole answer.
+    //
+    // Lines longer than the surface wrap onto the next row rather than being
+    // clipped: the interesting end of a path is the right-hand end.
+    void message(uint8_t r, uint8_t g, uint8_t b,
+                 const char* const* lines, int count);
+
+    // Characters that fit across the surface, for callers that want to lay out
+    // their own text.
+    int text_columns() const;
+
     int width()  const { return width_; }
     int height() const { return height_; }
     bool opened() const { return fd_ >= 0; }
@@ -68,6 +86,13 @@ private:
     // on every present, so the pointer from the previous frame is aimed at the
     // image currently on screen and must be re-mapped rather than reused.
     bool remap();
+
+    // The buffer the next frame goes into, and its stride in pixels. Null when
+    // there is nowhere to draw.
+    uint8_t* surface(int& span_pixels);
+
+    // Hand the surface to the compositor and get the next one ready.
+    void flush();
 
     int       fd_      = -1;
     int       width_   = 0;

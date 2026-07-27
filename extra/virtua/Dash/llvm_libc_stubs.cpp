@@ -1418,6 +1418,15 @@ long minos_user_gettimeofday(void* tv, void* tz) {
     return sys_gettimeofday(tv, tz);
 }
 
+int gettimeofday(struct timeval* tv, void* tz) noexcept {
+    const long result = sys_gettimeofday(tv, tz);
+    if (result < 0) {
+        errno = static_cast<int>(-result);
+        return -1;
+    }
+    return static_cast<int>(result);
+}
+
 const struct in6_addr in6addr_any = {};
 const struct in6_addr in6addr_loopback = {{{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}}};
 
@@ -2638,7 +2647,7 @@ VIRTUA_WEAK_SYMBOL long minos_ftell(FILE* stream) {
 }
 
 VIRTUA_WEAK_SYMBOL void minos_rewind(FILE* stream) {
-    rewind(stream);
+    (void)fseek(stream, 0, SEEK_SET);
 }
 
 VIRTUA_WEAK_SYMBOL int minos_fflush(FILE* stream) {
@@ -3674,6 +3683,11 @@ pid_t fork(void) {
     return -1;
 }
 
+int system(const char*) {
+    errno = ENOSYS;
+    return -1;
+}
+
 int execv(const char*, char* const[]) {
     errno = ENOSYS;
     return -1;
@@ -3834,8 +3848,9 @@ long pathconf(const char*, int name) {
     return -1;
 }
 
-int utimes(const char*, const struct timeval[2]) {
-    return 0;
+int utimes(const char*, const struct timeval[2]) noexcept {
+    errno = ENOSYS;
+    return -1;
 }
 
 int lstat(const char* path, struct stat* buf) {

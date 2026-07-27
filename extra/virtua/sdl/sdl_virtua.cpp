@@ -574,6 +574,11 @@ const char *SDL_GetScancodeName(SDL_Scancode scancode)
 int SDL_NumJoysticks(void) { return 0; }
 SDL_bool SDL_IsGameController(int) { return SDL_FALSE; }
 SDL_JoystickID SDL_JoystickGetDeviceInstanceID(int) { return -1; }
+SDL_JoystickGUID SDL_JoystickGetDeviceGUID(int) { SDL_JoystickGUID guid{}; return guid; }
+void SDL_JoystickGetGUIDString(SDL_JoystickGUID, char *text, int text_size) { if (text && text_size > 0) text[0] = '\0'; }
+const char *SDL_GameControllerNameForIndex(int) { return nullptr; }
+const char *SDL_GameControllerPathForIndex(int) { return nullptr; }
+const char *SDL_GameControllerGetSerial(SDL_GameController *) { return nullptr; }
 SDL_JoystickID SDL_JoystickInstanceID(SDL_Joystick *joystick) { return joystick ? joystick->instance : -1; }
 SDL_GameController *SDL_GameControllerOpen(int) { set_error("Virtua gamepad device is not exposed as an SDL controller"); return nullptr; }
 void SDL_GameControllerClose(SDL_GameController *controller) { free(controller); }

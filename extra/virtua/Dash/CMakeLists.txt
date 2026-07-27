@@ -6,7 +6,6 @@ endif()
 
 set(_dash_sources
     "${CMAKE_CURRENT_LIST_DIR}/libDash.c"
-    "${CMAKE_CURRENT_LIST_DIR}/stub.c"
 )
 
 set(_dash_arch "${CMAKE_SYSTEM_PROCESSOR}")

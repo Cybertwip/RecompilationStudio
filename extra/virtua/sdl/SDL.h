@@ -17,6 +17,7 @@ typedef int32_t Sint32;
 typedef uint64_t Uint64;
 typedef int64_t Sint64;
 typedef int32_t SDL_JoystickID;
+typedef struct SDL_JoystickGUID { Uint8 data[16]; } SDL_JoystickGUID;
 typedef uint32_t SDL_AudioDeviceID;
 typedef int32_t SDL_Keycode;
 typedef int SDL_bool;
@@ -54,6 +55,8 @@ enum {
 };
 
 #define SDL_WINDOWPOS_CENTERED 0x2FFF0000u
+#define SDL_VERSION_ATLEAST(major, minor, patch) \
+    (((major) < 2) || ((major) == 2 && ((minor) < 26 || ((minor) == 26 && (patch) <= 0))))
 
 enum {
     SDL_RENDERER_SOFTWARE = 0x00000001u,
@@ -371,6 +374,11 @@ const char *SDL_GetScancodeName(SDL_Scancode scancode);
 int SDL_NumJoysticks(void);
 SDL_bool SDL_IsGameController(int joystick_index);
 SDL_JoystickID SDL_JoystickGetDeviceInstanceID(int device_index);
+SDL_JoystickGUID SDL_JoystickGetDeviceGUID(int device_index);
+void SDL_JoystickGetGUIDString(SDL_JoystickGUID guid, char *text, int text_size);
+const char *SDL_GameControllerNameForIndex(int joystick_index);
+const char *SDL_GameControllerPathForIndex(int joystick_index);
+const char *SDL_GameControllerGetSerial(SDL_GameController *controller);
 SDL_JoystickID SDL_JoystickInstanceID(SDL_Joystick *joystick);
 SDL_GameController *SDL_GameControllerOpen(int joystick_index);
 void SDL_GameControllerClose(SDL_GameController *controller);

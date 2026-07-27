@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <pthread.h>
 #include <sched.h>
 #include <time.h>

@@ -3450,6 +3450,9 @@ static void sdl_vblank_present(void) {
 #endif
 }
 
+#if defined(PSX_VIRTUA)
+extern "C"
+#endif
 int main(int argc, char** argv) {
     /* Force line-buffered output so messages appear even if killed. */
     std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ);

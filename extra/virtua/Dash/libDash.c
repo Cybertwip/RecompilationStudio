@@ -63,7 +63,17 @@ int sys_open(const char *pathname, int flags, int mode);
 int sys_close(int fd);
 ssize_t sys_read(int fd, void *buf, size_t count);
 ssize_t sys_write(int fd, const void *buf, size_t count);
-off_t sys_lseek(int fd, off_t offset, int whence);
+/* Takes a long, not an off_t. The kernel entry point is
+ * `long lseek_fn(int, long, int)` (minos_user_abi.h), and armv7's off_t is
+ * 64-bit: declaring the offset wider here does not widen the callee, it
+ * changes the call. AAPCS passes a 64-bit argument in an even-aligned register
+ * pair, so the caller emits r0=fd, r2:r3=offset and puts whence on the stack,
+ * while the callee reads r1 as the offset and r2 as the whence — lseek(fd, 0,
+ * SEEK_END) arrives as lseek(fd, 2, SEEK_SET) and returns 2, a two-byte file
+ * size reported without an error. Every wrapper below narrows to long on
+ * purpose; 32 bits is the real limit anyway, since the FAT32 layer behind this
+ * addresses files with a uint32_t. */
+long sys_lseek(int fd, long offset, int whence);
 int sys_fstat(int fd, struct stat *statbuf);
 int sys_mkdir(const char *pathname, int mode);
 int sys_stat(const char *pathname, struct stat *statbuf);
@@ -568,12 +578,12 @@ int _write(int file, char *ptr, int len) {
 }
 
 int _lseek(int file, int ptr, int dir) {
-    off_t ret = sys_lseek(file, ptr, dir);
+    long ret = sys_lseek(file, (long)ptr, dir);
     if (ret < 0) {
-        errno = -ret;
+        errno = (int)-ret;
         return -1;
     }
-    return ret;
+    return (int)ret;
 }
 
 int _fstat(int file, struct stat *st) {
@@ -690,12 +700,18 @@ ssize_t __attribute__((weak)) write(int file, const void *ptr, size_t len) {
 }
 
 off_t __attribute__((weak)) lseek(int file, off_t ptr, int dir) {
-    off_t ret = sys_lseek(file, ptr, dir);
-    if (ret < 0) {
-        errno = -ret;
+    /* off_t is wider than the syscall's offset, so say so rather than letting
+     * the truncation seek somewhere plausible-looking. */
+    if (ptr > (off_t)__LONG_MAX__ || ptr < -(off_t)__LONG_MAX__ - 1) {
+        errno = EINVAL;
         return -1;
     }
-    return ret;
+    long ret = sys_lseek(file, (long)ptr, dir);
+    if (ret < 0) {
+        errno = (int)-ret;
+        return -1;
+    }
+    return (off_t)ret;
 }
 
 off64_t __attribute__((weak)) lseek64(int file, off64_t ptr, int dir) {
@@ -981,7 +997,7 @@ static off_t stream_tell(_MyFILE *stream) {
         return (off_t)-1;
     }
 
-    off_t kernel_pos = sys_lseek(stream->fd, 0, SEEK_CUR);
+    const long kernel_pos = sys_lseek(stream->fd, 0, SEEK_CUR);
     if (kernel_pos < 0) {
         errno = (int)-kernel_pos;
         stream->err = 1;
@@ -989,7 +1005,7 @@ static off_t stream_tell(_MyFILE *stream) {
     }
 
     const off_t unread = (off_t)(stream->buf_len - stream->buf_pos);
-    return kernel_pos - unread;
+    return (off_t)kernel_pos - unread;
 }
 
 // --- fread ---
@@ -1081,7 +1097,13 @@ int __attribute__((weak)) fseek(FILE *stream_ptr, long offset, int whence) {
         return -1;
     }
 
-    const off_t rc = sys_lseek(stream->fd, target, SEEK_SET);
+    if (target > (off_t)__LONG_MAX__ || target < 0) {
+        errno = EINVAL;
+        stream->err = 1;
+        return -1;
+    }
+
+    const long rc = sys_lseek(stream->fd, (long)target, SEEK_SET);
     if (rc < 0) {
         errno = (int)-rc;
         stream->err = 1;

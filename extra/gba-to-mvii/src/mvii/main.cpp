@@ -243,12 +243,23 @@ bool Runtime::load_rom(const std::string& path) {
         return false;
     }
 
+    // The file opened, so from here on every way out is a real failure and has
+    // to say so on the panel. The first version of this returned false quietly
+    // when the size probe misbehaved, and the screen then blamed the one thing
+    // that was not wrong — "no cartridge found", about a cartridge that was
+    // sitting right there. A guest that can see a file and cannot measure it is
+    // reporting a broken seek, not a missing ROM.
+    const std::string leaf = file_name_of(path);
     const off_t end = ::lseek(fd, 0, SEEK_END);
-    if (end <= 0 || ::lseek(fd, 0, SEEK_SET) != 0) { ::close(fd); return false; }
+    if (end < 0 || ::lseek(fd, 0, SEEK_SET) != 0) {
+        note("CANNOT SEEK %s (ERRNO %d)", leaf.c_str(), errno);
+        ::close(fd);
+        return false;
+    }
     const std::size_t size = static_cast<std::size_t>(end);
     if (size < 0xC0) {
-        logf("gba: '%s' is %u bytes — too small to be a cartridge\n",
-             path.c_str(), static_cast<unsigned>(size));
+        note("%s IS %u BYTES - TOO SMALL", leaf.c_str(),
+             static_cast<unsigned>(size));
         ::close(fd);
         return false;
     }
@@ -263,7 +274,6 @@ bool Runtime::load_rom(const std::string& path) {
 
     // A 16 MB cartridge off eMMC is not instant, and a window that sits on one
     // colour for several seconds reads as a hang. Say what is happening.
-    const std::string leaf = file_name_of(path);
     {
         char line[96];
         std::snprintf(line, sizeof(line), "LOADING %s (%u MB)",

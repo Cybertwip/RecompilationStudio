@@ -26,6 +26,7 @@
 #include <QThread>
 #include <QUuid>
 #include <QVersionNumber>
+#include <QtEndian>
 
 #include <algorithm>
 #include <memory>
@@ -868,7 +869,10 @@ bool PipelineWorker::runCommand(const QString& program,
 void PipelineWorker::run(PipelineRequest request) {
   cancelRequested_.store(false, std::memory_order_relaxed);
   if (request.system == SystemKind::GameBoyAdvance) {
-    runGba(request);
+    if (request.targetPlatform == TargetPlatform::VirtuaArm && request.nativeExecution)
+      runGbaNative(request);
+    else
+      runGba(request);
     return;
   }
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
@@ -3309,6 +3313,334 @@ void PipelineWorker::run(PipelineRequest request) {
                       outputApp));
   QDir(workspace).removeRecursively();
   emit completed(outputApp);
+}
+
+void PipelineWorker::runGbaNative(const PipelineRequest& request) {
+  const bool sourceExport = request.exportMode == ExportMode::Source;
+  const bool remoteCiBuild = request.exportMode == ExportMode::Build &&
+                             request.buildBackend == BuildBackend::RemoteCi;
+  const bool localBuild = request.exportMode == ExportMode::Build && !remoteCiBuild;
+  const int totalStages = localBuild ? 6 : 4;
+  int stage = 0;
+  QString workspace;
+  QString error;
+  auto nextStage = [&](const QString& name) {
+    emit stageChanged(name, ++stage, totalStages);
+    emit logLine(QStringLiteral("\n=== %1 ===").arg(name));
+  };
+  auto fail = [&](const QString& message) {
+    emit logLine(QStringLiteral("ERROR: %1").arg(message));
+    emit failed(message, workspace);
+  };
+  auto cancelledOut = [&]() {
+    if (!workspace.isEmpty()) QDir(workspace).removeRecursively();
+    emit cancelled();
+  };
+
+  nextStage(QStringLiteral("Validate Virtua ARM native inputs"));
+  if (request.targetPlatform != TargetPlatform::VirtuaArm || !request.nativeExecution) {
+    fail(QStringLiteral("The GBA native pipeline requires the Virtua ARM target and Native option."));
+    return;
+  }
+  if (remoteCiBuild) {
+    fail(QStringLiteral("Virtua ARM native packages are built locally or exported as source; CI dispatch is not enabled."));
+    return;
+  }
+  GbaDescription game;
+  if (!inspectGbaRom(request.romPath, game, error)) {
+    fail(error);
+    return;
+  }
+  if (!game.warning.isEmpty()) emit logLine(QStringLiteral("Warning: %1").arg(game.warning));
+  const QString bundleName = cleanBundleName(request.windowTitle);
+  if (bundleName.isEmpty()) {
+    fail(QStringLiteral("The window title cannot be converted to a valid app name."));
+    return;
+  }
+  if (!QFileInfo(request.outputDirectory).isDir() ||
+      !QFileInfo(request.outputDirectory).isWritable()) {
+    fail(QStringLiteral("Select a writable output directory."));
+    return;
+  }
+  const QString virtuaRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/virtua"));
+  if (!QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("include/native_bridge.h"))).isFile() ||
+      !QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("native/gba_native_main.c"))).isFile() ||
+      !QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("binary/virtua.go"))).isFile()) {
+    fail(QStringLiteral("The framework does not contain the bundled Virtua/MVII native bridge SDK."));
+    return;
+  }
+  const QString cmake = findExecutable(QStringLiteral("cmake"));
+  const QString git = findExecutable(QStringLiteral("git"));
+  const QString ninja = localBuild ? findExecutable(QStringLiteral("ninja")) : QString();
+  const QString go = localBuild ? findExecutable(QStringLiteral("go")) : QString();
+  if (cmake.isEmpty() || git.isEmpty() || (localBuild && (ninja.isEmpty() || go.isEmpty()))) {
+    fail(QStringLiteral("Virtua ARM native exports require CMake and Git; local builds also require Ninja and Go."));
+    return;
+  }
+
+  const QString romSha256 = sha256File(request.romPath, error);
+  const QString bridgeSha256 = sha256File(
+    QDir(virtuaRoot).filePath(QStringLiteral("include/native_bridge.h")), error);
+  if (romSha256.isEmpty() || bridgeSha256.isEmpty()) {
+    fail(error.isEmpty() ? QStringLiteral("The native GBA inputs could not be hashed.") : error);
+    return;
+  }
+  emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · native entry 0x08000000")
+    .arg(game.title, game.gameCode).arg(game.romSize));
+  emit logLine(QStringLiteral("Virtua native bridge ABI: v1 · header SHA-256 %1").arg(bridgeSha256));
+
+  nextStage(QStringLiteral("Create Virtua ARM native source repository"));
+  QString root = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+  if (root.isEmpty()) root = QDir::tempPath();
+  QTemporaryDir temporary(QDir(root).filePath(QStringLiteral("psxrecomp-gba-virtua-native-XXXXXX")));
+  temporary.setAutoRemove(false);
+  if (!temporary.isValid()) {
+    fail(QStringLiteral("Could not create a temporary Virtua native workspace."));
+    return;
+  }
+  workspace = temporary.path();
+  const QString projectDir = QDir(workspace).filePath(QStringLiteral("source"));
+  const QString buildDir = QDir(workspace).filePath(QStringLiteral("build"));
+  const QString proofDir = QDir(projectDir).filePath(QStringLiteral("proof"));
+  const QString inputsDir = QDir(projectDir).filePath(QStringLiteral("package_inputs"));
+  if (!QDir().mkpath(proofDir) || !QDir().mkpath(inputsDir) ||
+      !copySourceDirectory(virtuaRoot, QDir(projectDir).filePath(QStringLiteral("virtua")), error) ||
+      !copyFileReplacing(request.romPath,
+                         QDir(inputsDir).filePath(QStringLiteral("game.gba")), error)) {
+    fail(error.isEmpty() ? QStringLiteral("Could not stage the Virtua native source tree.") : error);
+    return;
+  }
+
+  QJsonObject manifest = gameManifestForRequest(request);
+  manifest.insert(QStringLiteral("system"), QStringLiteral("gba"));
+  manifest.insert(QStringLiteral("execution"), QStringLiteral("native-arm"));
+  manifest.insert(QStringLiteral("rom"), QStringLiteral("game.gba"));
+  const QJsonObject inputProof{
+    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("system"), QStringLiteral("gba") },
+    { QStringLiteral("execution"), QStringLiteral("native-arm") },
+    { QStringLiteral("guest_kind"), QStringLiteral("MVII_NATIVE_GUEST_GBA_ARM7TDMI") },
+    { QStringLiteral("bridge_abi"), 1 },
+    { QStringLiteral("bridge_header_sha256"), bridgeSha256 },
+    { QStringLiteral("rom_sha256"), romSha256 },
+    { QStringLiteral("rom_size"), QString::number(game.romSize) },
+    { QStringLiteral("entry"), QStringLiteral("0x08000000") },
+  };
+  const QString readme = QStringLiteral(
+    "# %1 — GBA Native for Virtua ARM\n\n"
+    "This source export builds a small cooperative ARM `.virtua` executable. "
+    "The launcher opens `game.gba`, negotiates the versioned MVII `/dev/native0` "
+    "ABI, requires native GBA capability, and submits the ROM as an ARM7TDMI "
+    "foreground guest. It does not contain an ARM interpreter or translated ROM code.\n\n"
+    "## Build\n\n```sh\n"
+    "cmake -S . -B build -G Ninja \\\n"
+    "  -DCMAKE_TOOLCHAIN_FILE=virtua/CMake/VirtuaArmToolchain.cmake \\\n"
+    "  -DCMAKE_BUILD_TYPE=Release\n"
+    "cmake --build build --target gba-runtime --parallel\n"
+    "```\n\nThe package is written under "
+    "`build/steganos-package/gba-runtime/Release/`.\n").arg(request.windowTitle);
+  if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
+                 generatedGbaNativeProjectCMake(bundleName), error) ||
+      !writeText(QDir(projectDir).filePath(QStringLiteral("README.md")), readme, error) ||
+      !writeText(QDir(projectDir).filePath(QStringLiteral(".gitignore")),
+                 QStringLiteral("/build*/\n.DS_Store\n"), error) ||
+      !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
+                 manifest, error) ||
+      !writeJson(QDir(proofDir).filePath(QStringLiteral("gba_native_inputs.json")),
+                 inputProof, error) ||
+      !writeJson(QDir(proofDir).filePath(QStringLiteral("request.json")),
+                 request.toJson(false), error) ||
+      !createProofArchive(proofDir,
+                          QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
+                          error)) {
+    fail(error);
+    return;
+  }
+
+  nextStage(QStringLiteral("Commit Virtua ARM native source"));
+  QByteArray commitOutput;
+  if (!runCommand(git, { QStringLiteral("init"), QStringLiteral("--initial-branch=main") },
+                  projectDir, QStringLiteral("git init --initial-branch=main"), 60000) ||
+      !runCommand(git, { QStringLiteral("config"), QStringLiteral("user.name"),
+                         QStringLiteral("PSXRecomp Studio") }, projectDir,
+                  QStringLiteral("git config user.name <studio>"), 30000) ||
+      !runCommand(git, { QStringLiteral("config"), QStringLiteral("user.email"),
+                         QStringLiteral("studio@psxrecomp.local") }, projectDir,
+                  QStringLiteral("git config user.email <studio>"), 30000) ||
+      !runCommand(git, { QStringLiteral("add"), QStringLiteral("-A") }, projectDir,
+                  QStringLiteral("git add -A"), 10 * 60 * 1000) ||
+      !runCommand(git, { QStringLiteral("commit"), QStringLiteral("-m"),
+                         QStringLiteral("Generate %1 Virtua ARM native GBA source")
+                           .arg(request.windowTitle) }, projectDir,
+                  QStringLiteral("git commit -m <generated Virtua GBA source>"),
+                  10 * 60 * 1000) ||
+      !runCommand(git, { QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
+                  projectDir, QStringLiteral("git rev-parse HEAD"), 30000,
+                  &commitOutput)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The generated Virtua ARM native source repository could not be committed."));
+    return;
+  }
+  const QString sourceCommit = QString::fromUtf8(commitOutput).trimmed().section('\n', -1);
+  emit logLine(QStringLiteral("Generated Virtua ARM native source commit: %1").arg(sourceCommit));
+
+  auto removeEntry = [](const QString& path) {
+    const QFileInfo info(path);
+    if (!info.exists() && !info.isSymLink()) return true;
+    return info.isDir() && !info.isSymLink() ? QDir(path).removeRecursively()
+                                             : QFile::remove(path);
+  };
+  auto publishDirectory = [&](const QString& source, const QString& output) -> bool {
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
+    const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
+    removeEntry(staging); removeEntry(backup);
+    if (!copyDirectoryTree(source, staging, error)) return false;
+    const bool exists = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
+    if (exists && !request.overwriteOutput) {
+      error = QStringLiteral("The output already exists and overwrite was not approved: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (exists && !QDir().rename(output, backup)) {
+      error = QStringLiteral("Could not preserve the previous output: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (!QDir().rename(staging, output)) {
+      if (exists) QDir().rename(backup, output);
+      error = QStringLiteral("Could not publish %1.").arg(output);
+      return false;
+    }
+    if (exists) removeEntry(backup);
+    return true;
+  };
+  auto publishZip = [&](const QString& source, const QString& rootName,
+                        const QString& output) -> bool {
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
+    const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
+    removeEntry(staging); removeEntry(backup);
+    if (!createPackageArchive(source, rootName, staging, error, {},
+                              [this]() { return cancellationRequested(); })) {
+      removeEntry(staging); return false;
+    }
+    const QString stagedHash = sha256File(staging, error);
+    if (stagedHash.isEmpty()) { removeEntry(staging); return false; }
+    const bool exists = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
+    if (exists && !request.overwriteOutput) {
+      error = QStringLiteral("The output already exists and overwrite was not approved: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (exists && !QFile::rename(output, backup)) {
+      error = QStringLiteral("Could not preserve the previous output: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (!QFile::rename(staging, output)) {
+      if (exists) QFile::rename(backup, output);
+      error = QStringLiteral("Could not publish %1.").arg(output);
+      return false;
+    }
+    if (exists) removeEntry(backup);
+    return sha256File(output, error) == stagedHash;
+  };
+
+  if (sourceExport) {
+    nextStage(QStringLiteral("Deliver Virtua ARM native source repository"));
+    const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
+    const bool ok = request.exportAsZip
+      ? publishZip(projectDir, QFileInfo(output).completeBaseName(), output)
+      : publishDirectory(projectDir, output);
+    if (!ok) {
+      if (cancellationRequested()) cancelledOut(); else fail(error);
+      return;
+    }
+    QDir(workspace).removeRecursively();
+    emit completed(output);
+    return;
+  }
+
+  nextStage(QStringLiteral("Build Virtua ARM native launcher"));
+  const QString toolchain = QDir(projectDir).filePath(
+    QStringLiteral("virtua/CMake/VirtuaArmToolchain.cmake"));
+  if (!runCommand(cmake,
+                  { QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
+                    QStringLiteral("-G"), QStringLiteral("Ninja"),
+                    QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
+                    QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(toolchain) },
+                  workspace, QStringLiteral("cmake -S <source> -B <build> -G Ninja -DCMAKE_TOOLCHAIN_FILE=<VirtuaArmToolchain>"),
+                  10 * 60 * 1000) ||
+      !runCommand(cmake,
+                  { QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
+                    QStringLiteral("gba-runtime"), QStringLiteral("--parallel"),
+                    QString::number(std::max(1, QThread::idealThreadCount())) },
+                  workspace, QStringLiteral("cmake --build <build> --target gba-runtime"),
+                  20 * 60 * 1000)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The Virtua ARM native launcher could not be built."));
+    return;
+  }
+
+  nextStage(QStringLiteral("Verify Virtua ARM native package"));
+  const QString stageDir = QDir(buildDir).filePath(
+    QStringLiteral("steganos-package/gba-runtime/Release"));
+  const QString executable = QDir(stageDir).filePath(bundleName + QStringLiteral(".virtua"));
+  const QString packagedRom = QDir(stageDir).filePath(QStringLiteral("game.gba"));
+  QFile executableFile(executable);
+  if (!executableFile.open(QIODevice::ReadOnly)) {
+    fail(QStringLiteral("The Virtua ARM package did not contain its .virtua executable."));
+    return;
+  }
+  const QByteArray header = executableFile.read(56);
+  executableFile.close();
+  if (header.size() != 56 || qFromLittleEndian<quint32>(header.constData()) != 0x56495254u ||
+      qFromLittleEndian<quint32>(header.constData() + 4) != 3u) {
+    fail(QStringLiteral("The generated native launcher has an invalid Virtua v3 header."));
+    return;
+  }
+  const quint64 flags = qFromLittleEndian<quint64>(header.constData() + 48);
+  if (((flags >> 8u) & 0xffu) != 4u || (flags & (1u << 1u)) == 0u) {
+    fail(QStringLiteral("The native launcher is not tagged as cooperative ARM32 Virtua code."));
+    return;
+  }
+  if (sha256File(packagedRom, error) != romSha256) {
+    fail(error.isEmpty() ? QStringLiteral("The packaged native GBA ROM changed during the build.") : error);
+    return;
+  }
+  const QString executableHash = sha256File(executable, error);
+  if (executableHash.isEmpty()) { fail(error); return; }
+  const QJsonObject buildProof{
+    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("format"), QStringLiteral("virtua-v3") },
+    { QStringLiteral("architecture"), QStringLiteral("arm32") },
+    { QStringLiteral("cooperative"), true },
+    { QStringLiteral("executable"), QFileInfo(executable).fileName() },
+    { QStringLiteral("executable_sha256"), executableHash },
+    { QStringLiteral("rom_sha256"), romSha256 },
+    { QStringLiteral("bridge_abi"), 1 },
+    { QStringLiteral("executed_during_verification"), false },
+  };
+  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_native_build.json")),
+                 buildProof, error) ||
+      !createProofArchive(proofDir,
+                          QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
+                          error) ||
+      !copyFileReplacing(QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
+                         QDir(stageDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")), error)) {
+    fail(error);
+    return;
+  }
+
+  nextStage(QStringLiteral("Deliver Virtua ARM native package"));
+  const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
+  const bool delivered = request.exportAsZip
+    ? publishZip(stageDir, {}, output)
+    : publishDirectory(stageDir, output);
+  if (!delivered) {
+    if (cancellationRequested()) cancelledOut(); else fail(error);
+    return;
+  }
+  emit logLine(QStringLiteral("Virtua ARM native GBA package created: %1").arg(output));
+  QDir(workspace).removeRecursively();
+  emit completed(output);
 }
 
 void PipelineWorker::runGba(const PipelineRequest& request) {

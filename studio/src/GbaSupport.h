@@ -46,6 +46,7 @@ QString generatedGbaProjectCMake(const PipelineRequest& request,
                                  const GbaDescription& game,
                                  const QString& bundleName,
                                  const QString& bundleId);
+QString generatedGbaNativeProjectCMake(const QString& bundleName);
 QString generatedGbaPackToml(const PipelineRequest& request,
                              const QString& bundleName,
                              const QString& romSha256,

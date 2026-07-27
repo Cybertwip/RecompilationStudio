@@ -51,7 +51,12 @@ else()
     option(PSX_DEBUG_TOOLS "Build with TCP debug server + heartbeat + per-block recording" ON)
 endif()
 
-if(NOT SDL2_INCLUDE_DIRS OR NOT SDL2_LIBRARIES)
+option(PSX_VIRTUA "Build the runtime as an MVII Virtua application" OFF)
+
+if(PSX_VIRTUA)
+    set(SDL2_INCLUDE_DIRS "${PSXRECOMP_ROOT}/extra/virtua/sdl")
+    set(SDL2_LIBRARIES "PSXRECOMP_VIRTUA_SDL")
+elseif(NOT SDL2_INCLUDE_DIRS OR NOT SDL2_LIBRARIES)
     if(MSVC)
         file(GLOB SDL2_MSVC_DIR "${PSXRECOMP_ROOT}/../sdl2-msvc/SDL2-*")
         if(SDL2_MSVC_DIR)
@@ -248,7 +253,15 @@ set(PSXRECOMP_RUNTIME_SOURCES
     # Tier-2 in-process JIT backend (sljit, BSD-2-Clause). Single TU; sljit
     # auto-detects the host arch (SLJIT_CONFIG_AUTO). See lib/sljit/LICENSE.
     ${PSXRECOMP_ROOT}/lib/sljit/sljit_src/sljitLir.c
-)
+ )
+if(PSX_VIRTUA)
+    list(REMOVE_ITEM PSXRECOMP_RUNTIME_SOURCES
+        ${PSXRECOMP_ROOT}/runtime/src/gpu_gl_renderer.c)
+    list(APPEND PSXRECOMP_RUNTIME_SOURCES
+        ${PSXRECOMP_ROOT}/runtime/src/gpu_gl_renderer_virtua.c
+        ${PSXRECOMP_ROOT}/extra/virtua/sdl/sdl_virtua.cpp
+        ${PSXRECOMP_ROOT}/extra/virtua/Dash/llvm_libc_stubs.cpp)
+endif()
 if(PSXRECOMP_GIP_GAMEPAD_AVAILABLE)
     list(APPEND PSXRECOMP_RUNTIME_SOURCES
         ${PSXRECOMP_ROOT}/runtime/src/gip_gamepad.cpp)
@@ -492,6 +505,14 @@ function(psxrecomp_add_runtime_target target)
         ${PSXRECOMP_RUNTIME_INCLUDE_DIRS}
         ${SDL2_INCLUDE_DIRS}
     )
+    if(PSX_VIRTUA)
+        target_include_directories(${target} BEFORE PRIVATE
+            ${PSXRECOMP_ROOT}/extra/virtua/posix-shim/include
+            ${PSXRECOMP_ROOT}/extra/virtua/include
+            ${PSXRECOMP_ROOT}/extra/virtua/Dash
+            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include
+            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include/c++/v1)
+    endif()
     # pkg-config reports SDL2_LIBRARIES as a bare name (e.g. "SDL2" -> -lSDL2);
     # add its library dirs so the linker finds it outside default paths
     # (e.g. Homebrew's /opt/homebrew/lib on macOS). Empty/harmless on MSVC.
@@ -502,7 +523,9 @@ function(psxrecomp_add_runtime_target target)
     # --static link line (libSDL2.a + the full Windows system-lib chain SDL2
     # needs: winmm, imm32, ole32, oleaut32, version, setupapi, dinput8, ...).
     # Otherwise link the SDL2 import lib (needs SDL2.dll at runtime).
-    if(PSX_STATIC_RUNTIME AND SDL2_STATIC_LDFLAGS)
+    if(PSX_VIRTUA)
+        # The SDL surface is compiled directly into PSXRECOMP_RUNTIME_SOURCES.
+    elseif(PSX_STATIC_RUNTIME AND SDL2_STATIC_LDFLAGS)
         target_link_libraries(${target} PRIVATE ${SDL2_STATIC_LDFLAGS})
     else()
         target_link_libraries(${target} PRIVATE ${SDL2_LIBRARIES})
@@ -529,6 +552,72 @@ function(psxrecomp_add_runtime_target target)
         FMT_HEADER_ONLY=1
         $<$<CXX_COMPILER_ID:MSVC>:SDL_MAIN_HANDLED>
     )
+    if(PSX_VIRTUA)
+        target_compile_definitions(${target} PRIVATE
+            PSX_VIRTUA=1
+            MINOS_PLATFORM_MACHINE64=1
+            MINOS_PLATFORM_ARMV7=1
+            MINOS_VIRTUA_USERLAND=1
+            _LIBCPP_HAS_NO_THREADS
+            _LIBCPP_DISABLE_AVAILABILITY
+            _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE)
+        target_compile_options(${target} PRIVATE
+            "--target=armv7a-none-eabi"
+            --sysroot=${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi
+            -mcpu=cortex-a7
+            -marm
+            -mfloat-abi=soft
+            -mno-unaligned-access
+            -femulated-tls
+            -ffreestanding
+            -fpie
+            -fno-stack-protector
+            -fno-common
+            -fno-vectorize
+            -fno-slp-vectorize
+            -ffunction-sections
+            -fdata-sections
+            $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
+            $<$<COMPILE_LANGUAGE:CXX>:-fno-threadsafe-statics>
+            $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
+            $<$<COMPILE_LANGUAGE:CXX>:-isystem${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include/c++/v1>)
+
+        if(NOT TARGET R-Dash)
+            set(VIRTUA_ROOT "${PSXRECOMP_ROOT}/extra/virtua")
+            set(DASH_FIXED_HEAP_BYTES 0)
+            add_subdirectory(${PSXRECOMP_ROOT}/extra/virtua/Dash
+                             ${CMAKE_BINARY_DIR}/virtua-dash EXCLUDE_FROM_ALL)
+        endif()
+        add_dependencies(${target} R-Dash)
+        target_link_directories(${target} PRIVATE
+            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/lib
+            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/lib/armv7a-none-eabi)
+        target_link_options(${target} PRIVATE
+            "--target=armv7a-none-eabi"
+            --sysroot=${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi
+            -mcpu=cortex-a7
+            -marm
+            -mfloat-abi=soft
+            -femulated-tls
+            -fuse-ld=lld
+            -nostdlib
+            -nostartfiles
+            -static
+            -Wl,--emit-relocs
+            -Wl,--gc-sections
+            -Wl,--build-id=none
+            "-Wl,-T,${PSXRECOMP_ROOT}/extra/virtua/CMake/armv7_linker.ld"
+            -Wl,--whole-archive
+            $<TARGET_FILE:R-Dash>
+            -Wl,--no-whole-archive)
+        target_link_libraries(${target} PRIVATE
+            c++ c++abi unwind c m
+            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/lib/clang-runtime/libclang_rt.builtins-armv7.a)
+        set_target_properties(${target} PROPERTIES
+            SUFFIX ".elf"
+            LINK_DEPENDS "${PSXRECOMP_ROOT}/extra/virtua/CMake/armv7_linker.ld")
+    endif()
+
     if(MSVC)
         # windows.h defines function-like min/max macros unless NOMINMAX is set;
         # those macros corrupt qualified calls such as std::max(...).
@@ -627,7 +716,9 @@ function(psxrecomp_add_runtime_target target)
         endif()
     endif()
 
-    if(WIN32 OR MINGW)
+    if(PSX_VIRTUA)
+        # Video and audio are provided by the Virtua device ABI.
+    elseif(WIN32 OR MINGW)
         # opengl32: GL backend (gpu_gl_renderer.c). GL 1.x is exported directly
         # by opengl32; Phase 2b will load modern GL via SDL_GL_GetProcAddress.
         target_link_libraries(${target} PRIVATE ws2_32 dbghelp comdlg32 opengl32)

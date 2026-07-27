@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "source_root": "/Users/cybertwip/Projects/PowerEngineV3/PowerEngine",
+  "source_commit": "1e04e46a69",
+  "copied_on": "2026-07-26",
+  "components": [
+    "External/Virtua/CMake/GoTooling.cmake",
+    "External/Virtua/binary",
+    "External/Virtua/Dash",
+    "External/Virtua/fcntl.h",
+    "External/Virtua/ioctl.h",
+    "External/Virtua/media.h",
+    "OS/MVII/Kernel/Shared/posix-shim/include",
+    "MVII arm-eabi llvm runtime sysroot",
+    "MVII ARMv7 compiler-rt builtins"
+  ]
+}

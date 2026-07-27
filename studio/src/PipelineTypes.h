@@ -34,6 +34,7 @@ enum class TargetPlatform {
   MacOS,
   Windows,
   Linux,
+  VirtuaArm,
 };
 
 enum class ExportMode {
@@ -109,6 +110,8 @@ inline QString targetPlatformKey(TargetPlatform platform) {
       return QStringLiteral("linux");
     case TargetPlatform::MacOS:
       return QStringLiteral("macos");
+    case TargetPlatform::VirtuaArm:
+      return QStringLiteral("virtua-arm");
   }
   return QStringLiteral("macos");
 }
@@ -123,6 +126,8 @@ inline QString targetPlatformDisplayName(TargetPlatform platform) {
       return QStringLiteral("Linux");
     case TargetPlatform::MacOS:
       return QStringLiteral("macOS");
+    case TargetPlatform::VirtuaArm:
+      return QStringLiteral("Virtua ARM");
   }
   return QStringLiteral("macOS");
 }
@@ -136,6 +141,10 @@ inline TargetPlatform targetPlatformFromKey(const QString& key) {
   }
   if (key.compare(QStringLiteral("linux"), Qt::CaseInsensitive) == 0) {
     return TargetPlatform::Linux;
+  }
+  if (key.compare(QStringLiteral("virtua-arm"), Qt::CaseInsensitive) == 0 ||
+      key.compare(QStringLiteral("virtua"), Qt::CaseInsensitive) == 0) {
+    return TargetPlatform::VirtuaArm;
   }
   return TargetPlatform::MacOS;
 }
@@ -163,6 +172,7 @@ struct PipelineRequest {
   bool biosRemoveStockPsGlyph{ true };
   bool skipBiosBoot{ false };
   bool macosGipGamepad{ true };
+  bool nativeExecution{ false };
   bool exportAsZip{ true };
   bool useCi{ false };
   QString ciBuilderId;
@@ -198,6 +208,7 @@ struct PipelineRequest {
       { QStringLiteral("bios_remove_stock_ps_glyph"), biosRemoveStockPsGlyph },
       { QStringLiteral("skip_bios_boot"), skipBiosBoot },
       { QStringLiteral("macos_gip_gamepad"), macosGipGamepad },
+      { QStringLiteral("native"), nativeExecution },
       { QStringLiteral("export_as_zip"), exportAsZip },
       { QStringLiteral("use_ci"), useCi },
       { QStringLiteral("ci_builder_id"), ciBuilderId },

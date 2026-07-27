@@ -401,6 +401,34 @@ QString generatedGbaPackToml(const PipelineRequest& request,
   return text;
 }
 
+
+QString generatedGbaNativeProjectCMake(const QString& bundleName) {
+  return QStringLiteral(R"CMAKE(cmake_minimum_required(VERSION 3.20)
+project(GeneratedGbaVirtuaNative C ASM)
+include("${CMAKE_CURRENT_SOURCE_DIR}/virtua/CMake/VirtuaArmApp.cmake")
+virtua_add_armv7_app(gba_native_app GUI COOPERATIVE
+  OUTPUT_NAME %1
+  SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/virtua/native/gba_native_main.c")
+set(_GBA_STAGE "${CMAKE_BINARY_DIR}/steganos-package/gba-runtime/$<CONFIG>")
+set(_GBA_STAMP "${CMAKE_BINARY_DIR}/gba-virtua-package.stamp")
+add_custom_command(OUTPUT "${_GBA_STAMP}"
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "${_GBA_STAGE}"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${_GBA_STAGE}"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${gba_native_app_VIRTUA_FILE}" "${_GBA_STAGE}/%2.virtua"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba" "${_GBA_STAGE}/game.gba"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json" "${_GBA_STAGE}/game.manifest.json"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip" "${_GBA_STAGE}/PSXRecomp-Proof.zip"
+  COMMAND ${CMAKE_COMMAND} -E touch "${_GBA_STAMP}"
+  DEPENDS gba_native_app
+          "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba"
+          "${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json"
+          "${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip"
+  VERBATIM)
+add_custom_target(gba-runtime ALL DEPENDS "${_GBA_STAMP}")
+)CMAKE")
+    .arg(cmakeQuoted(bundleName), bundleName);
+}
+
 QString generatedGbaInfoPlist(const QString& bundleName, const QString& bundleId) {
   return QStringLiteral(R"PLIST(<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

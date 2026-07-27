@@ -141,6 +141,7 @@ private:
   QCheckBox* biosRemovePsGlyph_{ nullptr };
   QCheckBox* skipBiosBoot_{ nullptr };
   QCheckBox* macosGipGamepad_{ nullptr };
+  QCheckBox* nativeExecution_{ nullptr };
   QLabel* stageLabel_{ nullptr };
   QProgressBar* progressBar_{ nullptr };
   QPlainTextEdit* logView_{ nullptr };

@@ -1,7 +1,16 @@
 # gba-to-mvii — a real GBA runtime for MVII, not a wrapper.
 #
-# This builds the extracted ARM7TDMI interpreter and GBA hardware model against
-# MVII's Virtua userland and emits a packaged `.virtua` executable.
+# Two halves, and the split is the whole design:
+#
+#   rust/   the emulation core, vendored from extra/gba-rust (gba-core +
+#           armv4t) and ported to no_std. cargo builds it into a staticlib.
+#   src/    MVII, and nothing else: /dev/fb0, /dev/input0, /dev/dac0, the
+#           cooperative yield, the ROM and save files.
+#
+# They meet at include/gba_mvii.h, a C ABI narrow enough that the C++ side never
+# names a Rust type and the Rust side never makes a syscall. That keeps the
+# emulation identical to the reference implementation, which is the only way to
+# tell an emulator bug from a port bug.
 #
 # Configure it with the Virtua ARM toolchain — there is no host build, because
 # there is no host target here:
@@ -10,6 +19,11 @@
 #         -DCMAKE_TOOLCHAIN_FILE=extra/virtua/CMake/VirtuaArmToolchain.cmake \
 #         -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build/gba-to-mvii --target gba-to-mvii
+#
+# Prerequisites beyond the Virtua SDK: a Rust toolchain with the bare-metal ARM
+# standard library, which is one command —
+#
+#   rustup target add armv7a-none-eabi
 #
 # Or pull it into a generated package project with add_subdirectory(), in which
 # case GBA_TO_MVII_VIRTUA_FILE and GBA_TO_MVII_ELF_FILE come back in the parent
@@ -41,6 +55,8 @@ endif()
 
 set(GBA_MVII_SDK "${VIRTUA_ROOT}/sdk/arm-eabi")
 set(GBA_MVII_SRC "${CMAKE_CURRENT_LIST_DIR}/src")
+set(GBA_MVII_INC "${CMAKE_CURRENT_LIST_DIR}/include")
+set(GBA_MVII_RUST "${CMAKE_CURRENT_LIST_DIR}/rust")
 
 # Plain variables, not cache entries: -D on the command line still defines them,
 # and an enclosing project can set() them before add_subdirectory() without
@@ -61,41 +77,65 @@ endif()
 
 include("${VIRTUA_ROOT}/CMake/GoTooling.cmake")
 
+# ── the emulation core (Rust) ──────────────────────────────────────────────
+#
+# cargo is a second build system, so the contract with it is deliberately thin:
+# CMake decides *when* to run it and where the archive lands, cargo decides
+# everything else. The crate manifests under rust/ are the source list — that is
+# what a Cargo.toml is for — so unlike the C++ half this really is a glob, and
+# CONFIGURE_DEPENDS keeps it honest when a file appears.
+
+find_program(GBA_MVII_CARGO NAMES cargo
+    HINTS "$ENV{CARGO_HOME}/bin" "$ENV{HOME}/.cargo/bin"
+    DOC "cargo, for the Rust emulation core under rust/")
+if(NOT GBA_MVII_CARGO)
+    message(FATAL_ERROR
+        "cargo not found. The GBA emulation core is the Rust port under "
+        "${GBA_MVII_RUST}; install a Rust toolchain and run "
+        "'rustup target add ${VIRTUA_ARM_TARGET_TRIPLE}', or point "
+        "-DGBA_MVII_CARGO=<path> at it.")
+endif()
+
+# Out of the source tree, so cleaning the build directory really cleans and two
+# configurations do not fight over one target/ directory.
+set(_gba_cargo_dir "${CMAKE_CURRENT_BINARY_DIR}/rust")
+set(GBA_MVII_RUST_LIB
+    "${_gba_cargo_dir}/${VIRTUA_ARM_TARGET_TRIPLE}/release/libgba_mvii.a")
+
+file(GLOB_RECURSE _gba_rust_sources CONFIGURE_DEPENDS
+    "${GBA_MVII_RUST}/*.rs"
+    "${GBA_MVII_RUST}/*.toml")
+
+add_custom_command(
+    OUTPUT "${GBA_MVII_RUST_LIB}"
+    # --locked and --offline together: the workspace has no external
+    # dependencies at all, and a build that can reach the network is a build
+    # that can change underneath you.
+    COMMAND "${GBA_MVII_CARGO}" build
+        --release
+        --locked
+        --offline
+        --package gba-mvii
+        --target "${VIRTUA_ARM_TARGET_TRIPLE}"
+        --target-dir "${_gba_cargo_dir}"
+    # From rust/, so cargo picks up rust/.cargo/config.toml — which carries the
+    # ABI flags that have to match the C++ half: static relocations (all the
+    # virtua packager's relocation handler knows) and strict alignment (this
+    # side is -mno-unaligned-access).
+    WORKING_DIRECTORY "${GBA_MVII_RUST}"
+    DEPENDS ${_gba_rust_sources}
+    COMMENT "Building the GBA emulation core (cargo, ${VIRTUA_ARM_TARGET_TRIPLE})"
+    VERBATIM)
+
+add_custom_target(gba-to-mvii-core DEPENDS "${GBA_MVII_RUST_LIB}")
+
 # ── sources ────────────────────────────────────────────────────────────────
 #
 # Listed one by one rather than globbed. This tree exists precisely to answer
 # "what does a GBA runtime actually need", and a glob would stop answering it
 # the moment someone drops a file in.
 
-set(_armv4t_sources
-    "${GBA_MVII_SRC}/armv4t/arm_decode.cpp"
-    "${GBA_MVII_SRC}/armv4t/arm_ir.cpp"
-    "${GBA_MVII_SRC}/armv4t/interpreter.cpp"
-    "${GBA_MVII_SRC}/armv4t/thumb_decode.cpp")
-
-set(_gba_sources
-    "${GBA_MVII_SRC}/gba/audio_shadow.cpp"
-    "${GBA_MVII_SRC}/gba/crc32.cpp"
-    "${GBA_MVII_SRC}/gba/gba_audio.cpp"
-    "${GBA_MVII_SRC}/gba/gba_bios.cpp"
-    "${GBA_MVII_SRC}/gba/gba_bus.cpp"
-    "${GBA_MVII_SRC}/gba/gba_dma.cpp"
-    "${GBA_MVII_SRC}/gba/gba_input.cpp"
-    "${GBA_MVII_SRC}/gba/gba_io.cpp"
-    "${GBA_MVII_SRC}/gba/gba_irq.cpp"
-    "${GBA_MVII_SRC}/gba/gba_m4a.cpp"
-    "${GBA_MVII_SRC}/gba/gba_memory.cpp"
-    "${GBA_MVII_SRC}/gba/gba_ppu.cpp"
-    "${GBA_MVII_SRC}/gba/gba_rom_header.cpp"
-    "${GBA_MVII_SRC}/gba/gba_rtc.cpp"
-    "${GBA_MVII_SRC}/gba/gba_save.cpp"
-    "${GBA_MVII_SRC}/gba/gba_scheduler.cpp"
-    "${GBA_MVII_SRC}/gba/gba_timers.cpp"
-    "${GBA_MVII_SRC}/gba/mp2k_shadow.cpp"
-    "${GBA_MVII_SRC}/gba/sha1.cpp")
-
 set(_mvii_sources
-    "${GBA_MVII_SRC}/mvii/bios_hle.cpp"
     "${GBA_MVII_SRC}/mvii/main.cpp"
     "${GBA_MVII_SRC}/mvii/mvii_platform.cpp"
     # Not part of R-Dash's own source list, but libc++/llvm-libc in the sysroot
@@ -146,12 +186,9 @@ target_compile_options(R-Dash PRIVATE
 
 # ── the runtime ELF ────────────────────────────────────────────────────────
 
-add_executable(gba-to-mvii-elf
-    ${_armv4t_sources}
-    ${_gba_sources}
-    ${_mvii_sources})
+add_executable(gba-to-mvii-elf ${_mvii_sources})
 
-# BEFORE, so Virtua's shims win over anything the extracted sources may find.
+# BEFORE, so Virtua's shims win over anything the sources may otherwise find.
 target_include_directories(gba-to-mvii-elf BEFORE PRIVATE
     "${VIRTUA_ROOT}/posix-shim/include"
     "${VIRTUA_ROOT}/include"
@@ -159,10 +196,7 @@ target_include_directories(gba-to-mvii-elf BEFORE PRIVATE
     "${GBA_MVII_SDK}/include"
     "${GBA_MVII_SDK}/include/c++/v1")
 target_include_directories(gba-to-mvii-elf PRIVATE
-    "${GBA_MVII_SRC}"
-    "${GBA_MVII_SRC}/armv4t"
-    "${GBA_MVII_SRC}/gba"
-    "${GBA_MVII_SRC}/debug"
+    "${GBA_MVII_INC}"
     "${GBA_MVII_SRC}/mvii")
 
 target_compile_features(gba-to-mvii-elf PRIVATE cxx_std_20)
@@ -171,7 +205,6 @@ target_compile_definitions(gba-to-mvii-elf PRIVATE
     MINOS_PLATFORM_MACHINE64=1
     MINOS_PLATFORM_ARMV7=1
     MINOS_VIRTUA_USERLAND=1
-    GBA_MVII_RUNTIME=1
     _LIBCPP_HAS_NO_THREADS
     _LIBCPP_DISABLE_AVAILABILITY
     _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE)
@@ -189,7 +222,7 @@ target_compile_options(gba-to-mvii-elf PRIVATE
     -fno-stack-protector
     -fno-common
     # No NEON reaches a Virtua guest, and the auto-vectorizer will happily emit
-    # it for the PPU's per-pixel loops if allowed to.
+    # it for the per-pixel present loop if allowed to.
     -fno-vectorize
     -fno-slp-vectorize
     -ffunction-sections
@@ -200,7 +233,7 @@ target_compile_options(gba-to-mvii-elf PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-isystem${GBA_MVII_SDK}/include/c++/v1>
     $<$<COMPILE_LANGUAGE:CXX>:SHELL:-include virtua_cpp_thread_shim.h>)
 
-add_dependencies(gba-to-mvii-elf R-Dash)
+add_dependencies(gba-to-mvii-elf R-Dash gba-to-mvii-core)
 
 target_link_directories(gba-to-mvii-elf PRIVATE
     "${GBA_MVII_SDK}/lib"
@@ -229,7 +262,12 @@ target_link_options(gba-to-mvii-elf PRIVATE
     $<TARGET_FILE:R-Dash>
     -Wl,--no-whole-archive)
 
+# Order is the contract with a static link: the emulation core comes first
+# because it is what needs malloc, free, abort and libm out of the libraries
+# after it. Naming it by full path also gives the ELF a file-level dependency on
+# the archive, so a cargo rebuild relinks without anything else being told.
 target_link_libraries(gba-to-mvii-elf PRIVATE
+    "${GBA_MVII_RUST_LIB}"
     c++ c++abi unwind c m
     "${GBA_MVII_SDK}/lib/clang-runtime/libclang_rt.builtins-armv7.a")
 
@@ -261,7 +299,7 @@ add_custom_command(
     VERBATIM)
 
 add_custom_target(gba-to-mvii ALL DEPENDS "${_gba_virtua}")
-add_dependencies(gba-to-mvii gba-to-mvii-elf gba-to-mvii-tool)
+add_dependencies(gba-to-mvii gba-to-mvii-core gba-to-mvii-elf gba-to-mvii-tool)
 
 # ── optional staging ───────────────────────────────────────────────────────
 #

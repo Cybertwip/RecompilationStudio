@@ -20,8 +20,9 @@
 //
 // There is deliberately no file I/O in here: MVII's eMMC writes are expensive
 // enough to stall the whole OS, so nothing on the frame path may touch
-// storage. main.cpp reads the ROM once at startup and writes the save file
-// only on exit.
+// storage. main.cpp reads the ROM once at startup and writes the save file only
+// when the cartridge's save chip has stopped changing — see the note over
+// flush_save_if_settled(), which is the one deliberate exception.
 
 #pragma once
 
@@ -42,8 +43,15 @@ public:
     // compositor is busy is worse than one that shows nothing for a frame.
     bool open(int width, int height);
 
-    // Blit one RGB24 frame of exactly width() x height() pixels and present it.
-    void present(const uint8_t* rgb24);
+    // Blit one frame of exactly width() x height() pixels and present it.
+    //
+    // The source is the GBA's own format — BGR555, red in the low five bits —
+    // because that is what the PPU writes and converting on the way out is one
+    // pass instead of two. The expansion runs through a 32768-entry lookup
+    // table built on the heap at open(): 128 KB that costs nothing in the
+    // packaged image (unlike a file-scope array, which the .virtua packager
+    // materializes) and turns per-pixel channel arithmetic into one load.
+    void present(const uint16_t* bgr555);
 
     // Present a flat colour. Writes straight into the surface, so it costs no
     // source buffer — worth having, because a 240x160 RGB24 scratch frame is
@@ -61,12 +69,13 @@ private:
     // image currently on screen and must be re-mapped rather than reused.
     bool remap();
 
-    int      fd_      = -1;
-    int      width_   = 0;
-    int      height_  = 0;
-    uint8_t* mapped_  = nullptr;  // kernel back buffer, when MAP_RGBA8 works
-    int      pitch_   = 0;        // mapped_ stride, in pixels
-    uint8_t* staging_ = nullptr;  // owned fallback buffer for SWAP_RGBA8
+    int       fd_      = -1;
+    int       width_   = 0;
+    int       height_  = 0;
+    uint8_t*  mapped_  = nullptr;  // kernel back buffer, when MAP_RGBA8 works
+    int       pitch_   = 0;        // mapped_ stride, in pixels
+    uint8_t*  staging_ = nullptr;  // owned fallback buffer for SWAP_RGBA8
+    uint32_t* lut_     = nullptr;  // BGR555 -> RGBA8, 1 << 15 entries
 };
 
 // ── input ──────────────────────────────────────────────────────────────────
@@ -92,10 +101,10 @@ private:
 
 // ── audio ──────────────────────────────────────────────────────────────────
 
-// The GBA mixer produces interleaved stereo signed-16 at 32768 Hz (16777216 /
-// 512). We hand the DAC that rate and let the kernel resample; if the device
-// rejects it, audio is simply disabled — a silent game is far better than a
-// dead one.
+// The core mixes interleaved stereo signed-16 at 65536 Hz — 16777216 / 256,
+// AUDIO_SAMPLE_CYCLES in gba-core's mem.rs. We hand the DAC that rate and let
+// the kernel resample; if the device rejects it, audio is simply disabled — a
+// silent game is far better than a dead one.
 class Audio {
 public:
     ~Audio();

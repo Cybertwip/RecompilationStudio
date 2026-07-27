@@ -8,16 +8,19 @@
 // open failed, the stub returned 122, and the window opened and closed. There
 // was never a GBA runtime on the device; there was a request for one.
 //
-// So this is the runtime. It is the gba++ interpreter core (armv4t decode/IR/
-// interpreter plus the whole gba/ device model) driven by a run loop written
-// against MVII's three device nodes, with the BIOS entry points synthesized in
-// src/mvii/bios_hle.cpp because MVII packages ship no BIOS.
+// So this is the runtime, and the emulator inside it is the Rust port: the
+// gba-core and armv4t crates from extra/gba-rust, vendored under rust/ and
+// ported to no_std so they link into a Virtua executable (see rust/Cargo.toml).
+// The C++ here is only MVII — devices, scheduling, files — and it reaches the
+// core through the dozen calls in include/gba_mvii.h. Keeping the boundary that
+// narrow is the point: the emulation stays the reference implementation, byte
+// for byte, and every syscall this program makes is in this directory.
 //
-// Interpreted, not recompiled, and that is a deliberate trade. gba++'s
-// recompiler is much faster but needs an offline per-game C-emission pass; the
-// interpreter runs whatever ROM is staged, which is what "drop a package in
-// System/Applications and it plays" requires. Speed on a Cortex-A7 at 845 MHz
-// is the open question and the reason the loop reports its frame rate.
+// Interpreted, not recompiled, and that is a deliberate trade. The recompiler
+// needs an offline per-game C-emission pass; the interpreter runs whatever ROM
+// is staged, which is what "drop a package in System/Applications and it plays"
+// requires. Speed on a Cortex-A7 at 845 MHz is the open question, and the
+// reason the loop reports its frame rate.
 
 #include <cstddef>
 #include <cstdint>
@@ -31,20 +34,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include "arm_decode.h"
-#include "cpu_state.h"
-#include "interpreter.h"
-#include "thumb_decode.h"
-
-#include "gba_audio.h"
-#include "gba_bus.h"
-#include "gba_io.h"
-#include "gba_irq.h"
-#include "gba_ppu.h"
-#include "gba_rom_header.h"
-#include "gba_save.h"
-
-#include "bios_hle.h"
+#include "gba_mvii.h"
 #include "mvii_platform.h"
 
 namespace {
@@ -63,60 +53,44 @@ constexpr uint32_t kStepsPerYield = 256;
 // The GBA's real refresh: 16777216 / (308 * 228 * 4) = 59.727 Hz.
 constexpr uint64_t kFrameUs = 16743;
 
-// The word a real GBA leaves latched in the BIOS open-bus register once the
-// BIOS hands control to the cartridge (mem[0x190], the SWI-return path).
-constexpr uint32_t kPostBootBiosOpenBus = 0xE3A02004u;
-
 // Save-flush policy. See flush_save_if_settled() for why this exists at all.
-constexpr uint64_t kSaveSettleUs   = 1000000ull;   // quiet before we write
-constexpr uint64_t kSaveMinGapUs   = 5000000ull;   // never more often than this
+constexpr uint64_t kSaveProbeUs  = 1000000ull;   // how often we look
+constexpr uint64_t kSaveSettleUs = 1000000ull;   // quiet before we write
+constexpr uint64_t kSaveMinGapUs = 5000000ull;   // never more often than this
+
+// 65536 Hz stereo is ~2200 interleaved values a frame; this holds one frame
+// with room to spare, and lives inside the heap-allocated Runtime.
+constexpr std::size_t kAudioBufferSamples = 4096;
 
 // ── small file helpers ─────────────────────────────────────────────────────
 
-bool read_whole_file(const char* path, std::vector<uint8_t>& out) {
-    const int fd = ::open(path, O_RDONLY);
-    if (fd < 0) return false;
-
-    // Size it first and allocate once. A grow-as-you-go vector would realloc its
-    // way up and, at the last doubling, hold the old and new buffers at the same
-    // time: 24 MB peak for Final Fantasy VI's 16 MB cartridge. MVII hands a guest
-    // 32 MB when the kernel heap is healthy and degrades toward 4 MB when it is
-    // not (allocate_user_heap in mvii_arm_process_manager.cpp), so the transient
-    // is the difference between loading and failing to.
-    const off_t end = ::lseek(fd, 0, SEEK_END);
-    if (end < 0 || ::lseek(fd, 0, SEEK_SET) != 0) { ::close(fd); return false; }
-    const std::size_t size = static_cast<std::size_t>(end);
-
-    out.clear();
-    out.resize(size);
-    if (size == 0) { ::close(fd); return true; }
-
-    std::size_t done = 0;
-    while (done < size) {
-        // A 16 MB ROM is ~256 reads off eMMC. Offer a turn between them so the
-        // shell keeps compositing while the cartridge loads.
-        const std::size_t want = size - done < 64u * 1024u ? size - done : 64u * 1024u;
-        const ssize_t got = ::read(fd, out.data() + done, want);
-        if (got < 0) { ::close(fd); return false; }
-        if (got == 0) break;  // short file; trimmed below
-        done += static_cast<std::size_t>(got);
-        gbamvii::yield_now();
-    }
-    ::close(fd);
-    out.resize(done);
-    return done > 0;
-}
-
-bool write_whole_file(const std::string& path, const std::vector<uint8_t>& data) {
+bool write_whole_file(const std::string& path, const uint8_t* data, std::size_t len) {
     const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return false;
     std::size_t done = 0;
-    while (done < data.size()) {
-        const ssize_t wrote = ::write(fd, data.data() + done, data.size() - done);
+    while (done < len) {
+        const ssize_t wrote = ::write(fd, data + done, len - done);
         if (wrote <= 0) { ::close(fd); return false; }
         done += static_cast<std::size_t>(wrote);
     }
     ::close(fd);
+    return true;
+}
+
+bool read_whole_file(const char* path, std::vector<uint8_t>& out) {
+    const int fd = ::open(path, O_RDONLY);
+    if (fd < 0) return false;
+    const off_t end = ::lseek(fd, 0, SEEK_END);
+    if (end < 0 || ::lseek(fd, 0, SEEK_SET) != 0) { ::close(fd); return false; }
+    out.assign(static_cast<std::size_t>(end), 0);
+    std::size_t done = 0;
+    while (done < out.size()) {
+        const ssize_t got = ::read(fd, out.data() + done, out.size() - done);
+        if (got <= 0) break;
+        done += static_cast<std::size_t>(got);
+    }
+    ::close(fd);
+    out.resize(done);
     return true;
 }
 
@@ -132,6 +106,8 @@ std::string directory_of(const char* path) {
 
 class Runtime {
 public:
+    ~Runtime();
+
     // Devices first, ROM second. A Virtua guest is invisible to the shell until
     // it has a surface, so opening /dev/fb0 before the 16 MB cartridge read is
     // the difference between "a window that says it failed" and "a process that
@@ -145,41 +121,111 @@ public:
     void hold_failure();
 
 private:
-    void pump(uint32_t cycles);       // advance every non-CPU device
-    bool step();                      // one CPU instruction; false = give up
+    bool load_rom(const std::string& path);
     void present_frame();
     void pump_audio();
     void flush_save_if_settled(uint64_t now);
     void write_save();
-    std::vector<uint8_t> current_save_bytes() const;
 
-    gba::GbaBus  bus_;
-    gba::GbaPpu  ppu_;
-    armv4t::CPUState cpu_{};
+    GbaMvii* machine_ = nullptr;
 
-    std::vector<uint8_t> rom_;
     std::string save_path_;
-    bool        save_supported_ = false;
-    bool        save_writable_  = true;
-    uint64_t    save_dirty_since_us_ = 0;
-    uint64_t    save_last_write_us_  = 0;
+    bool     save_supported_     = false;
+    bool     save_writable_      = true;
+    uint64_t save_hash_          = 0;   // last hash we observed
+    uint64_t save_written_hash_  = 0;   // last hash we actually wrote
+    uint64_t save_dirty_since_us_ = 0;
+    uint64_t save_last_write_us_  = 0;
+    uint64_t save_next_probe_us_  = 0;
 
     gbamvii::Video video_;
     gbamvii::Input input_;
     gbamvii::Audio audio_;
 
-    uint64_t cycles_    = 0;
-    uint64_t frames_    = 0;
-    uint32_t steps_     = 0;
-    bool     running_   = true;
-    bool     frame_ready_ = false;
+    uint64_t frames_  = 0;
+    bool     running_ = true;
 
-    // Drained from the core in whatever size the ring happens to hold; 2048
-    // samples at 32768 Hz is 62 ms, comfortably more than one frame's worth.
-    int16_t audio_buffer_[2048];
+    int16_t audio_buffer_[kAudioBufferSamples];
 };
 
+Runtime::~Runtime() {
+    if (machine_) {
+        gba_mvii_destroy(machine_);
+        machine_ = nullptr;
+    }
+}
+
+// Read the cartridge straight into storage the core owns.
+//
+// The alternative — read into a vector of ours, then hand the bytes over —
+// holds the ROM twice at the moment of the copy. Final Fantasy VI is a 16 MB
+// cartridge and MVII gives a guest 32 MB when the kernel heap is healthy,
+// degrading toward 4 MB when it is not (allocate_user_heap in
+// mvii_arm_process_manager.cpp). One buffer is the difference between loading
+// and failing to.
+bool Runtime::load_rom(const std::string& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+
+    const off_t end = ::lseek(fd, 0, SEEK_END);
+    if (end <= 0 || ::lseek(fd, 0, SEEK_SET) != 0) { ::close(fd); return false; }
+    const std::size_t size = static_cast<std::size_t>(end);
+    if (size < 0xC0) {
+        logf("gba: '%s' is %u bytes — too small to be a cartridge\n",
+             path.c_str(), static_cast<unsigned>(size));
+        ::close(fd);
+        return false;
+    }
+
+    uint8_t* rom = gba_mvii_rom_alloc(size);
+    if (!rom) {
+        logf("gba: cannot allocate %u bytes for the cartridge\n",
+             static_cast<unsigned>(size));
+        ::close(fd);
+        return false;
+    }
+
+    std::size_t done = 0;
+    while (done < size) {
+        // A 16 MB ROM is ~256 reads off eMMC. Offer a turn between them so the
+        // shell keeps compositing while the cartridge loads.
+        const std::size_t want = size - done < 64u * 1024u ? size - done : 64u * 1024u;
+        const ssize_t got = ::read(fd, rom + done, want);
+        if (got < 0) {
+            logf("gba: read error on '%s' (errno %d)\n", path.c_str(), errno);
+            ::close(fd);
+            gba_mvii_rom_free(rom, size);
+            return false;
+        }
+        if (got == 0) break;  // short file; the tail stays zero, as open bus
+        done += static_cast<std::size_t>(got);
+        gbamvii::yield_now();
+    }
+    ::close(fd);
+    if (done < size) {
+        logf("gba: '%s' ended at %u of %u bytes\n", path.c_str(),
+             static_cast<unsigned>(done), static_cast<unsigned>(size));
+    }
+
+    // Ownership of `rom` transfers here whether or not the machine is built.
+    machine_ = gba_mvii_create(rom, size);
+    if (!machine_) {
+        logf("gba: the core refused the cartridge\n");
+        return false;
+    }
+    return true;
+}
+
 bool Runtime::load(int argc, char** argv) {
+    if (gba_mvii_abi_version() != GBA_MVII_ABI_VERSION) {
+        // A stale object file that links but disagrees about a signature fails
+        // far more quietly than one that refuses to start.
+        logf("gba: core ABI %u, runtime expects %u — refusing to run\n",
+             static_cast<unsigned>(gba_mvii_abi_version()),
+             static_cast<unsigned>(GBA_MVII_ABI_VERSION));
+        return false;
+    }
+
     // The shell launches a package with argv[0] = the full path of the .virtua
     // file, so the ROM staged beside it is the package directory + "game.gba".
     // An explicit argv[1] overrides that, which is what the desktop tools pass.
@@ -190,227 +236,82 @@ bool Runtime::load(int argc, char** argv) {
         rom_path = directory_of(argc > 0 ? argv[0] : nullptr) + "game.gba";
     }
 
-    if (!read_whole_file(rom_path.c_str(), rom_)) {
+    if (!load_rom(rom_path)) {
         // Fall back to the working directory, which is what the old stub
         // assumed and what a hand-run package may still rely on.
-        if (!read_whole_file("game.gba", rom_)) {
+        if (!load_rom("game.gba")) {
             logf("gba: cannot open ROM '%s' (errno %d)\n", rom_path.c_str(), errno);
             return false;
         }
         rom_path = "game.gba";
     }
-    if (rom_.size() < 0xC0) {
-        logf("gba: '%s' is %u bytes — too small to be a cartridge\n",
-             rom_path.c_str(), static_cast<unsigned>(rom_.size()));
-        return false;
-    }
 
-    const gba::RomHeader header = gba::parse_rom(rom_.data(), rom_.size());
-    logf("gba: %s [%s] %u MB, save=%s\n",
-         header.game_title.c_str(), header.game_code.c_str(),
-         static_cast<unsigned>(rom_.size() / (1024 * 1024)),
-         gba::save_type_name(header.save_type));
+    uint8_t title[16] = {};
+    gba_mvii_rom_title(machine_, title, sizeof(title));
 
-    bus_.set_rom(rom_.data(), rom_.size());
-    bus_.set_bios(nullptr);           // standalone HLE: the region is never executed
-    bus_.set_bios_open_bus(kPostBootBiosOpenBus);
-    bus_.io().set_ppu(&ppu_);
-    bus_.io().set_bus(&bus_);
+    static const char* const kBackupNames[] = {"none", "SRAM", "Flash 64K",
+                                               "Flash 128K", "EEPROM"};
+    const uint32_t backup = gba_mvii_backup_kind(machine_);
+    const std::size_t save_size = gba_mvii_save_size(machine_);
+    logf("gba: %s — save %s (%u bytes)\n",
+         reinterpret_cast<const char*>(title),
+         backup < 5 ? kBackupNames[backup] : "?",
+         static_cast<unsigned>(save_size));
 
-    // Save chip. Sizes match gba++'s runtime.cpp defaults.
-    switch (header.save_type) {
-    case gba::SaveType::SRAM:
-        bus_.save().configure_sram(32 * 1024);
-        save_supported_ = true;
-        break;
-    case gba::SaveType::EEPROM:
-        bus_.save().configure_eeprom(8 * 1024);
-        save_supported_ = true;
-        break;
-    case gba::SaveType::Flash512:
-        bus_.save().configure_flash(0x10000u);
-        save_supported_ = true;
-        break;
-    case gba::SaveType::Flash1M:
-        bus_.save().configure_flash(0x20000u);
-        save_supported_ = true;
-        break;
-    case gba::SaveType::Unknown:
-    default:
-        // No signature in the image. Give it SRAM anyway: a game that writes to
-        // 0x0E000000 without advertising a chip is far more common than one
-        // that would be harmed by the region existing.
-        bus_.save().configure_sram(32 * 1024);
-        save_supported_ = true;
-        break;
-    }
-
+    save_supported_ = save_size != 0;
     if (save_supported_) {
         const std::size_t dot = rom_path.find_last_of('.');
         save_path_ = (dot == std::string::npos ? rom_path : rom_path.substr(0, dot)) + ".sav";
         std::vector<uint8_t> save;
         if (read_whole_file(save_path_.c_str(), save) && !save.empty()) {
-            if (bus_.save().sram_enabled())        bus_.save().load_sram_bytes(save.data(), save.size());
-            else if (bus_.save().eeprom_enabled()) bus_.save().load_eeprom_bytes(save.data(), save.size());
-            else if (bus_.save().flash_enabled())  bus_.save().load_flash_bytes(save.data(), save.size());
-            logf("gba: loaded %u bytes of save data\n", static_cast<unsigned>(save.size()));
+            const std::size_t took = gba_mvii_save_load(machine_, save.data(), save.size());
+            logf("gba: loaded %u bytes of save data\n", static_cast<unsigned>(took));
         }
-        bus_.save().clear_dirty();
-    }
-
-    gbamvii::bios_hle_bind(&cpu_, &bus_);
-    gbamvii::bios_hle_boot_skip(header.entry_is_branch && header.entry_target != 0
-                                    ? header.entry_target
-                                    : 0x08000000u);
-    return true;
-}
-
-void Runtime::pump(uint32_t cycles) {
-    uint32_t remaining = cycles;
-    while (remaining != 0) {
-        // Never step past the next thing that wants to happen; otherwise a
-        // long instruction swallows a timer overflow or an audio sample.
-        uint32_t chunk = remaining;
-        const uint32_t until_sample = bus_.audio().cycles_until_next_sample();
-        const uint32_t until_timer  = bus_.io().cycles_until_next_timer_event();
-        if (until_sample < chunk) chunk = until_sample;
-        if (until_timer  < chunk) chunk = until_timer;
-        if (chunk == 0) chunk = 1;
-
-        cycles_ += chunk;
-        bus_.audio().tick(chunk);
-        bus_.io().tick_timers(chunk);
-
-        const uint16_t dispstat   = bus_.io().dispstat();
-        const uint16_t vc_compare = static_cast<uint16_t>((dispstat >> 8) & 0xFFu);
-        const gba::GbaPpu::TickEvents ev = ppu_.tick(chunk, vc_compare);
-
-        if (ev.hblank_started && ppu_.vcount() < gba::GbaPpu::kLinesVisible) {
-            ppu_.render_scanline(ppu_.vcount(), bus_.io().read16(0x000), bus_.io().raw(),
-                                 bus_.vram_ptr(), bus_.oam_ptr(), bus_.pal_ptr());
-        }
-        if (ev.vblank_started) {
-            ppu_.mark_framebuffer_latched();
-            frame_ready_ = true;
-        }
-        if (ev.vblank_started && (dispstat & 0x0008u)) bus_.io().request_irq(gba::GbaIo::IrqVBlank);
-        if (ev.hblank_started && (dispstat & 0x0010u)) bus_.io().request_irq(gba::GbaIo::IrqHBlank);
-        if (ev.vcount_matched && (dispstat & 0x0020u)) bus_.io().request_irq(gba::GbaIo::IrqVCount);
-
-        remaining -= chunk;
-    }
-}
-
-bool Runtime::step() {
-    // 1. The HLE IRQ handler returning. The dispatcher parked kHleIrqReturn in
-    //    LR, so the game branching to LR lands us here with nothing executed at
-    //    that address — which is the point, since it is inside the BIOS region
-    //    we never execute.
-    if (gbamvii::bios_hle_irq_epilogue()) return true;
-
-    // 2. A new interrupt. Checked before the halt below so a source that became
-    //    pending during the last instruction is taken immediately.
-    if (bus_.io().irq_pending() && !cpu_.cpsr.i) {
-        if (bus_.io().halted()) bus_.io().clear_halt();
-        if (gbamvii::bios_hle_irq_enter(cpu_.R[15])) return true;
-    }
-
-    // 3. HALT / STOP. Nothing to interpret until an interrupt arrives, so run
-    //    the devices forward in whatever chunk the PPU says is safe. The yield
-    //    inside matters more here than anywhere else: a game in HALT is a game
-    //    doing nothing, and the rest of the box should get all of it.
-    if (bus_.io().halted()) {
-        while (running_ && bus_.io().halted() && !bus_.io().irq_pending()) {
-            uint32_t chunk = ppu_.cycles_until_next_event();
-            if (chunk == 0) chunk = 1;
-            pump(chunk);
-            if (frame_ready_) present_frame();
-            gbamvii::yield_now();
-            if (!input_.poll()) running_ = false;
-        }
-        if (bus_.io().irq_pending() && !cpu_.cpsr.i) {
-            pump(gba::kIrqWakeDelayCycles);
-            bus_.io().clear_halt();
-            gbamvii::bios_hle_irq_enter(cpu_.R[15]);
-        }
-        return true;
-    }
-
-    // 4. Fetch, decode, execute.
-    const uint32_t pc = cpu_.R[15];
-    armv4t::Instr insn{};
-    if (cpu_.thumb) {
-        insn = armv4t::ThumbDecoder::decode(bus_.read16(pc), pc);
-    } else {
-        insn = armv4t::ArmDecoder::decode(bus_.read32(pc), pc);
-    }
-
-    uint32_t insn_cycles = 1;
-    const armv4t::Interpreter::Result r =
-        armv4t::Interpreter::step(cpu_, bus_, insn, &insn_cycles);
-
-    if (r == armv4t::Interpreter::Result::Swi) {
-        // step() leaves PC on the SWI itself; the HLE expects it already past,
-        // because the two wait SWIs rewind it by one instruction to re-execute
-        // themselves after the halt. The BIOS reads the comment field from the
-        // low byte in THUMB and from bits 23..16 in ARM.
-        cpu_.R[15] = pc + (cpu_.thumb ? 2u : 4u);
-        const uint32_t swi = cpu_.thumb ? (insn.swi_imm & 0xFFu)
-                                        : ((insn.swi_imm >> 16) & 0xFFu);
-        insn_cycles += gbamvii::bios_hle_swi(swi);
-    }
-
-    pump(insn_cycles);
-
-    if (r == armv4t::Interpreter::Result::Undefined ||
-        r == armv4t::Interpreter::Result::NotImplemented) {
-        logf("gba: unhandled instruction %08x at %08x (%s) — stopping\n",
-             insn.raw, pc, cpu_.thumb ? "thumb" : "arm");
-        return false;
+        save_hash_ = gba_mvii_save_hash(machine_);
+        save_written_hash_ = save_hash_;
     }
     return true;
 }
 
 void Runtime::present_frame() {
-    frame_ready_ = false;
     ++frames_;
-    if (ppu_.has_latched_framebuffer()) {
-        video_.present(ppu_.latched_framebuffer());
-    }
+    video_.present(gba_mvii_framebuffer(machine_));
+    gba_mvii_frame_consume(machine_);
     if (!input_.poll()) running_ = false;
-    bus_.io().set_keyinput(input_.keyinput());
+    gba_mvii_set_keys(machine_, input_.keyinput());
 }
 
 void Runtime::pump_audio() {
-    if (!audio_.enabled()) return;
     for (;;) {
-        const std::size_t got =
-            bus_.audio().drain_samples(audio_buffer_,
-                                       sizeof(audio_buffer_) / sizeof(audio_buffer_[0]));
+        // Drained even with no DAC: the core's queue is unbounded, and an
+        // emulator that never empties it grows for as long as it runs.
+        const std::size_t got = audio_.enabled()
+            ? gba_mvii_drain_audio(machine_, audio_buffer_, kAudioBufferSamples)
+            : gba_mvii_drain_audio(machine_, nullptr, 0);
         if (got == 0) return;
         audio_.submit(audio_buffer_, got);
-        if (got < sizeof(audio_buffer_) / sizeof(audio_buffer_[0])) return;
+        if (got < kAudioBufferSamples) return;
     }
-}
-
-std::vector<uint8_t> Runtime::current_save_bytes() const {
-    if (bus_.save().sram_enabled())   return bus_.save().sram_bytes();
-    if (bus_.save().eeprom_enabled()) return bus_.save().eeprom_bytes();
-    if (bus_.save().flash_enabled())  return bus_.save().flash_bytes();
-    return std::vector<uint8_t>();
 }
 
 void Runtime::write_save() {
     if (!save_supported_ || !save_writable_ || save_path_.empty()) return;
-    const std::vector<uint8_t> bytes = current_save_bytes();
-    if (bytes.empty()) return;
-    if (!write_whole_file(save_path_, bytes)) {
+    const std::size_t size = gba_mvii_save_size(machine_);
+    if (size == 0) return;
+
+    std::vector<uint8_t> bytes(size, 0);
+    const std::size_t got = gba_mvii_save_read(machine_, bytes.data(), bytes.size());
+    if (got == 0) return;
+    bytes.resize(got);
+
+    if (!write_whole_file(save_path_, bytes.data(), bytes.size())) {
         logf("gba: cannot write '%s' (errno %d); saves are disabled\n",
              save_path_.c_str(), errno);
         save_writable_ = false;
         return;
     }
-    bus_.save().clear_dirty();
+    save_written_hash_ = gba_mvii_save_hash(machine_);
+    save_hash_ = save_written_hash_;
     save_last_write_us_ = gbamvii::now_us();
     save_dirty_since_us_ = 0;
 }
@@ -422,34 +323,39 @@ void Runtime::write_save() {
 // box: anything on the frame path that touches storage freezes the OS along
 // with the app. A GBA save chip, though, is written by the game constantly —
 // Final Fantasy VI rewrites SRAM through a whole save-menu interaction — so
-// mirroring every dirty flag to disk would be exactly the freeze the rule
-// forbids, and never writing at all would make the runtime useless for the RPGs
-// it is most obviously for.
+// mirroring every change to disk would be exactly the freeze the rule forbids,
+// and never writing at all would make the runtime useless for the RPGs it is
+// most obviously for.
 //
-// So: write only once the game has stopped touching the chip for a second, and
-// never more often than every five. A save burst produces one 8-128 KB write a
-// few seconds after the player leaves the save menu, and a game that does not
+// So: look at the chip once a second (an FNV pass over at most 128 KB, which
+// costs nothing next to a frame), write only once it has stopped changing for a
+// second, and never more often than every five. A save burst produces one write
+// a few seconds after the player leaves the save menu; a game that does not
 // save produces none. If that still costs a visible hitch, the honest fix is to
 // drop to writing on exit only — but a save that survives the player closing
 // the window is worth one stall a game session.
 void Runtime::flush_save_if_settled(uint64_t now) {
     if (!save_supported_ || !save_writable_) return;
-    if (bus_.save().dirty()) {
-        if (save_dirty_since_us_ == 0) save_dirty_since_us_ = now;
-        // Keep sliding the settle point while writes keep coming.
-        bus_.save().clear_dirty();
+    if (now < save_next_probe_us_) return;
+    save_next_probe_us_ = now + kSaveProbeUs;
+
+    const uint64_t hash = gba_mvii_save_hash(machine_);
+    if (hash != save_hash_) {
+        // Still changing: slide the settle point forward.
+        save_hash_ = hash;
         save_dirty_since_us_ = now;
         return;
     }
     if (save_dirty_since_us_ == 0) return;
+    if (hash == save_written_hash_) { save_dirty_since_us_ = 0; return; }
     if (now - save_dirty_since_us_ < kSaveSettleUs) return;
     if (save_last_write_us_ != 0 && now - save_last_write_us_ < kSaveMinGapUs) return;
     write_save();
 }
 
 void Runtime::open_devices() {
-    const bool have_video = video_.open(static_cast<int>(gba::GbaPpu::kScreenWidth),
-                                        static_cast<int>(gba::GbaPpu::kScreenHeight));
+    const bool have_video = video_.open(static_cast<int>(gba_mvii_screen_width()),
+                                        static_cast<int>(gba_mvii_screen_height()));
     const bool have_input = input_.open();
     logf("gba: devices — fb0 %s, input0 %s\n",
          have_video ? "ok" : "FAILED", have_input ? "ok" : "FAILED");
@@ -472,27 +378,26 @@ void Runtime::hold_failure() {
 }
 
 int Runtime::run() {
-    audio_.open(bus_.audio().sample_rate(), 1);   // the core mixes down to mono
-    bus_.io().set_keyinput(input_.keyinput());
+    const uint32_t rate = gba_mvii_audio_rate();
+    audio_.open(rate, 2);   // the core mixes interleaved stereo
+    gba_mvii_set_keys(machine_, input_.keyinput());
 
-    logf("gba: running (%ux%u, audio %u Hz)\n",
-         static_cast<unsigned>(gba::GbaPpu::kScreenWidth),
-         static_cast<unsigned>(gba::GbaPpu::kScreenHeight),
-         static_cast<unsigned>(bus_.audio().sample_rate()));
+    logf("gba: running (%ux%u, audio %u Hz %s)\n",
+         static_cast<unsigned>(gba_mvii_screen_width()),
+         static_cast<unsigned>(gba_mvii_screen_height()),
+         static_cast<unsigned>(rate), audio_.enabled() ? "stereo" : "off");
 
     uint64_t next_frame_us = gbamvii::now_us() + kFrameUs;
     uint64_t report_us     = gbamvii::now_us() + 5000000ull;
     uint64_t report_frames = 0;
+    save_next_probe_us_    = gbamvii::now_us() + kSaveProbeUs;
 
     while (running_) {
-        if (!step()) break;
-
-        if (++steps_ >= kStepsPerYield) {
-            steps_ = 0;
-            gbamvii::yield_now();
-        }
-
-        if (!frame_ready_) continue;
+        // Bounded work, then a turn for everything else. run_steps returns as
+        // soon as the PPU finishes a frame, so this never overshoots one.
+        const uint32_t frame_ready = gba_mvii_run_steps(machine_, kStepsPerYield);
+        gbamvii::yield_now();
+        if (!frame_ready) continue;
 
         present_frame();
         pump_audio();
@@ -521,7 +426,10 @@ int Runtime::run() {
     }
 
     logf("gba: stopped after %u frames\n", static_cast<unsigned>(frames_));
-    if (save_supported_ && save_writable_) write_save();
+    if (save_supported_ && save_writable_ &&
+        gba_mvii_save_hash(machine_) != save_written_hash_) {
+        write_save();
+    }
     return 0;
 }
 
@@ -538,16 +446,16 @@ extern "C" int main(int argc, char** argv) {
     // indistinguishable when the first thing main() did was blow the stack.
     logf("gba: gba-to-mvii starting (argc=%d)\n", argc);
 
-    // Runtime MUST be heap-allocated. GbaBus and GbaPpu alone are 670368 bytes
-    // — EWRAM 256K, VRAM 96K, IWRAM 32K, and the PPU's 480x160 latch at 230K —
-    // and MVII gives a guest a 512 KB stack (kUserStackSize in
-    // mvii_arm_process_manager.cpp) against 32 MB of heap. As a local it
-    // overflowed the stack in main()'s prologue: no window, no log, process
-    // gone, which is exactly what the old /dev/native0 stub looked like from
-    // the outside. The guard page catches nothing here; it just dies.
+    // Runtime is heap-allocated on purpose. It is small now that the machine
+    // itself lives behind a Rust handle, but MVII gives a guest a 512 KB stack
+    // (kUserStackSize in mvii_arm_process_manager.cpp) against 32 MB of heap,
+    // and the previous C++ core put 670368 bytes of EWRAM/VRAM/framebuffer in
+    // this object. As a local it overflowed the stack in main()'s prologue: no
+    // window, no log, process gone — indistinguishable from the /dev/native0
+    // stub it replaced. Keep it off the stack.
     Runtime* runtime = new (std::nothrow) Runtime();
     if (!runtime) {
-        logf("gba: out of memory allocating the machine (%u bytes)\n",
+        logf("gba: out of memory allocating the runtime (%u bytes)\n",
              static_cast<unsigned>(sizeof(Runtime)));
         return 1;
     }

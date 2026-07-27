@@ -106,6 +106,8 @@ uint16_t bits_for_keycode(uint16_t code) {
 Video::~Video() {
     delete[] staging_;
     staging_ = nullptr;
+    delete[] lut_;
+    lut_ = nullptr;
     if (fd_ >= 0) ::close(fd_);
     fd_ = -1;
 }
@@ -119,6 +121,29 @@ bool Video::open(int width, int height) {
     if (fd_ < 0) {
         logf("gba: /dev/fb0 unavailable (errno %d); running without video\n", errno);
         return false;
+    }
+
+    // BGR555 -> RGBA8 for all 32768 colours the PPU can emit. Built here, on
+    // the heap, so it adds nothing to the packaged image; the 5-to-8-bit
+    // expansion replicates the top bits so that 0x1F reaches 0xFF rather than
+    // 0xF8, which is what keeps whites white.
+    lut_ = new (std::nothrow) uint32_t[1u << 15];
+    if (!lut_) {
+        logf("gba: out of memory for the colour table; running without video\n");
+        ::close(fd_);
+        fd_ = -1;
+        return false;
+    }
+    for (unsigned v = 0; v < (1u << 15); ++v) {
+        const unsigned r5 = v & 0x1Fu;
+        const unsigned g5 = (v >> 5) & 0x1Fu;
+        const unsigned b5 = (v >> 10) & 0x1Fu;
+        const uint32_t r8 = (r5 << 3) | (r5 >> 2);
+        const uint32_t g8 = (g5 << 3) | (g5 >> 2);
+        const uint32_t b8 = (b5 << 3) | (b5 >> 2);
+        // Little-endian: byte 0 is R, byte 1 G, byte 2 B, byte 3 A — the
+        // channel order the kernel's RGBA8 surface expects.
+        lut_[v] = r8 | (g8 << 8) | (b8 << 16) | 0xFF000000u;
     }
 
     if (!remap()) {
@@ -149,25 +174,23 @@ bool Video::remap() {
     return true;
 }
 
-void Video::present(const uint8_t* rgb24) {
-    if (fd_ < 0 || !rgb24) return;
+void Video::present(const uint16_t* bgr555) {
+    if (fd_ < 0 || !bgr555 || !lut_) return;
 
     uint8_t* dst   = mapped_ ? mapped_ : staging_;
     const int span = mapped_ ? pitch_ : width_;
     if (!dst) return;
 
-    // RGB24 -> RGBA8, one row at a time. The destination row stride is the
-    // kernel's, not ours, so this cannot be a single linear pass.
+    // One row at a time: the destination stride is the kernel's (1280 pixels
+    // for the shared surface), not ours, so this cannot be a single linear
+    // pass. Writing 32 bits at a time rather than four bytes matters here —
+    // this loop runs 38400 times a frame.
     for (int y = 0; y < height_; ++y) {
-        const uint8_t* src = rgb24 + static_cast<std::size_t>(y) * width_ * 3;
-        uint8_t* out = dst + static_cast<std::size_t>(y) * span * 4;
+        const uint16_t* src = bgr555 + static_cast<std::size_t>(y) * width_;
+        uint32_t* out = reinterpret_cast<uint32_t*>(dst) +
+                        static_cast<std::size_t>(y) * span;
         for (int x = 0; x < width_; ++x) {
-            out[0] = src[0];
-            out[1] = src[1];
-            out[2] = src[2];
-            out[3] = 0xFF;
-            src += 3;
-            out += 4;
+            out[x] = lut_[src[x] & 0x7FFFu];
         }
     }
 
@@ -363,3 +386,28 @@ void logf(const char* fmt, ...) {
 }
 
 }  // namespace gbamvii
+
+// ── hooks the Rust core calls ──────────────────────────────────────────────
+//
+// Declared in include/gba_mvii.h and, on the other side, in
+// rust/gba-core/src/nostd.rs. They exist so that no MVII device access lives
+// in Rust: the emulation core stays the reference implementation, and every
+// syscall in this runtime is in this file.
+
+extern "C" void gba_mvii_diag_write(const uint8_t* ptr, std::size_t len) {
+    if (!ptr || len == 0) return;
+    // Straight to stderr, which MVII copies to both the app log and the serial
+    // console. Every caller is behind a trace flag this build leaves off — the
+    // serial path is a byte at a time, and a per-frame trace would cost more
+    // than the emulation.
+    (void)::write(2, ptr, len);
+}
+
+extern "C" int64_t gba_mvii_host_epoch(void) {
+    // MVII has one clock and no timezone database — localtime_r is gmtime_r
+    // there (Dash/llvm_libc_stubs.cpp) — so this is already the "local" civil
+    // time the cartridge RTC should report, with no conversion left to do.
+    const time_t now = ::time(nullptr);
+    if (now == static_cast<time_t>(-1)) return -1;
+    return static_cast<int64_t>(now);
+}

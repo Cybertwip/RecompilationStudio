@@ -75,19 +75,35 @@ constexpr uint64_t kSaveMinGapUs   = 5000000ull;   // never more often than this
 bool read_whole_file(const char* path, std::vector<uint8_t>& out) {
     const int fd = ::open(path, O_RDONLY);
     if (fd < 0) return false;
+
+    // Size it first and allocate once. A grow-as-you-go vector would realloc its
+    // way up and, at the last doubling, hold the old and new buffers at the same
+    // time: 24 MB peak for Final Fantasy VI's 16 MB cartridge. MVII hands a guest
+    // 32 MB when the kernel heap is healthy and degrades toward 4 MB when it is
+    // not (allocate_user_heap in mvii_arm_process_manager.cpp), so the transient
+    // is the difference between loading and failing to.
+    const off_t end = ::lseek(fd, 0, SEEK_END);
+    if (end < 0 || ::lseek(fd, 0, SEEK_SET) != 0) { ::close(fd); return false; }
+    const std::size_t size = static_cast<std::size_t>(end);
+
     out.clear();
-    uint8_t chunk[64 * 1024];
-    for (;;) {
-        const ssize_t got = ::read(fd, chunk, sizeof(chunk));
-        if (got < 0) { ::close(fd); return false; }
-        if (got == 0) break;
-        out.insert(out.end(), chunk, chunk + got);
+    out.resize(size);
+    if (size == 0) { ::close(fd); return true; }
+
+    std::size_t done = 0;
+    while (done < size) {
         // A 16 MB ROM is ~256 reads off eMMC. Offer a turn between them so the
         // shell keeps compositing while the cartridge loads.
+        const std::size_t want = size - done < 64u * 1024u ? size - done : 64u * 1024u;
+        const ssize_t got = ::read(fd, out.data() + done, want);
+        if (got < 0) { ::close(fd); return false; }
+        if (got == 0) break;  // short file; trimmed below
+        done += static_cast<std::size_t>(got);
         gbamvii::yield_now();
     }
     ::close(fd);
-    return true;
+    out.resize(done);
+    return done > 0;
 }
 
 bool write_whole_file(const std::string& path, const std::vector<uint8_t>& data) {
@@ -480,7 +496,11 @@ int Runtime::run() {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+// extern "C" is load-bearing. Under -ffreestanding clang stops treating `main`
+// as the reserved hosted entry point and mangles it like any other function, so
+// a plain `int main(...)` here links as _Z4mainiPPc and Dash's crt.s — which
+// does `.extern main` / `.set virtua, main` — finds nothing.
+extern "C" int main(int argc, char** argv) {
     Runtime runtime;
     if (!runtime.load(argc, argv)) return 1;
     return runtime.run();

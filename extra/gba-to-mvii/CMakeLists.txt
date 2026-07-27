@@ -87,7 +87,11 @@ set(_gba_sources
 set(_mvii_sources
     "${GBA_MVII_SRC}/mvii/bios_hle.cpp"
     "${GBA_MVII_SRC}/mvii/main.cpp"
-    "${GBA_MVII_SRC}/mvii/mvii_platform.cpp")
+    "${GBA_MVII_SRC}/mvii/mvii_platform.cpp"
+    # Not part of R-Dash's own source list, but libc++/llvm-libc in the sysroot
+    # is linked against it: errno, the stdio cookies, clock_gettime, usleep,
+    # sched_yield, getenv. Every Virtua C++ app has to compile this in.
+    "${VIRTUA_ROOT}/Dash/llvm_libc_stubs.cpp")
 
 # ── R-Dash ─────────────────────────────────────────────────────────────────
 #

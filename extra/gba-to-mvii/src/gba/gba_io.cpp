@@ -11,6 +11,8 @@
 #include "gba_ppu.h"
 #include "snapshot.h"
 
+#if !defined(GBA_MVII_RUNTIME)
+
 // Always-on MMIO write-trace ring (Axis 4). File-local statics mirroring the
 // runtime_arm.cpp ring style; lazily allocated on the first write. The cycle and
 // pc stamps come from the recomp runtime globals (declared here to avoid pulling
@@ -60,6 +62,37 @@ std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
     }
     return count;
 }
+
+#else  // GBA_MVII_RUNTIME
+
+// ── gba-to-mvii divergence from upstream gba++ ─────────────────────────────
+// The MMIO write-trace ring is compiled out on MVII. It exists to serve the
+// mmio_cap TCP probe, which is not part of this runtime, and it is not free:
+// the first IO write callocs 262144 * 24 = 6 MB out of the guest heap, and
+// every subsequent one pays a modulo, a store of five fields, and a call into
+// the recompiler runtime. Its two stamps come from g_runtime_cycles and
+// runtime_current_pc(), which belong to the recompiled backend — this runtime
+// drives its own armv4t::CPUState and has neither, so even if the ring were
+// kept, the header already says only addr/value/size would be meaningful.
+//
+// g_mmio_split stays: it is not part of the trace, it is the write32 -> write16
+// re-entry guard that the register commit path depends on.
+namespace gba {
+namespace {
+bool g_mmio_split = false;
+
+inline void mmio_cap_record(uint32_t, uint32_t, uint32_t) {}
+}  // namespace
+
+uint64_t gba_mmio_cap_total()  { return 0; }
+uint64_t gba_mmio_cap_oldest() { return 0; }
+std::size_t gba_mmio_cap_query(uint64_t start, std::size_t, MmioCapEntry*,
+                               uint64_t& out_first) {
+    out_first = start;
+    return 0;
+}
+
+#endif  // GBA_MVII_RUNTIME
 
 void GbaIo::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.bytes(io_.data(), io_.size());
@@ -540,12 +573,20 @@ void GbaIo::warn_unhandled(uint32_t off, uint32_t value, bool is_write, uint8_t 
         return;
     }
     if (warned.insert(key).second) {
+#if defined(GBA_MVII_RUNTIME)
+        // No pc/cycles here: those read the recompiled backend's globals, which
+        // this runtime does not have (see the divergence note at the top). A
+        // fabricated pc=0x00000000 in the log would be worse than none.
+        std::fprintf(stderr, "[gba:io] unhandled %s%u @ 0x%08x = 0x%x\n",
+                     is_write ? "W" : "R", width, 0x04000000u + off, value);
+#else
         std::fprintf(stderr,
                      "[gba:io] unhandled %s%u @ 0x%08x = 0x%x "
                      "pc=0x%08x cycles=%llu\n",
                      is_write ? "W" : "R", width,
                      0x04000000u + off, value, runtime_current_pc(),
                      static_cast<unsigned long long>(g_runtime_cycles));
+#endif
     }
 }
 

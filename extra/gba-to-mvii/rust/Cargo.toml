@@ -1,0 +1,34 @@
+# The GBA emulation core, built for MVII's Virtua userland.
+#
+# These are the Rust crates from extra/gba-rust (crates/armv4t and
+# crates/gba-core), vendored here and ported to `no_std + alloc` so they can
+# link into a Virtua ARM executable. Nothing else from that workspace comes
+# along: no launcher, no screen, no recompiler — this tree holds only what the
+# handheld runtime actually executes.
+#
+# The port is deliberately narrow. Every module keeps its upstream logic; what
+# changed is the platform floor underneath it (see each crate's `nostd.rs`).
+#
+# Target is fixed in .cargo/config.toml: armv7a-none-eabi, ARM mode, soft
+# float, strict alignment, static relocation model — the same shape the C++
+# side is compiled with in CMakeLists.txt.
+
+[workspace]
+resolver = "2"
+members = ["armv4t", "gba-core", "gba-mvii"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+# The interpreter is arithmetic-heavy and every wrap is already explicit
+# (wrapping_add and friends); leaving the checks in costs a branch per ALU op
+# on a 1 GHz Cortex-A7 that has none to spare.
+overflow-checks = false

@@ -1,0 +1,22 @@
+# Bare-metal ARMv7-A, matching the C++ half of the runtime exactly.
+#
+#   armv7a-none-eabi   ARM (not Thumb) instruction mode, soft-float ABI — the
+#                      same as clang's --target=armv7a-none-eabi -marm
+#                      -mfloat-abi=soft in CMakeLists.txt. A mismatch here is
+#                      not a link error, it is a silently wrong calling
+#                      convention for every f64 that crosses the boundary.
+#   +strict-align      mirrors -mno-unaligned-access on the C++ side.
+#   relocation-model   static: absolute data references become R_ARM_ABS32,
+#                      which is what the .virtua packager rewrites (see
+#                      relocationValue() in extra/virtua/binary/virtua.go).
+#                      PIC would route them through a GOT the packager can
+#                      only patch heuristically.
+
+[build]
+target = "armv7a-none-eabi"
+
+[target.armv7a-none-eabi]
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "target-feature=+strict-align",
+]

@@ -80,6 +80,26 @@ void gba_mvii_frame_consume(GbaMvii* machine);
 uint64_t gba_mvii_frames(GbaMvii* machine);
 uint64_t gba_mvii_cycles(GbaMvii* machine);
 
+// Liveness snapshot, for when the runtime is executing and drawing nothing.
+// The handheld's only channel back is a log line, and three very different
+// faults look identical from outside: a clock that never advances, a clock
+// that advances while the PPU never completes a pass, and a guest halted on an
+// interrupt that never arrives. These twelve words tell them apart.
+//
+// 0 pc, 1 cpsr, 2/3 clock lo/hi, 4 frames, 5 DISPCNT, 6 scanline, 7 flags,
+// 8 IE, 9 IF, 10 sp, 11 lr.
+#define GBA_MVII_PROBE_WORDS 12u
+enum {
+    GBA_MVII_PROBE_HALTED      = 1u << 0,
+    GBA_MVII_PROBE_FRAME_READY = 1u << 1,
+    GBA_MVII_PROBE_THUMB       = 1u << 2,
+    GBA_MVII_PROBE_REAL_BIOS   = 1u << 3,
+    GBA_MVII_PROBE_IRQ_LINE    = 1u << 4,
+    GBA_MVII_PROBE_IRQ_PENDING = 1u << 5,
+    GBA_MVII_PROBE_IME         = 1u << 6,
+};
+void gba_mvii_probe(GbaMvii* machine, uint32_t* out /* [12] */);
+
 // ── video ──────────────────────────────────────────────────────────────────
 
 // 240x160 BGR555, row-major, tightly packed. Valid until the next

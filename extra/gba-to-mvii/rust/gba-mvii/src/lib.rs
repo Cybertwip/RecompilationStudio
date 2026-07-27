@@ -304,6 +304,54 @@ pub unsafe extern "C" fn gba_mvii_cycles(handle: *mut GbaMvii) -> u64 {
     machine(handle).bus.clock
 }
 
+/// Number of `u32` slots `gba_mvii_probe` fills.
+pub const PROBE_WORDS: usize = 12;
+
+/// Snapshot of the machine's liveness, for when the runtime is executing and
+/// producing nothing.
+///
+/// This exists because the handheld's only channel back is a log line, and
+/// "the emulator did not draw" has three completely different causes that look
+/// identical from outside: the clock is not advancing, the clock advances but
+/// the PPU never finishes a scanline pass, or the guest is halted waiting for
+/// an interrupt that is never raised. One `u32[12]` distinguishes them without
+/// a debugger.
+///
+/// Slots: 0 pc, 1 cpsr, 2/3 clock lo/hi, 4 frames lo, 5 DISPCNT, 6 scanline,
+/// 7 flags, 8 IE, 9 IF, 10 sp, 11 lr.
+/// Flags: 1 halted, 2 frame_ready, 4 thumb, 8 real_bios, 16 irq_line,
+/// 32 irq_pending, 64 IME.
+///
+/// # Safety
+/// `handle` must be live; `out` must point to `PROBE_WORDS` writable `u32`s.
+#[no_mangle]
+pub unsafe extern "C" fn gba_mvii_probe(handle: *mut GbaMvii, out: *mut u32) {
+    let m = machine(handle);
+    let dispcnt = u32::from(m.bus.io[0]) | u32::from(m.bus.io[1]) << 8;
+    let flags = u32::from(m.bus.halted)
+        | u32::from(m.bus.frame_ready) << 1
+        | u32::from(m.cpu.thumb()) << 2
+        | u32::from(m.bus.real_bios) << 3
+        | u32::from(m.bus.irq_line()) << 4
+        | u32::from(m.bus.irq_pending()) << 5
+        | u32::from(m.bus.ime) << 6;
+    let words = [
+        m.cpu.regs[15],
+        m.cpu.cpsr,
+        m.bus.clock as u32,
+        (m.bus.clock >> 32) as u32,
+        m.bus.frames as u32,
+        dispcnt,
+        m.bus.scanline() as u32,
+        flags,
+        u32::from(m.bus.reg_ie),
+        u32::from(m.bus.reg_if),
+        m.cpu.regs[13],
+        m.cpu.regs[14],
+    ];
+    core::ptr::copy_nonoverlapping(words.as_ptr(), out, PROBE_WORDS);
+}
+
 // ---- video ----
 
 /// The 240x160 frame, BGR555 (red in the low five bits), row-major, no

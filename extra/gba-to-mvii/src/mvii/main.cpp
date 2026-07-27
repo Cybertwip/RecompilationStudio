@@ -563,6 +563,38 @@ void Runtime::hold_failure() {
     }
 }
 
+// Say what the machine is doing when it has gone a quarter of a million
+// instructions without finishing a frame.
+//
+// A guest that emulates and never draws is indistinguishable from one that is
+// wedged, from anywhere outside the process — the compositor only sees that
+// nothing was presented. These lines are the difference between guessing and
+// knowing: a clock that stands still, a clock that runs while the scanline
+// counter does not, and a CPU halted on an interrupt nobody raises are three
+// different bugs that look the same from the window.
+//
+// Rate-limited to one line every two seconds, and only ever reached from the
+// stall branch, so a healthy run never pays for it: MVII puts stderr on the
+// serial console a byte at a time, which is far too slow for the frame path.
+void Runtime::report_stall(uint64_t now) {
+    if (now < stall_report_us_) return;
+    stall_report_us_ = now + kStallReportUs;
+
+    uint32_t p[GBA_MVII_PROBE_WORDS] = {0};
+    gba_mvii_probe(machine_, p);
+    const uint64_t clock = (static_cast<uint64_t>(p[3]) << 32) | p[2];
+    logf("gba: stalled pc=%08x cpsr=%08x clk=%llu (+%llu) frames=%u "
+         "line=%u dispcnt=%04x ie=%04x if=%04x flags=%02x sp=%08x lr=%08x\n",
+         static_cast<unsigned>(p[0]), static_cast<unsigned>(p[1]),
+         static_cast<unsigned long long>(clock),
+         static_cast<unsigned long long>(clock - stall_last_clock_),
+         static_cast<unsigned>(p[4]), static_cast<unsigned>(p[6]),
+         static_cast<unsigned>(p[5]), static_cast<unsigned>(p[8]),
+         static_cast<unsigned>(p[9]), static_cast<unsigned>(p[7]),
+         static_cast<unsigned>(p[10]), static_cast<unsigned>(p[11]));
+    stall_last_clock_ = clock;
+}
+
 int Runtime::run() {
     const uint32_t rate = gba_mvii_audio_rate();
     audio_.open(rate, 2);   // the core mixes interleaved stereo
@@ -595,6 +627,7 @@ int Runtime::run() {
             if (++stalled_slices >= kStallPollSlices) {
                 stalled_slices = 0;
                 if (!input_.poll()) running_ = false;
+                report_stall(gbamvii::now_us());
             }
             continue;
         }

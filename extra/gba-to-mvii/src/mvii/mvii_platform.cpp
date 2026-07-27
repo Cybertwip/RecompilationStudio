@@ -196,6 +196,44 @@ void Video::present(const uint8_t* rgb24) {
     (void)::ioctl(fd_, FB_IOCTL_SWAP_RGBA8, &draw);
 }
 
+void Video::fill(uint8_t r, uint8_t g, uint8_t b) {
+    if (fd_ < 0) return;
+    uint8_t* dst   = mapped_ ? mapped_ : staging_;
+    const int span = mapped_ ? pitch_ : width_;
+    if (!dst) return;
+
+    for (int y = 0; y < height_; ++y) {
+        uint8_t* out = dst + static_cast<std::size_t>(y) * span * 4;
+        for (int x = 0; x < width_; ++x) {
+            out[0] = r;
+            out[1] = g;
+            out[2] = b;
+            out[3] = 0xFF;
+            out += 4;
+        }
+    }
+
+    if (mapped_) {
+        (void)::ioctl(fd_, FB_IOCTL_PRESENT, nullptr);
+        if (!remap()) {
+            mapped_ = nullptr;
+            if (!staging_) {
+                staging_ = new (std::nothrow)
+                    uint8_t[static_cast<std::size_t>(width_) * height_ * 4];
+            }
+        }
+        return;
+    }
+
+    fb_draw_rgba8 draw{};
+    draw.x = 0;
+    draw.y = 0;
+    draw.w = static_cast<uint16_t>(width_);
+    draw.h = static_cast<uint16_t>(height_);
+    draw.data = staging_;
+    (void)::ioctl(fd_, FB_IOCTL_SWAP_RGBA8, &draw);
+}
+
 // ── Input ──────────────────────────────────────────────────────────────────
 
 Input::~Input() {

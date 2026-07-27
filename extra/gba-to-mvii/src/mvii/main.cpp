@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -131,8 +132,17 @@ std::string directory_of(const char* path) {
 
 class Runtime {
 public:
+    // Devices first, ROM second. A Virtua guest is invisible to the shell until
+    // it has a surface, so opening /dev/fb0 before the 16 MB cartridge read is
+    // the difference between "a window that says it failed" and "a process that
+    // vanished" — which is the report this runtime exists to answer.
+    void open_devices();
     bool load(int argc, char** argv);
     int  run();
+
+    // Paint a flat colour and hold it, so a fatal startup error is visible on
+    // the device rather than only on a serial cable.
+    void hold_failure();
 
 private:
     void pump(uint32_t cycles);       // advance every non-CPU device
@@ -437,10 +447,31 @@ void Runtime::flush_save_if_settled(uint64_t now) {
     write_save();
 }
 
+void Runtime::open_devices() {
+    const bool have_video = video_.open(static_cast<int>(gba::GbaPpu::kScreenWidth),
+                                        static_cast<int>(gba::GbaPpu::kScreenHeight));
+    const bool have_input = input_.open();
+    logf("gba: devices — fb0 %s, input0 %s\n",
+         have_video ? "ok" : "FAILED", have_input ? "ok" : "FAILED");
+    if (have_video) {
+        // A first present as soon as the surface exists. The shell composites
+        // whatever the guest last presented, so this is what puts the window on
+        // screen before the cartridge read starts.
+        video_.fill(0x10, 0x10, 0x18);
+    }
+}
+
+void Runtime::hold_failure() {
+    if (!video_.opened()) return;
+    const uint64_t until = gbamvii::now_us() + 4000000ull;
+    while (gbamvii::now_us() < until) {
+        video_.fill(0x60, 0x10, 0x10);
+        if (!input_.poll()) break;
+        gbamvii::sleep_until(gbamvii::now_us() + 33000ull);
+    }
+}
+
 int Runtime::run() {
-    video_.open(static_cast<int>(gba::GbaPpu::kScreenWidth),
-                static_cast<int>(gba::GbaPpu::kScreenHeight));
-    input_.open();
     audio_.open(bus_.audio().sample_rate(), 1);   // the core mixes down to mono
     bus_.io().set_keyinput(input_.keyinput());
 
@@ -501,7 +532,32 @@ int Runtime::run() {
 // a plain `int main(...)` here links as _Z4mainiPPc and Dash's crt.s — which
 // does `.extern main` / `.set virtua, main` — finds nothing.
 extern "C" int main(int argc, char** argv) {
-    Runtime runtime;
-    if (!runtime.load(argc, argv)) return 1;
-    return runtime.run();
+    // Say something before touching anything. If this line does not reach the
+    // serial console, the image did not start — which is a different failure
+    // from a runtime that started and then gave up, and the two were
+    // indistinguishable when the first thing main() did was blow the stack.
+    logf("gba: gba-to-mvii starting (argc=%d)\n", argc);
+
+    // Runtime MUST be heap-allocated. GbaBus and GbaPpu alone are 670368 bytes
+    // — EWRAM 256K, VRAM 96K, IWRAM 32K, and the PPU's 480x160 latch at 230K —
+    // and MVII gives a guest a 512 KB stack (kUserStackSize in
+    // mvii_arm_process_manager.cpp) against 32 MB of heap. As a local it
+    // overflowed the stack in main()'s prologue: no window, no log, process
+    // gone, which is exactly what the old /dev/native0 stub looked like from
+    // the outside. The guard page catches nothing here; it just dies.
+    Runtime* runtime = new (std::nothrow) Runtime();
+    if (!runtime) {
+        logf("gba: out of memory allocating the machine (%u bytes)\n",
+             static_cast<unsigned>(sizeof(Runtime)));
+        return 1;
+    }
+    runtime->open_devices();
+    if (!runtime->load(argc, argv)) {
+        runtime->hold_failure();
+        delete runtime;
+        return 1;
+    }
+    const int rc = runtime->run();
+    delete runtime;
+    return rc;
 }

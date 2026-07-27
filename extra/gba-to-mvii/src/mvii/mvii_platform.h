@@ -45,6 +45,12 @@ public:
     // Blit one RGB24 frame of exactly width() x height() pixels and present it.
     void present(const uint8_t* rgb24);
 
+    // Present a flat colour. Writes straight into the surface, so it costs no
+    // source buffer — worth having, because a 240x160 RGB24 scratch frame is
+    // 115 KB and two of them as file-scope arrays put 230 KB of dead weight in
+    // the packaged image.
+    void fill(uint8_t r, uint8_t g, uint8_t b);
+
     int width()  const { return width_; }
     int height() const { return height_; }
     bool opened() const { return fd_ >= 0; }

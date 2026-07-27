@@ -3583,7 +3583,7 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   }
   emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · native entry 0x08000000")
     .arg(game.title, game.gameCode).arg(game.romSize));
-  emit logLine(QStringLiteral("Virtua native bridge ABI: v1 · header SHA-256 %1").arg(bridgeSha256));
+  emit logLine(QStringLiteral("Virtua native bridge ABI: v2 · header SHA-256 %1").arg(bridgeSha256));
 
   nextStage(QStringLiteral("Create Virtua ARM native source repository"));
   const QString root = QDir::tempPath();
@@ -3615,7 +3615,7 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     { QStringLiteral("system"), QStringLiteral("gba") },
     { QStringLiteral("execution"), QStringLiteral("native-arm") },
     { QStringLiteral("guest_kind"), QStringLiteral("MVII_NATIVE_GUEST_GBA_ARM7TDMI") },
-    { QStringLiteral("bridge_abi"), 1 },
+    { QStringLiteral("bridge_abi"), 2 },
     { QStringLiteral("bridge_header_sha256"), bridgeSha256 },
     { QStringLiteral("rom_sha256"), romSha256 },
     { QStringLiteral("rom_size"), QString::number(game.romSize) },
@@ -3810,7 +3810,7 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     { QStringLiteral("executable"), QFileInfo(executable).fileName() },
     { QStringLiteral("executable_sha256"), executableHash },
     { QStringLiteral("rom_sha256"), romSha256 },
-    { QStringLiteral("bridge_abi"), 1 },
+    { QStringLiteral("bridge_abi"), 2 },
     { QStringLiteral("executed_during_verification"), false },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_native_build.json")),

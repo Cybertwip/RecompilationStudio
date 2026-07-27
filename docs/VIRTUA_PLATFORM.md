@@ -18,7 +18,7 @@ MVII's ARM process manager.
 The shared contract is `extra/virtua/include/native_bridge.h`.
 
 - Device: `/dev/native0`
-- ABI version: `1`
+- ABI version: `2`
 - Negotiation: `MVII_NATIVE_IOCTL_QUERY`
 - Launch: `MVII_NATIVE_IOCTL_LAUNCH`
 - Guest kinds: GBA ARM7TDMI, Vita ARMv7, Horizon AArch64

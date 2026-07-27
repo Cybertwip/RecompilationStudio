@@ -2,7 +2,7 @@
   "schema": 1,
   "created_utc": "2026-07-27T07:02:04+00:00",
   "repository_commit": "f5a6f3e0eda0730ca0456ac9a3b5243ca5de7997",
-  "bridge_abi": 1,
+  "bridge_abi": 2,
   "native_device": "/dev/native0",
   "horizon_service_device": "/dev/horizon0",
   "artifacts": {
@@ -80,7 +80,7 @@
     "extra/virtua/native/gba_native_main.c": "22ad431d72403dc2eb73cc9cf4d605cf4a1978a54d239c780c8b8938f140d1d3",
     "extra/vita2hos/source/mvii_main.c": "3aaf7bd6279a4f93fa2677ead1d3698ceebd954dff585b515b9ab4ed7142e48d",
     "extra/horizon2mvii/source/main.c": "6752f26ea4b42ac044cfa658f58edbf0b3863d44e180d2e8976b1a6a8bdb7b56",
-    "extra/horizon2mvii/source/horizon_servctl_mvii.c": "dccf48d0f94ed1cfb0cdd688b79a914a335cca7d751614156e31bc1e57ef5b87"
+    "extra/horizon2mvii/source/horizon_servctl_mvii.c": "447865887f4dafda08c8b9f4b7b45d110af0669046232cd2de1e5c6fafefbef6"
   },
   "vita_payload_staging": {
     "source": "branding/vita/terraria.pkg",

@@ -97,7 +97,8 @@ int main(int argc, char **argv)
                    MVII_NATIVE_LAUNCH_FORWARD_AUDIO |
                    MVII_NATIVE_LAUNCH_FORWARD_VIDEO;
     launch.argc = 1;
-    launch.argv = guest_argv;
+    launch.argv_pointer_width = (uint32_t)sizeof(uintptr_t);
+    launch.argv_address = (uint64_t)(uintptr_t)guest_argv;
 
     const long result = abi->ioctl_fn((int)bridge_fd, MVII_NATIVE_IOCTL_LAUNCH, &launch);
     if (result < 0) {

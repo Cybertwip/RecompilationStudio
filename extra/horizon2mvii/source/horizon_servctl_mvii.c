@@ -10,12 +10,18 @@ static int service_fd = -1;
 static int open_service_device(void)
 {
     const minos_user_abi *abi = minos_current_user_abi;
-    if (service_fd >= 0) return service_fd;
+    int current = __atomic_load_n(&service_fd, __ATOMIC_ACQUIRE);
+    if (current >= 0) return current;
     if (!abi || !abi->open_fn) return -1;
     const long result = abi->open_fn(MVII_HORIZON_SERVICE_DEVICE, VIRTUA_O_RDWR, 0);
     if (result < 0) return -1;
-    service_fd = (int)result;
-    return service_fd;
+    int expected = -1;
+    if (!__atomic_compare_exchange_n(&service_fd, &expected, (int)result, 0,
+                                     __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        if (abi->close_fn) (void)abi->close_fn((int)result);
+        return expected;
+    }
+    return (int)result;
 }
 
 long mvii_horizon_servctl(unsigned int command,
@@ -25,6 +31,7 @@ long mvii_horizon_servctl(unsigned int command,
                           unsigned long argument4,
                           unsigned long argument5)
 {
+    if (command > HZN_SCTL_MEMWATCH_GET_CLEAR) return -22;
     const minos_user_abi *abi = minos_current_user_abi;
     const int fd = open_service_device();
     if (fd < 0 || !abi || !abi->ioctl_fn) return -38;

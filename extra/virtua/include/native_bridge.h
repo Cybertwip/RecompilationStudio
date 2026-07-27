@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 #define MVII_NATIVE_BRIDGE_DEVICE "/dev/native0"
-#define MVII_NATIVE_BRIDGE_ABI_VERSION 1u
+#define MVII_NATIVE_BRIDGE_ABI_VERSION 2u
 
 /* Stable ioctl command numbers shared by the tiny Virtua launchers and MVII. */
 #define MVII_NATIVE_IOCTL_QUERY  0x4D560100ul
@@ -47,8 +47,8 @@ typedef struct mvii_native_launch {
     uint64_t guest_entry;
     uint64_t flags;
     int32_t argc;
-    uint32_t reserved;
-    const char *const *argv;
+    uint32_t argv_pointer_width;
+    uint64_t argv_address;
 } mvii_native_launch;
 
 #ifdef __cplusplus

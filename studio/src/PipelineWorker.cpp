@@ -346,6 +346,7 @@ QString makeVirtuaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E rm -rf \"${_PSX_STAGE}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E make_directory \"${_PSX_STAGE}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_VIRTUA}\" \"${_PSX_STAGE}/%1.virtua\"\n").arg(bundleName);
+  cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png\" \"${_PSX_STAGE}/AppIcon.png\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_directory \"${_PSX_PACKAGE_RESOURCES}\" \"${_PSX_STAGE}\"\n");
   cmake += QStringLiteral("  COMMAND ${CMAKE_COMMAND} -E copy_if_different \"${_PSX_GAME_MANIFEST}\" \"${_PSX_STAGE}/game.manifest.json\"\n");
   cmake += QStringLiteral("  VERBATIM)\n");
@@ -1913,10 +1914,15 @@ void PipelineWorker::run(PipelineRequest request) {
   nextStage(QStringLiteral("Create %1 app project")
               .arg(targetPlatformDisplayName(request.targetPlatform)));
   const QString bundleId = sanitizedBundleIdentifier(game.serial, request.windowTitle);
+  // Virtua takes the PNG, like Linux: MVII has no bundle format to describe and
+  // no iconutil to describe it with. It used to fall through to the macOS arm
+  // below, where the platform metadata path is empty by construction, and the
+  // stage died on `Could not write : No file name specified` -- after Ghidra,
+  // both recompiler passes and the audit had already run.
   const QString iconPath = QDir(projectDir).filePath(
     windowsTarget ? QStringLiteral("AppIcon.ico")
-                  : linuxTarget ? QStringLiteral("AppIcon.png")
-                                : QStringLiteral("AppIcon.icns"));
+                  : (linuxTarget || virtuaTarget) ? QStringLiteral("AppIcon.png")
+                                                  : QStringLiteral("AppIcon.icns"));
   const QString platformMetadataPath = windowsTarget
     ? QDir(projectDir).filePath(QStringLiteral("AppIcon.rc"))
     : macosTarget ? QDir(projectDir).filePath(QStringLiteral("Info.plist"))
@@ -1927,7 +1933,7 @@ void PipelineWorker::run(PipelineRequest request) {
       fail(error, workspace);
       return;
     }
-  } else if (linuxTarget) {
+  } else if (linuxTarget || virtuaTarget) {
     if (!createPngIcon(iconSourcePath, iconPath, error)) {
       fail(error, workspace);
       return;

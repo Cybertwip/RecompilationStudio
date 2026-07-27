@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <new>
 
 #include <errno.h>
@@ -486,19 +487,37 @@ uint64_t now_us() {
 
 void yield_now() { (void)sched_yield(); }
 
-void sleep_until(uint64_t deadline_us) {
-    for (;;) {
+void sleepFor(std::chrono::nanoseconds duration)
+{
+    if (duration.count() <= 0) return;
+    timespec ts {};
+    ts.tv_sec = static_cast<time_t>(duration.count() / std::nano::den);
+    ts.tv_nsec = static_cast<long>(duration.count() % std::nano::den);
+    nanosleep(&ts, nullptr);
+}
+
+void sleep_until(uint64_t deadline_us)
+{
+    for (;;)
+    {
         const uint64_t now = now_us();
-        if (now >= deadline_us) return;
+        if (now >= deadline_us)
+            return;
+
         const uint64_t remaining = deadline_us - now;
+
         // usleep() lands on MVII's sleep_until_us syscall, which parks the
         // process and lets the scheduler run everything else — that is what
         // makes an idle frame cheap instead of a spin. Short waits are handed
         // to the yield instead: parking for a few hundred microseconds costs
         // more in scheduler round-trip than it saves.
-        if (remaining > 1000ull) {
-            ::usleep(static_cast<useconds_t>(remaining - 500ull));
-        } else {
+        if (remaining > 1000ull)
+        {
+            // sleep a little less than the remaining time so we don't overshoot
+            sleepFor(std::chrono::nanoseconds((remaining - 500ull) * 1000ull));
+        }
+        else
+        {
             (void)sched_yield();
         }
     }

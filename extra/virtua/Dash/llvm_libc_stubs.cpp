@@ -638,6 +638,24 @@ static uint64_t timespec_to_us(const struct timespec* ts) {
     return static_cast<uint64_t>(ts->tv_sec) * kMicrosPerSecond + static_cast<uint64_t>(ts->tv_nsec / 1000);
 }
 
+// As above but rounding up, for *durations* rather than deadlines. A relative
+// wait shorter than a microsecond is still a wait, and truncating it to zero is
+// what turns std::this_thread::sleep_for(std::chrono::nanoseconds(...)) -- which
+// rounds its own argument up to nanoseconds -- into a busy loop.
+static uint64_t timespec_to_us_ceil(const struct timespec* ts) {
+    if (!ts) return 0;
+    return static_cast<uint64_t>(ts->tv_sec) * kMicrosPerSecond +
+           (static_cast<uint64_t>(ts->tv_nsec) + 999ULL) / 1000ULL;
+}
+
+// How many times a timed sleep will re-ask after an early wake before it gives
+// up and returns. Normally the first pass is the only one; the cap exists so
+// that a deadline the clock can never reach cannot become an unbounded park.
+constexpr unsigned kSleepRetryLimit = 64;
+
+// Rounds spent in the scheduler when there is no usable clock to wait against.
+constexpr unsigned kSleepYieldRounds = 8;
+
 static uint64_t clamped_deadline_us(uint64_t start_us, uint64_t duration_us) {
     return duration_us > UINT64_MAX - start_us ? UINT64_MAX : start_us + duration_us;
 }
@@ -1752,21 +1770,80 @@ int clock_getres(clockid_t clock_id, struct timespec* tp) {
     return 0;
 }
 
+// A relative wait, anchored on the same clock the kernel wakes sleepers against.
+// Everything in the guest that waits ends up here: usleep(), the C++ sleep_for
+// below, and any port that pauses between frames.
+//
+// Four things here are load-bearing.
+//
+// The request is validated. A negative tv_sec cast straight to uint64_t becomes
+// a deadline about half a million years out, so a caller that got its own
+// arithmetic wrong used to be rewarded with a permanent park rather than an
+// error.
+//
+// The duration rounds up, not down. See timespec_to_us_ceil().
+//
+// The retry loop is bounded, and this is the important one. sys_sleep_until_us()
+// takes an *absolute* deadline in the kernel's timebase, and the old loop
+// re-armed it until the guest's own clock passed that deadline. If the clock
+// stops advancing -- because sys_gettimeofday() started failing and
+// monotonic_microseconds() therefore reads zero, or because the platform counter
+// wedged -- the condition can never come true, and the guest sleeps, wakes,
+// reads the same time, and sleeps again, forever. From outside that is
+// indistinguishable from a process that simply stopped drawing: it has a healthy
+// heartbeat, a sane wake deadline, and a framebuffer generation that never moves
+// again. Bounding the loop turns a silent freeze into an early return, which the
+// caller can see and recover from.
+//
+// Finally rem is honoured, because libc++'s own sleep_for is
+// `while (nanosleep(&ts, &ts) == -1 && errno == EINTR);` and feeds the remainder
+// straight back in.
 VIRTUA_WEAK_SYMBOL int nanosleep(const struct timespec* req, struct timespec* rem) {
-    if (!req) {
-        errno = EINVAL;
-        return -1;
-    }
     if (rem) {
         rem->tv_sec = 0;
         rem->tv_nsec = 0;
     }
+    if (!req || req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= 1000000000L) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const uint64_t duration = timespec_to_us_ceil(req);
+    if (duration == 0) {
+        // Shorter than the clock can express. A yield is the honest answer: it
+        // is the smallest wait this machine has, and it is not nothing.
+        sched_yield();
+        return 0;
+    }
+
     const uint64_t start = monotonic_microseconds();
-    const uint64_t duration = timespec_to_us(req);
+    if (start == 0) {
+        // No usable clock on this side. The kernel still keeps one, so ask it
+        // for the sleep as a plain duration; if even that is refused, the
+        // scheduler is the only thing left to wait on and a bounded number of
+        // rounds there beats spinning until the watchdog notices.
+        if (sys_sleep_until_us(duration) == 0) return 0;
+        for (unsigned i = 0; i < kSleepYieldRounds; ++i) sched_yield();
+        return 0;
+    }
+
     const uint64_t deadline = clamped_deadline_us(start, duration);
-    if (duration == 0 || sys_sleep_until_us(deadline) == 0) return 0;
-    while (monotonic_microseconds() < deadline) {
-        sleep_or_yield_until(deadline);
+    uint64_t previous = start;
+    for (unsigned attempt = 0; attempt < kSleepRetryLimit; ++attempt) {
+        if (sys_sleep_until_us(deadline) != 0) sched_yield();
+        const uint64_t now = monotonic_microseconds();
+        if (now >= deadline) return 0;
+        // The clock did not move, so nothing this loop can do will move it
+        // either. Report what is left and let the caller decide.
+        if (now <= previous) break;
+        previous = now;
+    }
+
+    const uint64_t now = monotonic_microseconds();
+    if (rem && now < deadline) {
+        const uint64_t left = deadline - now;
+        rem->tv_sec = static_cast<time_t>(left / kMicrosPerSecond);
+        rem->tv_nsec = static_cast<long>((left % kMicrosPerSecond) * 1000ULL);
     }
     return 0;
 }

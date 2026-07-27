@@ -42,12 +42,22 @@ endif()
 set(GBA_MVII_SDK "${VIRTUA_ROOT}/sdk/arm-eabi")
 set(GBA_MVII_SRC "${CMAKE_CURRENT_LIST_DIR}/src")
 
-set(GBA_MVII_OUTPUT_NAME "gba-runtime" CACHE STRING
-    "Base name of the emitted .virtua executable")
-set(GBA_MVII_ROM "" CACHE FILEPATH
-    "Optional ROM to stage next to the runtime as game.gba")
-set(GBA_MVII_STAGE_DIR "" CACHE PATH
-    "Optional directory to stage the runtime and ROM into")
+# Plain variables, not cache entries: -D on the command line still defines them,
+# and an enclosing project can set() them before add_subdirectory() without
+# having to FORCE its way past a cached default.
+#
+#   GBA_MVII_OUTPUT_NAME  base name of the emitted .virtua executable
+#   GBA_MVII_ROM          optional ROM to stage beside it as game.gba
+#   GBA_MVII_STAGE_DIR    optional directory to stage the pair into
+if(NOT DEFINED GBA_MVII_OUTPUT_NAME OR GBA_MVII_OUTPUT_NAME STREQUAL "")
+    set(GBA_MVII_OUTPUT_NAME "gba-runtime")
+endif()
+if(NOT DEFINED GBA_MVII_ROM)
+    set(GBA_MVII_ROM "")
+endif()
+if(NOT DEFINED GBA_MVII_STAGE_DIR)
+    set(GBA_MVII_STAGE_DIR "")
+endif()
 
 include("${VIRTUA_ROOT}/CMake/GoTooling.cmake")
 

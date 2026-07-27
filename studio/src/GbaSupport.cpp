@@ -403,28 +403,32 @@ QString generatedGbaPackToml(const PipelineRequest& request,
 
 
 QString generatedGbaNativeProjectCMake(const QString& bundleName) {
+  // CXX and ASM are both required: gba-to-mvii is the C++ interpreter core and
+  // Dash contributes crt.s. The old project declared "C ASM" because all it
+  // built was a 119-line launcher stub.
   return QStringLiteral(R"CMAKE(cmake_minimum_required(VERSION 3.20)
-project(GeneratedGbaVirtuaNative C ASM)
-include("${CMAKE_CURRENT_SOURCE_DIR}/virtua/CMake/VirtuaArmApp.cmake")
-virtua_add_armv7_app(gba_native_app GUI COOPERATIVE
-  OUTPUT_NAME %1
-  SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/virtua/native/gba_native_main.c")
+project(GeneratedGbaVirtuaNative C CXX ASM)
+set(VIRTUA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/virtua")
+set(GBA_MVII_OUTPUT_NAME %1)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/gba-to-mvii" "${CMAKE_BINARY_DIR}/gba-to-mvii")
 set(_GBA_STAGE "${CMAKE_BINARY_DIR}/steganos-package/gba-runtime/$<CONFIG>")
 set(_GBA_STAMP "${CMAKE_BINARY_DIR}/gba-virtua-package.stamp")
 add_custom_command(OUTPUT "${_GBA_STAMP}"
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_GBA_STAGE}"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${_GBA_STAGE}"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${gba_native_app_VIRTUA_FILE}" "${_GBA_STAGE}/%2.virtua"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${GBA_TO_MVII_VIRTUA_FILE}" "${_GBA_STAGE}/%2.virtua"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba" "${_GBA_STAGE}/game.gba"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json" "${_GBA_STAGE}/game.manifest.json"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip" "${_GBA_STAGE}/PSXRecomp-Proof.zip"
   COMMAND ${CMAKE_COMMAND} -E touch "${_GBA_STAMP}"
-  DEPENDS gba_native_app
+  DEPENDS gba-to-mvii
+          "${GBA_TO_MVII_VIRTUA_FILE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba"
           "${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json"
           "${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip"
   VERBATIM)
 add_custom_target(gba-runtime ALL DEPENDS "${_GBA_STAMP}")
+add_dependencies(gba-runtime gba-to-mvii)
 )CMAKE")
     .arg(cmakeQuoted(bundleName), bundleName);
 }

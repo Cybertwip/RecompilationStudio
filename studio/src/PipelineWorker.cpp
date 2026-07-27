@@ -3559,10 +3559,12 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     return;
   }
   const QString virtuaRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/virtua"));
-  if (!QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("include/native_bridge.h"))).isFile() ||
-      !QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("native/gba_native_main.c"))).isFile() ||
-      !QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("binary/virtua.go"))).isFile()) {
-    fail(QStringLiteral("The framework does not contain the bundled Virtua/MVII native bridge SDK."));
+  const QString runtimeRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-to-mvii"));
+  if (!QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("Dash/CMakeLists.txt"))).isFile() ||
+      !QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("binary/virtua.go"))).isFile() ||
+      !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("CMakeLists.txt"))).isFile() ||
+      !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("src/mvii/main.cpp"))).isFile()) {
+    fail(QStringLiteral("The framework does not contain the bundled Virtua SDK and the gba-to-mvii runtime."));
     return;
   }
   const QString cmake = findExecutable(QStringLiteral("cmake"));
@@ -3575,15 +3577,16 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   }
 
   const QString romSha256 = sha256File(request.romPath, error);
-  const QString bridgeSha256 = sha256File(
-    QDir(virtuaRoot).filePath(QStringLiteral("include/native_bridge.h")), error);
-  if (romSha256.isEmpty() || bridgeSha256.isEmpty()) {
+  const QString runtimeSha256 = sha256File(
+    QDir(runtimeRoot).filePath(QStringLiteral("src/mvii/main.cpp")), error);
+  if (romSha256.isEmpty() || runtimeSha256.isEmpty()) {
     fail(error.isEmpty() ? QStringLiteral("The native GBA inputs could not be hashed.") : error);
     return;
   }
-  emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · native entry 0x08000000")
+  emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · cartridge entry 0x08000000")
     .arg(game.title, game.gameCode).arg(game.romSize));
-  emit logLine(QStringLiteral("Virtua native bridge ABI: v2 · header SHA-256 %1").arg(bridgeSha256));
+  emit logLine(QStringLiteral("gba-to-mvii runtime: ARM7TDMI interpreter + standalone BIOS HLE · main.cpp SHA-256 %1")
+    .arg(runtimeSha256));
 
   nextStage(QStringLiteral("Create Virtua ARM native source repository"));
   const QString root = QDir::tempPath();
@@ -3600,6 +3603,8 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   const QString inputsDir = QDir(projectDir).filePath(QStringLiteral("package_inputs"));
   if (!QDir().mkpath(proofDir) || !QDir().mkpath(inputsDir) ||
       !copySourceDirectory(virtuaRoot, QDir(projectDir).filePath(QStringLiteral("virtua")), error) ||
+      !copySourceDirectory(runtimeRoot,
+                           QDir(projectDir).filePath(QStringLiteral("gba-to-mvii")), error) ||
       !copyFileReplacing(request.romPath,
                          QDir(inputsDir).filePath(QStringLiteral("game.gba")), error)) {
     fail(error.isEmpty() ? QStringLiteral("Could not stage the Virtua native source tree.") : error);
@@ -3611,22 +3616,25 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   manifest.insert(QStringLiteral("execution"), QStringLiteral("native-arm"));
   manifest.insert(QStringLiteral("rom"), QStringLiteral("game.gba"));
   const QJsonObject inputProof{
-    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("schema"), 2 },
     { QStringLiteral("system"), QStringLiteral("gba") },
     { QStringLiteral("execution"), QStringLiteral("native-arm") },
-    { QStringLiteral("guest_kind"), QStringLiteral("MVII_NATIVE_GUEST_GBA_ARM7TDMI") },
-    { QStringLiteral("bridge_abi"), 2 },
-    { QStringLiteral("bridge_header_sha256"), bridgeSha256 },
+    { QStringLiteral("guest_kind"), QStringLiteral("MVII_GBA_INTERPRETER_ARM7TDMI") },
+    { QStringLiteral("runtime"), QStringLiteral("gba-to-mvii") },
+    { QStringLiteral("runtime_main_sha256"), runtimeSha256 },
+    { QStringLiteral("bios"), QStringLiteral("standalone-hle") },
     { QStringLiteral("rom_sha256"), romSha256 },
     { QStringLiteral("rom_size"), QString::number(game.romSize) },
     { QStringLiteral("entry"), QStringLiteral("0x08000000") },
   };
   const QString readme = QStringLiteral(
-    "# %1 — GBA Native for Virtua ARM\n\n"
-    "This source export builds a small cooperative ARM `.virtua` executable. "
-    "The launcher opens `game.gba`, negotiates the versioned MVII `/dev/native0` "
-    "ABI, requires native GBA capability, and submits the ROM as an ARM7TDMI "
-    "foreground guest. It does not contain an ARM interpreter or translated ROM code.\n\n"
+    "# %1 — GBA for MVII / Virtua ARM\n\n"
+    "This source export builds a cooperative ARM `.virtua` executable containing "
+    "the `gba-to-mvii` runtime: an ARM7TDMI interpreter, the GBA device model "
+    "(PPU, APU, DMA, timers, IRQ, save chip), and a standalone BIOS HLE, driven "
+    "against MVII's `/dev/fb0`, `/dev/input0` and `/dev/dac0`. No BIOS image is "
+    "required and no ROM code is translated ahead of time — `game.gba` is "
+    "interpreted as it runs.\n\n"
     "## Build\n\n```sh\n"
     "cmake -S . -B build -G Ninja \\\n"
     "  -DCMAKE_TOOLCHAIN_FILE=virtua/CMake/VirtuaArmToolchain.cmake \\\n"
@@ -3803,14 +3811,15 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   const QString executableHash = sha256File(executable, error);
   if (executableHash.isEmpty()) { fail(error); return; }
   const QJsonObject buildProof{
-    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("schema"), 2 },
     { QStringLiteral("format"), QStringLiteral("virtua-v3") },
     { QStringLiteral("architecture"), QStringLiteral("arm32") },
     { QStringLiteral("cooperative"), true },
     { QStringLiteral("executable"), QFileInfo(executable).fileName() },
     { QStringLiteral("executable_sha256"), executableHash },
     { QStringLiteral("rom_sha256"), romSha256 },
-    { QStringLiteral("bridge_abi"), 2 },
+    { QStringLiteral("runtime"), QStringLiteral("gba-to-mvii") },
+    { QStringLiteral("runtime_main_sha256"), runtimeSha256 },
     { QStringLiteral("executed_during_verification"), false },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_native_build.json")),

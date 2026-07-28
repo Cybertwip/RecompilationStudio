@@ -1436,7 +1436,7 @@ long minos_user_gettimeofday(void* tv, void* tz) {
     return sys_gettimeofday(tv, tz);
 }
 
-int gettimeofday(struct timeval* tv, void* tz) noexcept {
+int gettimeofday(struct timeval* tv, void* tz) {
     const long result = sys_gettimeofday(tv, tz);
     if (result < 0) {
         errno = static_cast<int>(-result);

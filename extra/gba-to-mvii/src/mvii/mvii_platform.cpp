@@ -214,29 +214,6 @@ bool Video::open(int width, int height) {
         return false;
     }
 
-    // BGR555 -> RGBA8 for all 32768 colours the PPU can emit. Built here, on
-    // the heap, so it adds nothing to the packaged image; the 5-to-8-bit
-    // expansion replicates the top bits so that 0x1F reaches 0xFF rather than
-    // 0xF8, which is what keeps whites white.
-    lut_ = new (std::nothrow) uint32_t[1u << 15];
-    if (!lut_) {
-        logf("gba: out of memory for the colour table; running without video\n");
-        ::close(fd_);
-        fd_ = -1;
-        return false;
-    }
-    for (unsigned v = 0; v < (1u << 15); ++v) {
-        const unsigned r5 = v & 0x1Fu;
-        const unsigned g5 = (v >> 5) & 0x1Fu;
-        const unsigned b5 = (v >> 10) & 0x1Fu;
-        const uint32_t r8 = (r5 << 3) | (r5 >> 2);
-        const uint32_t g8 = (g5 << 3) | (g5 >> 2);
-        const uint32_t b8 = (b5 << 3) | (b5 >> 2);
-        // Little-endian: byte 0 is R, byte 1 G, byte 2 B, byte 3 A — the
-        // channel order the kernel's RGBA8 surface expects.
-        lut_[v] = r8 | (g8 << 8) | (b8 << 16) | 0xFF000000u;
-    }
-
     if (!remap()) {
         // No shared surface: fall back to staging + FB_IOCTL_SWAP_RGBA8, which
         // costs one extra full-frame copy through the kernel. At 240x160 that
@@ -299,8 +276,34 @@ void Video::flush() {
     (void)::ioctl(fd_, FB_IOCTL_SWAP_RGBA8, &draw);
 }
 
+// BGR555 -> RGBA8, computed rather than looked up.
+//
+// The obvious implementation of this is a 32768-entry table, and that is what
+// it was. It is the wrong shape for this part: 128 KB indexed by pixel value
+// against a Cortex-A7's 32 KB four-way L1D means most pixels are an L2 hit, and
+// an L2 hit here costs more than the dozen single-cycle ALU ops it was there to
+// avoid. Doing the arithmetic touches no memory at all, so it also stops the
+// conversion evicting the emulator's own working set once per frame — which is
+// the larger of the two effects, since the interpreter is what sets the frame
+// rate and it runs 150k instructions between presents.
+//
+// The 5-to-8-bit expansion replicates the top bits (v << 3 | v >> 2) so that
+// 0x1F reaches 0xFF rather than 0xF8, which is what keeps whites white.
+// Little-endian: byte 0 is R, byte 1 G, byte 2 B, byte 3 A — the channel order
+// the kernel's RGBA8 surface expects. Red is in the LOW five bits of the
+// source, because that is the GBA's own layout, not the framebuffer's.
+static inline uint32_t rgba8_from_bgr555(uint16_t v) {
+    const uint32_t r5 = v & 0x1Fu;
+    const uint32_t g5 = (v >> 5) & 0x1Fu;
+    const uint32_t b5 = (v >> 10) & 0x1Fu;
+    return ((r5 << 3) | (r5 >> 2)) |
+           (((g5 << 3) | (g5 >> 2)) << 8) |
+           (((b5 << 3) | (b5 >> 2)) << 16) |
+           0xFF000000u;
+}
+
 void Video::present(const uint16_t* bgr555) {
-    if (!bgr555 || !lut_) return;
+    if (!bgr555) return;
     int span = 0;
     uint8_t* dst = surface(span);
     if (!dst) return;
@@ -314,7 +317,7 @@ void Video::present(const uint16_t* bgr555) {
         uint32_t* out = reinterpret_cast<uint32_t*>(dst) +
                         static_cast<std::size_t>(y) * span;
         for (int x = 0; x < width_; ++x) {
-            out[x] = lut_[src[x] & 0x7FFFu];
+            out[x] = rgba8_from_bgr555(src[x]);
         }
     }
     flush();

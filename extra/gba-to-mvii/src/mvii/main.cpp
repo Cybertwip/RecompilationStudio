@@ -45,16 +45,40 @@ using gbamvii::logf;
 
 // ── configuration ──────────────────────────────────────────────────────────
 
-// One guest instruction in ~118 host ones is the optimistic case for an
-// interpreted ARM7TDMI on this part, so 256 steps is on the order of a tenth of
-// a millisecond — well inside a 120 Hz round, and cheap enough that the yield's
-// own cost stays under a percent. See the note on yield_now(): the decision of
-// whether the slice is actually spent belongs to the kernel, not to us.
-constexpr uint32_t kStepsPerYield = 256;
+// How much emulation runs between two offers of the CPU back to MVII.
+//
+// This is a rate, and the rate that matters is yields per second, not per
+// frame. MVII's slice is ~4.2 ms (`slice=` in the shell's sched report) and the
+// contract is that everything else on the box gets its turn at 120 Hz or
+// better; the guest satisfies both by asking several times per slice, and
+// nothing is bought by asking a hundred times per slice.
+//
+// A GBA frame is about 150k ARM7TDMI instructions (280,896 cycles at ~1.9
+// cycles each), so 256 was ~585 yields *per frame* — one every 60 us of guest
+// work, roughly seventy per slice. Each one is a call through the ABI table
+// into the kernel, a GPT read across the APB (uncached, and the counter that
+// mt6592_timer.c's own comment notes nobody had ever costed per frame) and a
+// walk of the kernel thread table, so seventy per slice is a measurable tax on
+// an interpreter that is already the thing setting the frame rate.
+//
+// 2048 asks roughly every 470 us: eight or nine times per slice, ~2000 times a
+// second — still an order of magnitude above the 120 Hz floor, with a
+// worst-case slice overrun of about a tenth of a slice. See the note on
+// yield_now(): whether the slice is actually spent stays the kernel's decision,
+// and this only changes how often it is asked.
+constexpr uint32_t kStepsPerYield = 2048;
 
 // Consecutive yields with no frame in sight before the loop stops trusting the
 // frame boundary to poll input. See the note at the use site.
-constexpr uint32_t kStallPollSlices = 1024;
+//
+// Denominated in instructions rather than in slices so that it keeps meaning
+// the same thing when the constant above moves: a quarter of a million
+// instructions is well past two frames' worth of work, so this never fires
+// while the emulator is making progress. The max() keeps it at one slice
+// minimum if kStepsPerYield ever grows past the whole budget.
+constexpr uint32_t kStallPollInstructions = 262144;
+constexpr uint32_t kStallPollSlices =
+    kStallPollInstructions / kStepsPerYield > 1 ? kStallPollInstructions / kStepsPerYield : 1;
 
 // The GBA's real refresh: 16777216 / (308 * 228 * 4) = 59.727 Hz.
 constexpr uint64_t kFrameUs = 16743;

@@ -23,13 +23,8 @@ struct timezone {
 };
 #endif
 
-#ifdef __cplusplus
-int settimeofday(const struct timeval *tv, const struct timezone *tz) noexcept;
-int utimes(const char *path, const struct timeval times[2]) noexcept;
-#else
 int settimeofday(const struct timeval *tv, const struct timezone *tz);
 int utimes(const char *path, const struct timeval times[2]);
-#endif
 
 #ifdef __cplusplus
 }

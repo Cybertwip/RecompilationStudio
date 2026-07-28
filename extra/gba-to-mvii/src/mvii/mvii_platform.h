@@ -100,7 +100,6 @@ private:
     uint8_t*  mapped_  = nullptr;  // kernel back buffer, when MAP_RGBA8 works
     int       pitch_   = 0;        // mapped_ stride, in pixels
     uint8_t*  staging_ = nullptr;  // owned fallback buffer for SWAP_RGBA8
-    uint32_t* lut_     = nullptr;  // BGR555 -> RGBA8, 1 << 15 entries
 };
 
 // ── input ──────────────────────────────────────────────────────────────────

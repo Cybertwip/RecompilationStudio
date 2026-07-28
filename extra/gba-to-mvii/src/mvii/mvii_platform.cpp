@@ -197,8 +197,6 @@ const uint8_t* glyph_for(char ch) {
 Video::~Video() {
     delete[] staging_;
     staging_ = nullptr;
-    delete[] lut_;
-    lut_ = nullptr;
     if (fd_ >= 0) ::close(fd_);
     fd_ = -1;
 }

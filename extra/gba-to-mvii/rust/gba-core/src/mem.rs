@@ -405,6 +405,13 @@ impl MemMap {
     /// gap collapse into one held ledge (an audible thump per gap).
     fn pump_audio(&mut self, until: u64) {
         let until = until.min(self.clock);
+        // Bus::tick() calls this once per emulated instruction, but the
+        // grid only advances every AUDIO_SAMPLE_CYCLES (256) — so ~99 of
+        // every 100 calls have nothing to do and exist only to pay for
+        // the three take()/restore pairs below. Leave before that.
+        if self.audio_cursor > until {
+            return;
+        }
         // The shadow mixers render on the same grid; hoisted out of
         // `self` so they can read guest memory while we mutate the taps.
         let mut mp2k = self.mp2k.take();

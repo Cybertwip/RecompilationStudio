@@ -235,6 +235,24 @@ private:
     uint64_t frames_  = 0;
     bool     running_ = true;
 
+    // Frame-time attribution, reported alongside the fps line. The whole point
+    // is to answer "where did the frame go" in one run instead of by argument:
+    // emulation, the framebuffer conversion+present, audio, and the pacing park
+    // are the only four things this loop does. Three clock reads per frame on
+    // top of the one the loop already takes, so it stays on in normal builds --
+    // a number nobody can see is a number nobody trusts.
+    uint64_t emu_us_       = 0;   // run_steps + the yields between them
+    uint64_t present_us_   = 0;
+    uint64_t audio_us_     = 0;
+    uint64_t sleep_us_     = 0;
+    uint64_t slices_       = 0;   // run_steps calls, i.e. yields, this window
+    // The per-yield cost needs two clock reads *per yield* to measure, which is
+    // ~60x the loop's own sampling rate and would distort what it measures. So
+    // sample it on one frame in 64 and scale: enough to catch a yield that has
+    // become expensive, cheap enough to leave in.
+    uint64_t yield_ns_     = 0;
+    uint64_t yield_count_  = 0;
+
     // Cleared the first time the frame clock fails to reach a deadline. From
     // then on the loop runs unpaced: a game running too fast is a bug, a window
     // that never updates again is not distinguishable from a crash.
@@ -677,11 +695,21 @@ int Runtime::run() {
     save_next_probe_us_    = gbamvii::now_us() + kSaveProbeUs;
     uint32_t stalled_slices = 0;
 
+    uint64_t span_us = gbamvii::now_us();   // start of this frame's emulate span
+
     while (running_) {
         // Bounded work, then a turn for everything else. run_steps returns as
         // soon as the PPU finishes a frame, so this never overshoots one.
         const uint32_t frame_ready = gba_mvii_run_steps(machine_, kStepsPerYield);
-        gbamvii::yield_now();
+        ++slices_;
+        if ((frames_ & 63u) == 0u) {
+            const uint64_t y0 = gbamvii::now_us();
+            gbamvii::yield_now();
+            yield_ns_ += (gbamvii::now_us() - y0) * 1000ull;
+            ++yield_count_;
+        } else {
+            gbamvii::yield_now();
+        }
         if (!frame_ready) {
             // Input is polled on frame boundaries, which is the right cadence
             // while frames are arriving — nothing on screen changes faster. A
@@ -699,19 +727,28 @@ int Runtime::run() {
         }
         stalled_slices = 0;
 
+        const uint64_t t_emu = gbamvii::now_us();
         present_frame();
+        const uint64_t t_present = gbamvii::now_us();
         pump_audio();
 
         const uint64_t now = gbamvii::now_us();
+        emu_us_     += t_emu - span_us;
+        present_us_ += t_present - t_emu;
+        audio_us_   += now - t_present;
+
         flush_save_if_settled(now);
 
         // Pace to the GBA's refresh when we are ahead of it, and simply carry on
         // when we are behind — which on this part is the case we should expect.
         // sleep_until() parks the process, so an early frame hands its slack to
         // the rest of the box rather than spinning it away.
+        span_us = now;   // next frame's emulate span starts here unless we park
         if (pacing_ok_ && now < next_frame_us) {
             if (gbamvii::sleep_until(next_frame_us)) {
                 next_frame_us += kFrameUs;
+                span_us = gbamvii::now_us();
+                sleep_us_ += span_us - now;
             } else {
                 // The clock did not reach the deadline in the time we were
                 // willing to wait for it, so it is not a clock we can pace
@@ -748,9 +785,20 @@ int Runtime::run() {
         }
 
         if (now >= report_us) {
-            logf("gba: %u fps\n", static_cast<unsigned>((frames_ - report_frames) / 5));
+            const uint64_t n = (frames_ - report_frames) ? (frames_ - report_frames) : 1;
+            logf("gba: %u fps — emu %llu present %llu audio %llu sleep %llu us/frame, "
+                 "%llu slices/frame, yield %llu ns\n",
+                 static_cast<unsigned>((frames_ - report_frames) / 5),
+                 static_cast<unsigned long long>(emu_us_ / n),
+                 static_cast<unsigned long long>(present_us_ / n),
+                 static_cast<unsigned long long>(audio_us_ / n),
+                 static_cast<unsigned long long>(sleep_us_ / n),
+                 static_cast<unsigned long long>(slices_ / n),
+                 static_cast<unsigned long long>(yield_count_ ? yield_ns_ / yield_count_ : 0));
             report_frames = frames_;
             report_us = now + 5000000ull;
+            emu_us_ = present_us_ = audio_us_ = sleep_us_ = slices_ = 0;
+            yield_ns_ = yield_count_ = 0;
         }
     }
 

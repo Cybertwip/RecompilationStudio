@@ -5,7 +5,17 @@
 #                      -mfloat-abi=soft in CMakeLists.txt. A mismatch here is
 #                      not a link error, it is a silently wrong calling
 #                      convention for every f64 that crosses the boundary.
-#   +strict-align      mirrors -mno-unaligned-access on the C++ side.
+#   +strict-align      mirrors -mno-unaligned-access on the C++ side. Note this
+#                      is not free: every from_le_bytes() on a possibly-
+#                      unaligned slice becomes four byte loads and a shift
+#                      chain instead of one ldr, and an interpreter does that
+#                      on each fetch and each guest memory access. The MMU maps
+#                      DRAM Normal (mt6592_mmu.c) and SCTLR.A is 0, so the
+#                      hardware would in fact take the unaligned access — if
+#                      the frame breakdown lands on emulation, dropping this
+#                      (both halves together) is the first lever to pull.
+#   target-cpu         cortex-a7: in-order, dual-issue, VFPv4/NEON. Without it
+#                      LLVM schedules for a generic ARMv7 pipeline model.
 #   relocation-model   static: absolute data references become R_ARM_ABS32,
 #                      which is what the .virtua packager rewrites (see
 #                      relocationValue() in extra/virtua/binary/virtua.go).
@@ -19,4 +29,5 @@ target = "armv7a-none-eabi"
 rustflags = [
     "-C", "relocation-model=static",
     "-C", "target-feature=+strict-align",
+    "-C", "target-cpu=cortex-a7",
 ]

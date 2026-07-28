@@ -251,6 +251,7 @@ int main(int argc, char** argv) {
     QStringLiteral("Studio Test Advance"));
   check(!gbaNativeCmake.contains(QStringLiteral("set(VIRTUA_ROOT")) &&
           gbaNativeCmake.contains(QStringLiteral("add_subdirectory(")) &&
+          gbaNativeCmake.contains(QStringLiteral("AppIcon.png")) &&
           gbaNativeCmake.contains(QStringLiteral("Studio Test Advance.virtua")) &&
           gbaNativeCmake.contains(QStringLiteral("add_custom_target(gba-runtime")),
         QStringLiteral("generated native GBA CMake consumes external PowerEngine bindings"));
@@ -627,6 +628,8 @@ int main(int argc, char** argv) {
           psxstudio::gameManifestForRequest(gipRequest)
             .value(QStringLiteral("executable")).toString() ==
               QStringLiteral("Evil Zone (Europe).virtua") &&
+          psxstudio::gameManifestForRequest(gipRequest)
+            .value(QStringLiteral("icon")).toString() == QStringLiteral("AppIcon.png") &&
           gipRequest.toJson().value(QStringLiteral("powerengine_root")).toString() ==
             gipRequest.powerEngineRoot &&
           gipRequest.toJson().value(QStringLiteral("llvm_root")).toString() ==

@@ -169,9 +169,13 @@ private:
   QString psxInputPath_;
   QString psxBiosPath_;
   QString psxBatchDirectory_;
+  QString psxIconPath_;
+  QString psxName_;
   QString gbaInputPath_;
   QString gbaBiosPath_;
   QString gbaBatchDirectory_;
+  QString gbaIconPath_;
+  QString gbaName_;
   QStringList selectedBins_;
   QList<BatchGameEntry> batchEntries_;
   QList<PipelineRequest> pendingRequests_;

@@ -3625,6 +3625,14 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     fail(QStringLiteral("The window title cannot be converted to a valid app name."));
     return;
   }
+  const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
+    ? QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg")
+    : request.iconPath;
+  if (!QFileInfo(iconSourcePath).isFile() &&
+      !iconSourcePath.startsWith(QStringLiteral(":/"))) {
+    fail(QStringLiteral("The selected app icon is not readable."));
+    return;
+  }
   if (!QFileInfo(request.outputDirectory).isDir() ||
       !QFileInfo(request.outputDirectory).isWritable()) {
     fail(QStringLiteral("Select a writable output directory."));
@@ -3690,7 +3698,9 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
       !copySourceDirectory(runtimeRoot,
                            QDir(projectDir).filePath(QStringLiteral("gba-to-mvii")), error) ||
       !copyFileReplacing(request.romPath,
-                         QDir(inputsDir).filePath(QStringLiteral("game.gba")), error)) {
+                         QDir(inputsDir).filePath(QStringLiteral("game.gba")), error) ||
+      !createPngIcon(iconSourcePath,
+                     QDir(projectDir).filePath(QStringLiteral("AppIcon.png")), error)) {
     fail(error.isEmpty() ? QStringLiteral("Could not stage the Virtua native source tree.") : error);
     return;
   }
@@ -3706,6 +3716,9 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     { QStringLiteral("guest_kind"), QStringLiteral("MVII_GBA_INTERPRETER_ARM7TDMI") },
     { QStringLiteral("runtime"), QStringLiteral("gba-to-mvii") },
     { QStringLiteral("runtime_main_sha256"), runtimeSha256 },
+    { QStringLiteral("name"), request.windowTitle },
+    { QStringLiteral("icon"), QStringLiteral("AppIcon.png") },
+    { QStringLiteral("custom_icon"), !request.iconPath.trimmed().isEmpty() },
     { QStringLiteral("bios"), QStringLiteral("standalone-hle") },
     { QStringLiteral("rom_sha256"), romSha256 },
     { QStringLiteral("rom_size"), QString::number(game.romSize) },

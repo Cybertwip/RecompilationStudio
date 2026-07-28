@@ -266,11 +266,15 @@ QJsonObject gameManifestForRequest(const PipelineRequest& request) {
     case TargetPlatform::All:
       break;
   }
-  return {
+  QJsonObject manifest{
     { QStringLiteral("executable"), executable },
     { QStringLiteral("name"), request.windowTitle },
     { QStringLiteral("platform"), targetPlatformDisplayName(request.targetPlatform) },
   };
+  if (request.targetPlatform == TargetPlatform::VirtuaArm) {
+    manifest.insert(QStringLiteral("icon"), QStringLiteral("AppIcon.png"));
+  }
+  return manifest;
 }
 
 QString createMacosInspectionAlias(const QString& sourcePath,

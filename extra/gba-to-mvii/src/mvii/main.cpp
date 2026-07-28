@@ -750,6 +750,9 @@ int Runtime::run() {
                 span_us = gbamvii::now_us();
                 sleep_us_ += span_us - now;
             } else {
+
+                gbamvii::yield_now();
+
                 // The clock did not reach the deadline in the time we were
                 // willing to wait for it, so it is not a clock we can pace
                 // against. Stop trying: the previous code looped here until the

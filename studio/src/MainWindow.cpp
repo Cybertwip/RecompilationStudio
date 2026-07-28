@@ -59,6 +59,10 @@ QString batchIconSettingKey(const QString& id) {
   return QStringLiteral("batch/icons/%1").arg(id);
 }
 
+QString batchNameSettingKey(const QString& id) {
+  return QStringLiteral("batch/names/%1").arg(id);
+}
+
 QFrame* makeCard(const QString& objectName, QWidget* parent) {
   auto* frame = new QFrame(parent);
   frame->setFrameShape(QFrame::StyledPanel);
@@ -793,6 +797,20 @@ void MainWindow::loadSettings() {
   gbaInputPath_ = settings.value(QStringLiteral("paths/gba_rom")).toString();
   gbaBiosPath_ = settings.value(QStringLiteral("paths/gba_bios")).toString();
   gbaBatchDirectory_ = settings.value(QStringLiteral("batch/gba_directory")).toString();
+  const QString legacyIcon = settings.value(QStringLiteral("paths/icon")).toString();
+  const QString legacyName = settings.value(QStringLiteral("app/window_title")).toString();
+  psxIconPath_ = settings.value(
+    QStringLiteral("paths/psx_icon"),
+    currentSystem_ == SystemKind::PlayStation ? legacyIcon : QString()).toString();
+  gbaIconPath_ = settings.value(
+    QStringLiteral("paths/gba_icon"),
+    currentSystem_ == SystemKind::GameBoyAdvance ? legacyIcon : QString()).toString();
+  psxName_ = settings.value(
+    QStringLiteral("app/psx_name"),
+    currentSystem_ == SystemKind::PlayStation ? legacyName : QString()).toString();
+  gbaName_ = settings.value(
+    QStringLiteral("app/gba_name"),
+    currentSystem_ == SystemKind::GameBoyAdvance ? legacyName : QString()).toString();
   discEdit_->setText(currentSystem_ == SystemKind::GameBoyAdvance ? gbaInputPath_ : psxInputPath_);
   biosEdit_->setText(currentSystem_ == SystemKind::GameBoyAdvance ? gbaBiosPath_ : psxBiosPath_);
   batchCheck_->setChecked(settings.value(QStringLiteral("batch/enabled"), false).toBool());
@@ -802,7 +820,8 @@ void MainWindow::loadSettings() {
     QStringLiteral("app/platform"), targetPlatformKey(hostTargetPlatform())).toString();
   const int platformIndex = platformCombo_->findData(platformKey);
   platformCombo_->setCurrentIndex(platformIndex >= 0 ? platformIndex : 0);
-  iconEdit_->setText(settings.value(QStringLiteral("paths/icon")).toString());
+  iconEdit_->setText(currentSystem_ == SystemKind::GameBoyAdvance
+    ? gbaIconPath_ : psxIconPath_);
   outputEdit_->setText(settings.value(QStringLiteral("paths/output"),
                                       QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)).toString());
   certificateEdit_->setText(settings.value(QStringLiteral("paths/certificate")).toString());
@@ -811,7 +830,8 @@ void MainWindow::loadSettings() {
   powerEngineEdit_->setText(
     settings.value(QStringLiteral("paths/powerengine"), detectPowerEngineRoot()).toString());
   llvmEdit_->setText(settings.value(QStringLiteral("paths/llvm"), detectLlvmRoot()).toString());
-  titleEdit_->setText(settings.value(QStringLiteral("app/window_title")).toString());
+  titleEdit_->setText(currentSystem_ == SystemKind::GameBoyAdvance
+    ? gbaName_ : psxName_);
   biosPatchEnabled_->setChecked(settings.value(QStringLiteral("bios_patch/enabled"), false).toBool());
   biosInitialSplashEdit_->setText(settings.value(QStringLiteral("bios_patch/initial_image")).toString());
   biosHandoffImageEdit_->setText(settings.value(QStringLiteral("bios_patch/handoff_image")).toString());
@@ -842,14 +862,22 @@ void MainWindow::saveSettings() const {
   QString gbaInput = gbaInputPath_;
   QString gbaBios = gbaBiosPath_;
   QString gbaBatch = gbaBatchDirectory_;
+  QString psxIcon = psxIconPath_;
+  QString psxName = psxName_;
+  QString gbaIcon = gbaIconPath_;
+  QString gbaName = gbaName_;
   if (currentSystem_ == SystemKind::GameBoyAdvance) {
     gbaInput = discEdit_->text();
     gbaBios = biosEdit_->text();
     gbaBatch = batchDirectoryEdit_->text();
+    gbaIcon = iconEdit_->text();
+    gbaName = titleEdit_->text();
   } else {
     psxInput = discEdit_->text();
     psxBios = biosEdit_->text();
     psxBatch = batchDirectoryEdit_->text();
+    psxIcon = iconEdit_->text();
+    psxName = titleEdit_->text();
   }
   settings.setValue(QStringLiteral("app/system"), systemCombo_->currentData().toString());
   settings.setValue(QStringLiteral("app/platform"), platformCombo_->currentData().toString());
@@ -860,6 +888,11 @@ void MainWindow::saveSettings() const {
   settings.setValue(QStringLiteral("paths/psx_bios"), psxBios);
   settings.setValue(QStringLiteral("paths/gba_rom"), gbaInput);
   settings.setValue(QStringLiteral("paths/gba_bios"), gbaBios);
+  settings.setValue(QStringLiteral("paths/psx_icon"), psxIcon);
+  settings.setValue(QStringLiteral("paths/gba_icon"), gbaIcon);
+  settings.setValue(QStringLiteral("app/psx_name"), psxName);
+  settings.setValue(QStringLiteral("app/gba_name"), gbaName);
+  // Keep the legacy keys synchronized for older Studio builds.
   settings.setValue(QStringLiteral("paths/icon"), iconEdit_->text());
   settings.setValue(QStringLiteral("paths/output"), outputEdit_->text());
   settings.setValue(QStringLiteral("paths/certificate"), certificateEdit_->text());
@@ -880,6 +913,7 @@ void MainWindow::saveSettings() const {
   settings.setValue(QStringLiteral("export/as_zip"), exportAsZip_->isChecked());
   settings.setValue(QStringLiteral("export/mode"), exportModeCombo_->currentData().toString());
   settings.setValue(QStringLiteral("export/use_ci"), useCi_->isChecked());
+  settings.sync();
 }
 
 void MainWindow::chooseDisc() {
@@ -980,7 +1014,9 @@ void MainWindow::populateBatchDirectory(const QString& path, bool showDialogs) {
         settings.remove(iconKey);
         savedIcon.clear();
       }
-      batchEntries_.append({ id, game.sourcePath, {}, game.suggestedTitle,
+      const QString savedName = settings.value(
+        batchNameSettingKey(id), game.suggestedTitle).toString();
+      batchEntries_.append({ id, game.sourcePath, {}, savedName,
                              savedIcon, game.gameCode, QStringLiteral("GBA") });
     }
     batchSummaryLabel_->setText(
@@ -1036,11 +1072,13 @@ void MainWindow::populateBatchDirectory(const QString& path, bool showDialogs) {
       settings.remove(iconKey);
       savedIcon.clear();
     }
+    const QString savedName = settings.value(
+      batchNameSettingKey(id), disc.suggestedTitle).toString();
     batchEntries_.append({
       id,
       disc.sourcePath,
       disc.selectedBinPaths,
-      disc.suggestedTitle,
+      savedName,
       savedIcon,
       disc.serial,
       disc.volumeId,
@@ -1131,6 +1169,9 @@ void MainWindow::rebuildBatchList() {
       for (auto& candidate : batchEntries_) {
         if (candidate.id == id) {
           candidate.title = value;
+          QSettings settings;
+          settings.setValue(batchNameSettingKey(id), value);
+          settings.sync();
           break;
         }
       }
@@ -1220,20 +1261,28 @@ void MainWindow::updateSystemControls() {
       gbaInputPath_ = discEdit_->text();
       gbaBiosPath_ = biosEdit_->text();
       gbaBatchDirectory_ = batchDirectoryEdit_->text();
+      gbaIconPath_ = iconEdit_->text();
+      gbaName_ = titleEdit_->text();
     } else {
       psxInputPath_ = discEdit_->text();
       psxBiosPath_ = biosEdit_->text();
       psxBatchDirectory_ = batchDirectoryEdit_->text();
+      psxIconPath_ = iconEdit_->text();
+      psxName_ = titleEdit_->text();
     }
     currentSystem_ = selected;
     {
       const QSignalBlocker inputBlocker(discEdit_);
       const QSignalBlocker biosBlocker(biosEdit_);
       const QSignalBlocker batchBlocker(batchDirectoryEdit_);
+      const QSignalBlocker iconBlocker(iconEdit_);
+      const QSignalBlocker nameBlocker(titleEdit_);
       discEdit_->setText(selected == SystemKind::GameBoyAdvance ? gbaInputPath_ : psxInputPath_);
       biosEdit_->setText(selected == SystemKind::GameBoyAdvance ? gbaBiosPath_ : psxBiosPath_);
       batchDirectoryEdit_->setText(selected == SystemKind::GameBoyAdvance
         ? gbaBatchDirectory_ : psxBatchDirectory_);
+      iconEdit_->setText(selected == SystemKind::GameBoyAdvance ? gbaIconPath_ : psxIconPath_);
+      titleEdit_->setText(selected == SystemKind::GameBoyAdvance ? gbaName_ : psxName_);
     }
     selectedBins_.clear();
     batchEntries_.clear();

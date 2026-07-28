@@ -21,9 +21,12 @@
 // scheduler wakes against, so an idle guest hands its slice back rather than
 // burning it.
 //
-// Nothing here is conditional on the architecture. If a future SDK turns threads
-// on, _LIBCPP_HAS_THREADS becomes 1, libc++ defines this_thread itself, and the
-// whole shim compiles to nothing.
+// Three suppliers can own std::this_thread, and exactly one must: the POSIX
+// shim (virtua_cpp_thread_shim.h, pthread-backed, force-included on arm and
+// riscv64), libc++ itself when threads are on, and this file otherwise. The
+// order below picks one. Nothing here is conditional on the architecture -- if
+// a future SDK turns threads on, _LIBCPP_HAS_THREADS becomes 1 and the whole
+// shim compiles to nothing.
 
 #ifndef VIRTUA_DASH_THREAD_SHIM
 #define VIRTUA_DASH_THREAD_SHIM
@@ -39,7 +42,29 @@
 // cannot be included at all.
 #include <__config>
 
-#if defined(_LIBCPP_VERSION) && defined(_LIBCPP_HAS_THREADS) && !_LIBCPP_HAS_THREADS
+// Before deciding anything: the POSIX shim may already own this. It defines
+// std::this_thread -- along with std::thread, mutex and condition_variable --
+// over pthreads, and PowerEngine force-includes it into every C++ translation
+// unit on arm and riscv64. Its own gate (MINOS_VIRTUA_USERLAND) makes this
+// include free when it does not apply, so asking the file itself is better
+// than re-testing its condition here and drifting from it later.
+//
+// Standing down matters more than it looks. The shim's this_thread is in
+// namespace std; the one below is in std::__1, which is inline -- so they are
+// not two definitions of different names, they are two candidates for
+// `std::this_thread`, and every use site becomes ambiguous rather than
+// redefined. That is the same reason CMakeLists.txt does not force-include the
+// shim for x86_64, where libc++ has the real thing.
+#if __has_include(<virtua_cpp_thread_shim.h>)
+#  include <virtua_cpp_thread_shim.h>
+#endif
+
+#if defined(MVII_POSIX_SHIM_HAS_STD_THIS_THREAD)
+
+// The shim owns std::this_thread here; nothing to add. Its sleep_for is the
+// same nanosleep() call as below, so the waiting half is covered either way.
+
+#elif defined(_LIBCPP_VERSION) && defined(_LIBCPP_HAS_THREADS) && !_LIBCPP_HAS_THREADS
 
 // The three pieces of <chrono> this needs, and not <chrono> itself. At
 // -std=c++20 the umbrella header pulls the calendar formatters
@@ -51,8 +76,20 @@
 #include <__chrono/steady_clock.h>
 #include <__chrono/time_point.h>
 #include <cerrno>
-#include <sched.h>
 #include <time.h>
+
+// <sched.h> is the POSIX shim's, not the sysroot's, so a guest that links Dash
+// without adding virtua/posix-shim/include to its path -- which is legal, and
+// which the SDK's own <time.h> does not require -- would fail to include this
+// header at all. Declare the one function instead. Signature matched to
+// posix-shim/include/sched.h exactly, noexcept included (that is, absent):
+// under C++17 an exception specification is part of the type, so adding one
+// here would clash with the shim wherever both are visible.
+#if __has_include(<sched.h>)
+#  include <sched.h>
+#else
+extern "C" int sched_yield(void);
+#endif
 
 _LIBCPP_BEGIN_NAMESPACE_STD
 
@@ -136,7 +173,7 @@ _LIBCPP_END_NAMESPACE_STD
 // Threads are configured on, so libc++ owns all of this.
 #include_next <thread>
 
-#endif  // libc++ without threads
+#endif  // shim / libc++ without threads / libc++ with threads
 
 #endif  // __cplusplus
 

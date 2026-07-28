@@ -1872,7 +1872,35 @@ time_t time(time_t* timer) {
     return now;
 }
 
-VIRTUA_WEAK_SYMBOL struct tm* gmtime_r(const time_t* timer, struct tm* result) {
+// gmtime and gmtime_r are the one place where the two Virtua sysroots in
+// circulation disagree on a signature. POSIX says `const time_t *`, and the
+// SDK sysroot says that too; llvm-libc's own spec (libc/include/time.yaml)
+// still says `time_t *`, so a toolchain built from it declares them non-const.
+//
+// Constness of a parameter is part of the function type, so unlike an omitted
+// exception specification this is not something the compiler will overlook: a
+// definition that picks the wrong spelling is a conflicting type, not an
+// overload, and hard-coding either one makes this file build against one
+// sysroot and fail against the other. So take the type from whichever
+// declaration is actually in scope. When llvm-libc's spec is fixed upstream
+// this keeps working, with nothing here to update.
+// extern "C++" because everything around here is inside one big extern "C"
+// block, and a template cannot have C linkage. Nothing is emitted either way --
+// these are declarations only, used for their return type.
+extern "C++" {
+namespace {
+template <class R, class A0, class A1> A0 mvii_first_param(R (*)(A0, A1));
+#if defined(__cpp_noexcept_function_type)
+// The declarations carry __NOEXCEPT, which is `noexcept` in C++11 and later,
+// and since C++17 that is part of the pointer's type -- so the plain overload
+// above would not match on its own.
+template <class R, class A0, class A1> A0 mvii_first_param(R (*)(A0, A1) noexcept);
+#endif
+}  // namespace
+using mvii_gmtime_arg = decltype(mvii_first_param(&::gmtime_r));
+}  // extern "C++"
+
+VIRTUA_WEAK_SYMBOL struct tm* gmtime_r(mvii_gmtime_arg timer, struct tm* result) {
     if (!timer || !result) {
         errno = EINVAL;
         return nullptr;
@@ -1885,10 +1913,13 @@ VIRTUA_WEAK_SYMBOL struct tm* localtime_r(const time_t* timer, struct tm* result
         errno = EINVAL;
         return nullptr;
     }
-    return gmtime_r(timer, result);
+    // Both sysroots agree that localtime_r takes a const pointer, so this cast
+    // is a no-op on the one that agrees about gmtime_r too, and drops a const
+    // that gmtime_r never had any business requiring on the one that does not.
+    return gmtime_r(const_cast<mvii_gmtime_arg>(timer), result);
 }
 
-VIRTUA_WEAK_SYMBOL struct tm* gmtime(const time_t* timer) {
+VIRTUA_WEAK_SYMBOL struct tm* gmtime(mvii_gmtime_arg timer) {
     static struct tm shared;
     return gmtime_r(timer, &shared);
 }
@@ -3925,7 +3956,13 @@ long pathconf(const char*, int name) {
     return -1;
 }
 
-int utimes(const char*, const struct timeval[2]) noexcept {
+// No noexcept here on purpose, even though the SDK's sys/time.h declares one.
+// Omitting an exception specification that a previous declaration supplied is
+// allowed and the function keeps the declared one; adding one the declaration
+// does not have is a hard error. Only the omission builds against both shims,
+// and it is how the rest of this file is written -- time(), nanosleep() and
+// clock_gettime() are all declared __NOEXCEPT and all defined without it.
+int utimes(const char*, const struct timeval[2]) {
     errno = ENOSYS;
     return -1;
 }

@@ -3,6 +3,16 @@
 
 #if defined(__cplusplus) && defined(MINOS_VIRTUA_USERLAND)
 
+// Announces that this header, and not libc++ and not Dash's <thread>, is the
+// one defining std::this_thread in this translation unit. It defines it
+// directly in namespace std; Dash's <thread> defines it in std::__1, which is
+// an inline namespace, so both answer to the same `std::this_thread` and
+// having both is not a redefinition but an ambiguity at every use site. Dash's
+// header checks this macro and stands down. Same reason the x86_64 target does
+// not force-include this file at all (see CMakeLists.txt): a second definition
+// of a name libc++ already has is ambiguous, not additive.
+#define MVII_POSIX_SHIM_HAS_STD_THIS_THREAD 1
+
 #include <chrono>
 #include <__type_traits/invoke.h>
 #include <condition_variable>

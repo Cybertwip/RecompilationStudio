@@ -164,12 +164,13 @@ struct PipelineRequest {
   QString certificatePath;
   QString certificatePassword;
   QString ghidraHome;
-  // Root of the LLVM toolchain used for Virtua ARM (baremetal armv7a-none-eabi)
-  // builds. Forwarded to CMake as VIRTUA_LLVM_ROOT. When empty,
-  // VirtuaArmToolchain.cmake falls back to searching PATH, which can silently
-  // resolve to a host/Linux clang whose libc speaks a different syscall ABI
-  // than MVII's BSD-style one.
+  // Root of the LLVM/compiler bundle used for Virtua ARM. The toolchain also
+  // resolves the matching PowerEngine ARM llvm-libc/libc++ and compiler-rt
+  // outputs from this build tree; PSXRecomp does not vendor those artifacts.
   QString llvmRoot;
+  // PowerEngine source checkout providing External/Virtua (Dash, packager,
+  // ABI headers) and OS/MVII/Kernel/Shared/posix-shim.
+  QString powerEngineRoot;
   QString frameworkRoot;
   bool patchBiosBranding{ false };
   QString biosInitialSplashPath;
@@ -207,6 +208,7 @@ struct PipelineRequest {
       { QStringLiteral("certificate_path"), certificatePath },
       { QStringLiteral("ghidra_home"), ghidraHome },
       { QStringLiteral("llvm_root"), llvmRoot },
+      { QStringLiteral("powerengine_root"), powerEngineRoot },
       { QStringLiteral("framework_root"), frameworkRoot },
       { QStringLiteral("patch_bios_branding"), patchBiosBranding },
       { QStringLiteral("bios_initial_splash_path"), biosInitialSplashPath },

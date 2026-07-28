@@ -54,6 +54,7 @@ endif()
 option(PSX_VIRTUA "Build the runtime as an MVII Virtua application" OFF)
 
 if(PSX_VIRTUA)
+    include("${PSXRECOMP_ROOT}/extra/virtua/CMake/VirtuaPowerEngine.cmake")
     set(SDL2_INCLUDE_DIRS "${PSXRECOMP_ROOT}/extra/virtua/sdl")
     set(SDL2_LIBRARIES "PSXRECOMP_VIRTUA_SDL")
 elseif(NOT SDL2_INCLUDE_DIRS OR NOT SDL2_LIBRARIES)
@@ -263,7 +264,7 @@ if(PSX_VIRTUA)
         ${PSXRECOMP_ROOT}/runtime/src/psx_fiber_virtua.c
         ${PSXRECOMP_ROOT}/runtime/src/psx_fiber_virtua.S
         ${PSXRECOMP_ROOT}/extra/virtua/sdl/sdl_virtua.cpp
-        ${PSXRECOMP_ROOT}/extra/virtua/Dash/llvm_libc_stubs.cpp)
+        ${VIRTUA_POWERENGINE_VIRTUA_ROOT}/Dash/llvm_libc_stubs.cpp)
 endif()
 if(PSXRECOMP_GIP_GAMEPAD_AVAILABLE)
     list(APPEND PSXRECOMP_RUNTIME_SOURCES
@@ -510,11 +511,12 @@ function(psxrecomp_add_runtime_target target)
     )
     if(PSX_VIRTUA)
         target_include_directories(${target} BEFORE PRIVATE
-            ${PSXRECOMP_ROOT}/extra/virtua/posix-shim/include
+            ${VIRTUA_POWERENGINE_POSIX_INCLUDE}
             ${PSXRECOMP_ROOT}/extra/virtua/include
-            ${PSXRECOMP_ROOT}/extra/virtua/Dash
-            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include
-            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include/c++/v1)
+            ${VIRTUA_POWERENGINE_VIRTUA_ROOT}
+            ${VIRTUA_POWERENGINE_VIRTUA_ROOT}/Dash
+            ${VIRTUA_ARM_SYSROOT}/include
+            ${VIRTUA_ARM_CXX_INCLUDE})
     endif()
     # pkg-config reports SDL2_LIBRARIES as a bare name (e.g. "SDL2" -> -lSDL2);
     # add its library dirs so the linker finds it outside default paths
@@ -566,8 +568,8 @@ function(psxrecomp_add_runtime_target target)
             _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE
             FMT_STATIC_THOUSANDS_SEPARATOR=44)
         target_compile_options(${target} PRIVATE
-            "--target=armv7a-none-eabi"
-            --sysroot=${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi
+            "--target=${VIRTUA_ARM_TARGET_TRIPLE}"
+            "--sysroot=${VIRTUA_ARM_SYSROOT}"
             -mcpu=cortex-a7
             -marm
             -mfloat-abi=soft
@@ -584,19 +586,19 @@ function(psxrecomp_add_runtime_target target)
             $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
             $<$<COMPILE_LANGUAGE:CXX>:-fno-threadsafe-statics>
             $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
-            $<$<COMPILE_LANGUAGE:CXX>:-isystem${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include/c++/v1>
+            $<$<COMPILE_LANGUAGE:CXX>:-isystem${VIRTUA_ARM_CXX_INCLUDE}>
             $<$<COMPILE_LANGUAGE:CXX>:SHELL:-include virtua_cpp_thread_shim.h>)
 
         if(NOT TARGET R-Dash)
-            set(VIRTUA_ROOT "${PSXRECOMP_ROOT}/extra/virtua")
+            set(VIRTUA_ROOT "${VIRTUA_POWERENGINE_VIRTUA_ROOT}")
             set(DASH_FIXED_HEAP_BYTES 0)
-            add_subdirectory(${PSXRECOMP_ROOT}/extra/virtua/Dash
+            add_subdirectory(${VIRTUA_POWERENGINE_VIRTUA_ROOT}/Dash
                              ${CMAKE_BINARY_DIR}/virtua-dash EXCLUDE_FROM_ALL)
         endif()
         target_include_directories(R-Dash BEFORE PUBLIC
-            ${PSXRECOMP_ROOT}/extra/virtua/posix-shim/include
-            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include
-            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include/c++/v1)
+            ${VIRTUA_POWERENGINE_POSIX_INCLUDE}
+            ${VIRTUA_ARM_SYSROOT}/include
+            ${VIRTUA_ARM_CXX_INCLUDE})
         target_compile_definitions(R-Dash PUBLIC
             MINOS_PLATFORM_MACHINE64=1
             MINOS_PLATFORM_ARMV7=1
@@ -605,8 +607,8 @@ function(psxrecomp_add_runtime_target target)
             _LIBCPP_DISABLE_AVAILABILITY
             _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE)
         target_compile_options(R-Dash PRIVATE
-            "--target=armv7a-none-eabi"
-            --sysroot=${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi
+            "--target=${VIRTUA_ARM_TARGET_TRIPLE}"
+            "--sysroot=${VIRTUA_ARM_SYSROOT}"
             -mcpu=cortex-a7
             -marm
             -mfloat-abi=soft
@@ -621,14 +623,14 @@ function(psxrecomp_add_runtime_target target)
             $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
             $<$<COMPILE_LANGUAGE:CXX>:-fno-threadsafe-statics>
             $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
-            $<$<COMPILE_LANGUAGE:CXX>:-isystem${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/include/c++/v1>)
+            $<$<COMPILE_LANGUAGE:CXX>:-isystem${VIRTUA_ARM_CXX_INCLUDE}>)
         add_dependencies(${target} R-Dash)
         target_link_directories(${target} PRIVATE
-            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/lib
-            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/lib/armv7a-none-eabi)
+            ${VIRTUA_ARM_SYSROOT}/lib
+            ${VIRTUA_ARM_SYSROOT}/lib/${VIRTUA_ARM_TARGET_TRIPLE})
         target_link_options(${target} PRIVATE
-            "--target=armv7a-none-eabi"
-            --sysroot=${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi
+            "--target=${VIRTUA_ARM_TARGET_TRIPLE}"
+            "--sysroot=${VIRTUA_ARM_SYSROOT}"
             -mcpu=cortex-a7
             -marm
             -mfloat-abi=soft
@@ -640,16 +642,16 @@ function(psxrecomp_add_runtime_target target)
             -Wl,--emit-relocs
             -Wl,--gc-sections
             -Wl,--build-id=none
-            "-Wl,-T,${PSXRECOMP_ROOT}/extra/virtua/CMake/armv7_linker.ld"
+            "-Wl,-T,${VIRTUA_ARM_LINKER_SCRIPT}"
             -Wl,--whole-archive
             $<TARGET_FILE:R-Dash>
             -Wl,--no-whole-archive)
         target_link_libraries(${target} PRIVATE
             c++ c++abi unwind c m
-            ${PSXRECOMP_ROOT}/extra/virtua/sdk/arm-eabi/lib/clang-runtime/libclang_rt.builtins-armv7.a)
+            ${VIRTUA_ARM_COMPILER_RT})
         set_target_properties(${target} PROPERTIES
             SUFFIX ".elf"
-            LINK_DEPENDS "${PSXRECOMP_ROOT}/extra/virtua/CMake/armv7_linker.ld")
+            LINK_DEPENDS "${VIRTUA_ARM_LINKER_SCRIPT}")
     endif()
 
     if(MSVC)

@@ -23,6 +23,8 @@ pretend a service request succeeded and do not fall back to CPU emulation.
 ```sh
 cmake -S extra/horizon2mvii -B build/horizon2mvii -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=extra/virtua/CMake/VirtuaArmToolchain.cmake \
+  -DPOWERENGINE_ROOT=/absolute/path/to/PowerEngine \
+  -DVIRTUA_LLVM_ROOT=/absolute/path/to/PowerEngine/compiler-bundle \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build build/horizon2mvii --target horizon2mvii
 ```
@@ -36,6 +38,8 @@ To stage an application without launching it:
 ```sh
 cmake -S extra/horizon2mvii -B build/horizon2mvii -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=extra/virtua/CMake/VirtuaArmToolchain.cmake \
+  -DPOWERENGINE_ROOT=/absolute/path/to/PowerEngine \
+  -DVIRTUA_LLVM_ROOT=/absolute/path/to/PowerEngine/compiler-bundle \
   -DCMAKE_BUILD_TYPE=Release \
   -DHORIZON2MVII_PAYLOAD=/absolute/path/to/application.nsp
 cmake --build build/horizon2mvii --target horizon2mvii

@@ -52,6 +52,7 @@ private slots:
   void chooseOutputDirectory();
   void chooseCertificate();
   void chooseGhidraHome();
+  void choosePowerEngineRoot();
   void chooseLlvmRoot();
   void chooseBiosInitialSplash();
   void chooseBiosHandoffImage();
@@ -84,6 +85,7 @@ private:
                         const QString& placeholder,
                         const char* slot);
   QString detectGhidraHome() const;
+  QString detectPowerEngineRoot() const;
   QString detectLlvmRoot() const;
   void loadSettings();
   void saveSettings() const;
@@ -136,6 +138,7 @@ private:
   QCheckBox* signingEnabled_{ nullptr };
   QLabel* signingNote_{ nullptr };
   QLineEdit* ghidraEdit_{ nullptr };
+  QLineEdit* powerEngineEdit_{ nullptr };
   QLineEdit* llvmEdit_{ nullptr };
   QCheckBox* biosPatchEnabled_{ nullptr };
   QLineEdit* biosInitialSplashEdit_{ nullptr };

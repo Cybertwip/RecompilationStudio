@@ -408,7 +408,6 @@ QString generatedGbaNativeProjectCMake(const QString& bundleName) {
   // built was a 119-line launcher stub.
   return QStringLiteral(R"CMAKE(cmake_minimum_required(VERSION 3.20)
 project(GeneratedGbaVirtuaNative C CXX ASM)
-set(VIRTUA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/virtua")
 set(GBA_MVII_OUTPUT_NAME %1)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/gba-to-mvii" "${CMAKE_BINARY_DIR}/gba-to-mvii")
 set(_GBA_STAGE "${CMAKE_BINARY_DIR}/steganos-package/gba-runtime/$<CONFIG>")

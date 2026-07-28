@@ -2,14 +2,15 @@ cmake_minimum_required(VERSION 3.20)
 project(horizon2mvii VERSION 0.1.0 LANGUAGES C ASM)
 
 get_filename_component(PSXRECOMP_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
-set(VIRTUA_ROOT "${PSXRECOMP_ROOT}/extra/virtua" CACHE PATH "Bundled Virtua SDK")
-include("${VIRTUA_ROOT}/CMake/VirtuaArmApp.cmake")
+set(PSX_VIRTUA_SUPPORT_ROOT "${PSXRECOMP_ROOT}/extra/virtua")
+include("${PSX_VIRTUA_SUPPORT_ROOT}/CMake/VirtuaArmApp.cmake")
 
 add_library(horizon-mvii-transport STATIC source/horizon_servctl_mvii.c)
 target_include_directories(horizon-mvii-transport PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    "${VIRTUA_ROOT}/Dash"
-    "${VIRTUA_ROOT}/include")
+    "${VIRTUA_POWERENGINE_VIRTUA_ROOT}/Dash"
+    "${VIRTUA_POWERENGINE_VIRTUA_ROOT}"
+    "${PSX_VIRTUA_SUPPORT_ROOT}/include")
 target_compile_options(horizon-mvii-transport PRIVATE
     --target=armv7a-none-eabi -mcpu=cortex-a7 -marm -mfloat-abi=soft
     -ffreestanding -fpie -fno-stack-protector -fno-common -Os)

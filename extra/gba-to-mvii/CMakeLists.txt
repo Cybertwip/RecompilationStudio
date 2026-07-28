@@ -17,6 +17,8 @@
 #
 #   cmake -S extra/gba-to-mvii -B build/gba-to-mvii \
 #         -DCMAKE_TOOLCHAIN_FILE=extra/virtua/CMake/VirtuaArmToolchain.cmake \
+#         -DPOWERENGINE_ROOT=/path/to/PowerEngine \
+#         -DVIRTUA_LLVM_ROOT=/path/to/PowerEngine/compiler-bundle \
 #         -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build/gba-to-mvii --target gba-to-mvii
 #
@@ -46,14 +48,9 @@ endif()
 
 # ── locations ──────────────────────────────────────────────────────────────
 
-if(NOT DEFINED VIRTUA_ROOT OR VIRTUA_ROOT STREQUAL "")
-    get_filename_component(VIRTUA_ROOT "${CMAKE_CURRENT_LIST_DIR}/../virtua" ABSOLUTE)
-endif()
-if(NOT EXISTS "${VIRTUA_ROOT}/Dash/CMakeLists.txt")
-    message(FATAL_ERROR "VIRTUA_ROOT='${VIRTUA_ROOT}' does not contain Dash/CMakeLists.txt")
-endif()
-
-set(GBA_MVII_SDK "${VIRTUA_ROOT}/sdk/arm-eabi")
+include("${CMAKE_CURRENT_LIST_DIR}/../virtua/CMake/VirtuaPowerEngine.cmake")
+set(VIRTUA_ROOT "${VIRTUA_POWERENGINE_VIRTUA_ROOT}")
+set(GBA_MVII_SDK "${VIRTUA_ARM_SYSROOT}")
 set(GBA_MVII_SRC "${CMAKE_CURRENT_LIST_DIR}/src")
 set(GBA_MVII_INC "${CMAKE_CURRENT_LIST_DIR}/include")
 set(GBA_MVII_RUST "${CMAKE_CURRENT_LIST_DIR}/rust")
@@ -75,7 +72,7 @@ if(NOT DEFINED GBA_MVII_STAGE_DIR)
     set(GBA_MVII_STAGE_DIR "")
 endif()
 
-include("${VIRTUA_ROOT}/CMake/GoTooling.cmake")
+include("${VIRTUA_POWERENGINE_VIRTUA_ROOT}/CMake/GoTooling.cmake")
 
 # ── the emulation core (Rust) ──────────────────────────────────────────────
 #
@@ -155,7 +152,7 @@ if(NOT TARGET R-Dash)
 endif()
 
 target_include_directories(R-Dash BEFORE PUBLIC
-    "${VIRTUA_ROOT}/posix-shim/include"
+    "${VIRTUA_POWERENGINE_POSIX_INCLUDE}"
     "${GBA_MVII_SDK}/include"
     "${GBA_MVII_SDK}/include/c++/v1")
 target_compile_definitions(R-Dash PUBLIC
@@ -190,9 +187,9 @@ add_executable(gba-to-mvii-elf ${_mvii_sources})
 
 # BEFORE, so Virtua's shims win over anything the sources may otherwise find.
 target_include_directories(gba-to-mvii-elf BEFORE PRIVATE
-    "${VIRTUA_ROOT}/posix-shim/include"
-    "${VIRTUA_ROOT}/include"
-    "${VIRTUA_ROOT}/Dash"
+    "${VIRTUA_POWERENGINE_POSIX_INCLUDE}"
+    "${VIRTUA_POWERENGINE_VIRTUA_ROOT}"
+    "${VIRTUA_POWERENGINE_VIRTUA_ROOT}/Dash"
     "${GBA_MVII_SDK}/include"
     "${GBA_MVII_SDK}/include/c++/v1")
 target_include_directories(gba-to-mvii-elf PRIVATE
@@ -255,7 +252,7 @@ target_link_options(gba-to-mvii-elf PRIVATE
     -Wl,--emit-relocs
     -Wl,--gc-sections
     -Wl,--build-id=none
-    "-Wl,-T,${VIRTUA_ROOT}/CMake/armv7_linker.ld"
+    "-Wl,-T,${VIRTUA_ARM_LINKER_SCRIPT}"
     # Whole-archive, because nothing in the runtime references _start and
     # --gc-sections would otherwise drop the entry point on the floor.
     -Wl,--whole-archive
@@ -269,17 +266,18 @@ target_link_options(gba-to-mvii-elf PRIVATE
 target_link_libraries(gba-to-mvii-elf PRIVATE
     "${GBA_MVII_RUST_LIB}"
     c++ c++abi unwind c m
-    "${GBA_MVII_SDK}/lib/clang-runtime/libclang_rt.builtins-armv7.a")
+    "${VIRTUA_ARM_COMPILER_RT}")
 
 set_target_properties(gba-to-mvii-elf PROPERTIES
     OUTPUT_NAME "${GBA_MVII_OUTPUT_NAME}"
     SUFFIX ".elf"
-    LINK_DEPENDS "${VIRTUA_ROOT}/CMake/armv7_linker.ld")
+    LINK_DEPENDS "${VIRTUA_ARM_LINKER_SCRIPT}")
 
 # ── packaging ──────────────────────────────────────────────────────────────
 
 virtua_prepare_go_tool(GBA_MVII_VIRTUA_TOOL
-    "${VIRTUA_ROOT}" "${VIRTUA_ROOT}/binary" "virtua")
+    "${VIRTUA_POWERENGINE_VIRTUA_ROOT}"
+    "${VIRTUA_POWERENGINE_VIRTUA_ROOT}/binary" "virtua")
 add_custom_target(gba-to-mvii-tool DEPENDS "${GBA_MVII_VIRTUA_TOOL}")
 
 set(_gba_virtua "${CMAKE_CURRENT_BINARY_DIR}/${GBA_MVII_OUTPUT_NAME}.virtua")

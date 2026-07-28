@@ -1,5 +1,6 @@
 include_guard(GLOBAL)
-include("${CMAKE_CURRENT_LIST_DIR}/GoTooling.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/VirtuaPowerEngine.cmake")
+include("${VIRTUA_POWERENGINE_VIRTUA_ROOT}/CMake/GoTooling.cmake")
 
 function(virtua_add_armv7_app target)
     set(options GUI COOPERATIVE)
@@ -17,18 +18,22 @@ function(virtua_add_armv7_app target)
         set(VAPP_OUTPUT_NAME "${target}")
     endif()
 
-    get_filename_component(_virtua_root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
+    get_filename_component(_psx_virtua_root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.." ABSOLUTE)
     set(_elf_target "${target}_elf")
     add_executable(${_elf_target}
         ${VAPP_SOURCES}
-        "${_virtua_root}/native/minimal_arm_runtime.c"
-        "${_virtua_root}/Dash/armv7/crt.s")
+        "${_psx_virtua_root}/native/minimal_arm_runtime.c"
+        "${VIRTUA_POWERENGINE_VIRTUA_ROOT}/Dash/armv7/crt.s")
     target_include_directories(${_elf_target} PRIVATE
         ${VAPP_INCLUDE_DIRECTORIES}
-        "${_virtua_root}/Dash"
-        "${_virtua_root}/include")
+        "${_psx_virtua_root}/include"
+        "${VIRTUA_POWERENGINE_VIRTUA_ROOT}"
+        "${VIRTUA_POWERENGINE_VIRTUA_ROOT}/Dash"
+        "${VIRTUA_POWERENGINE_POSIX_INCLUDE}"
+        "${VIRTUA_ARM_SYSROOT}/include")
     target_compile_options(${_elf_target} PRIVATE
         "--target=${VIRTUA_ARM_TARGET_TRIPLE}"
+        "--sysroot=${VIRTUA_ARM_SYSROOT}"
         -mcpu=cortex-a7
         -marm
         -mfloat-abi=soft
@@ -42,6 +47,7 @@ function(virtua_add_armv7_app target)
         -Os)
     target_link_options(${_elf_target} PRIVATE
         "--target=${VIRTUA_ARM_TARGET_TRIPLE}"
+        "--sysroot=${VIRTUA_ARM_SYSROOT}"
         -mcpu=cortex-a7
         -marm
         -mfloat-abi=soft
@@ -52,14 +58,14 @@ function(virtua_add_armv7_app target)
         -Wl,--emit-relocs
         -Wl,--gc-sections
         -Wl,--build-id=none
-        "-Wl,-T,${_virtua_root}/CMake/armv7_linker.ld")
+        "-Wl,-T,${VIRTUA_ARM_LINKER_SCRIPT}")
     set_target_properties(${_elf_target} PROPERTIES
         OUTPUT_NAME "${VAPP_OUTPUT_NAME}"
         SUFFIX ".elf"
-        LINK_DEPENDS "${_virtua_root}/CMake/armv7_linker.ld")
+        LINK_DEPENDS "${VIRTUA_ARM_LINKER_SCRIPT}")
 
-    virtua_prepare_go_tool(_virtua_tool "${_virtua_root}"
-        "${_virtua_root}/binary" "virtua")
+    virtua_prepare_go_tool(_virtua_tool "${VIRTUA_POWERENGINE_VIRTUA_ROOT}"
+        "${VIRTUA_POWERENGINE_VIRTUA_ROOT}/binary" "virtua")
     set(_output "${CMAKE_CURRENT_BINARY_DIR}/${VAPP_OUTPUT_NAME}.virtua")
     set(_app_mode console)
     if(VAPP_GUI)

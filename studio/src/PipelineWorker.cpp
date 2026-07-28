@@ -58,6 +58,44 @@ constexpr auto kLinuxControllerDbArchiveSha256 =
 constexpr auto kLinuxControllerDbSha256 =
   "dd4dd9dcb458aa4fbfd9b37ccdd4884b1e2e258edf8a16c3c4df3e77ac5174a0";
 
+bool isPowerEngineRoot(const QString& root) {
+  if (root.trimmed().isEmpty()) return false;
+  const QDir directory(root);
+  for (const auto& relative : {
+         QStringLiteral("External/Virtua/CMake/GoTooling.cmake"),
+         QStringLiteral("External/Virtua/binary/virtua.go"),
+         QStringLiteral("External/Virtua/Dash/CMakeLists.txt"),
+         QStringLiteral("External/Virtua/Dash/llvm_libc_stubs.cpp"),
+         QStringLiteral("OS/MVII/Kernel/Shared/posix-shim/include/pthread.h"),
+         QStringLiteral("OS/MVII/Examples/Pong/linker_armv7.ld") }) {
+    if (!QFileInfo(directory.filePath(relative)).isFile()) return false;
+  }
+  return true;
+}
+
+bool isVirtuaLlvmRoot(const QString& root) {
+  if (root.trimmed().isEmpty()) return false;
+  const QDir bin(QDir(root).filePath(QStringLiteral("bin")));
+  const bool compiler = QFileInfo(bin.filePath(QStringLiteral("compiler"))).isExecutable() ||
+                        QFileInfo(bin.filePath(QStringLiteral("clang"))).isExecutable();
+  const bool compilerxx = QFileInfo(bin.filePath(QStringLiteral("compiler++"))).isExecutable() ||
+                          QFileInfo(bin.filePath(QStringLiteral("clang++"))).isExecutable();
+  return compiler && compilerxx &&
+         QFileInfo(bin.filePath(QStringLiteral("llvm-ar"))).isExecutable() &&
+         QFileInfo(bin.filePath(QStringLiteral("llvm-ranlib"))).isExecutable() &&
+         QFileInfo(bin.filePath(QStringLiteral("llvm-objcopy"))).isExecutable() &&
+         QFileInfo(bin.filePath(QStringLiteral("ld.lld"))).isExecutable();
+}
+
+QString virtuaCompilerPath(const QString& root) {
+  const QDir bin(QDir(root).filePath(QStringLiteral("bin")));
+  for (const auto& name : { QStringLiteral("compiler"), QStringLiteral("clang") }) {
+    const QString path = bin.filePath(name);
+    if (QFileInfo(path).isExecutable()) return path;
+  }
+  return {};
+}
+
 QString escapedComment(QString text) {
   text.replace('\n', ' ');
   text.replace('\r', ' ');
@@ -333,8 +371,8 @@ QString makeVirtuaProjectCMake(const PipelineRequest& request,
   cmake += QStringLiteral("  APP_SUPPORT_DIR_NAME %1)\n").arg(cmakeQuoted(appSupportName));
   cmake += QStringLiteral("target_compile_definitions(psx-runtime PRIVATE PSX_EXPECTED_BIOS_CRC32=0x%1u)\n")
              .arg(expectedBiosCrc, 8, 16, QLatin1Char('0'));
-  cmake += QStringLiteral("include(${PSXRECOMP_ROOT}/extra/virtua/CMake/GoTooling.cmake)\n");
-  cmake += QStringLiteral("virtua_prepare_go_tool(PSX_VIRTUA_TOOL ${PSXRECOMP_ROOT}/extra/virtua ${PSXRECOMP_ROOT}/extra/virtua/binary virtua)\n");
+  cmake += QStringLiteral("include(${POWERENGINE_ROOT}/External/Virtua/CMake/GoTooling.cmake)\n");
+  cmake += QStringLiteral("virtua_prepare_go_tool(PSX_VIRTUA_TOOL ${POWERENGINE_ROOT}/External/Virtua ${POWERENGINE_ROOT}/External/Virtua/binary virtua)\n");
   cmake += QStringLiteral("add_custom_target(psx-virtua-tool DEPENDS \"${PSX_VIRTUA_TOOL}\")\n");
   cmake += QStringLiteral("add_dependencies(psx-runtime psx-virtua-tool)\n");
   cmake += QStringLiteral("set(_PSX_PACKAGE_RESOURCES \"${CMAKE_CURRENT_SOURCE_DIR}/package-resources\")\n");
@@ -1046,6 +1084,14 @@ void PipelineWorker::run(PipelineRequest request) {
   if (!QFileInfo(request.frameworkRoot).isDir() ||
       !QFileInfo(QDir(request.frameworkRoot).filePath(QStringLiteral("runtime/runtime.cmake"))).isFile()) {
     fail(QStringLiteral("The PSXRecomp framework root is invalid."), {});
+    return;
+  }
+  if (virtuaTarget && !isPowerEngineRoot(request.powerEngineRoot)) {
+    fail(QStringLiteral("The selected PowerEngine root does not contain the canonical Virtua/MVII sources."), {});
+    return;
+  }
+  if (virtuaTarget && !isVirtuaLlvmRoot(request.llvmRoot)) {
+    fail(QStringLiteral("The selected LLVM root is not a complete PowerEngine compiler bundle."), {});
     return;
   }
   const QString analyzeHeadless = ghidraAnalyzeHeadlessPath(request.ghidraHome);
@@ -2043,7 +2089,7 @@ void PipelineWorker::run(PipelineRequest request) {
   }
   const QString cmakeListsPath = QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt"));
   const QString configureExample = virtuaTarget
-    ? QStringLiteral("cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=framework/extra/virtua/CMake/VirtuaArmToolchain.cmake -DVIRTUA_LLVM_ROOT=/opt/homebrew/opt/llvm -DCMAKE_BUILD_TYPE=Release")
+    ? QStringLiteral("cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=framework/extra/virtua/CMake/VirtuaArmToolchain.cmake -DPOWERENGINE_ROOT=/path/to/PowerEngine -DVIRTUA_LLVM_ROOT=/path/to/PowerEngine/compiler-bundle -DCMAKE_BUILD_TYPE=Release")
     : QStringLiteral("cmake -S . -B build -DCMAKE_BUILD_TYPE=Release");
   const QString sourceReadme = QStringLiteral(
     "# %1 — PSXRecomp source export\n\n"
@@ -2260,9 +2306,8 @@ void PipelineWorker::run(PipelineRequest request) {
                        << QStringLiteral("-DPSX_VIRTUA=ON")
                        << QStringLiteral("-DPSX_SETTINGS_MENU=OFF")
                        << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
-    if (!request.llvmRoot.isEmpty()) {
-      configureArguments << QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot);
-    }
+    configureArguments << QStringLiteral("-DPOWERENGINE_ROOT=%1").arg(request.powerEngineRoot)
+                       << QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot);
   } else if (crossWindowsTarget) {
     configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(mingwToolchainPath)
                        << QStringLiteral("-DPSX_STATIC_RUNTIME=ON")
@@ -2453,6 +2498,15 @@ void PipelineWorker::run(PipelineRequest request) {
   runCommand(git,
              { QStringLiteral("-C"), request.frameworkRoot, QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
              request.frameworkRoot, QStringLiteral("git -C <framework> rev-parse HEAD"), 15000, &gitOutput);
+  QByteArray powerEngineGitOutput;
+  if (virtuaTarget) {
+    runCommand(git,
+               { QStringLiteral("-C"), request.powerEngineRoot,
+                 QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
+               request.powerEngineRoot,
+               QStringLiteral("git -C <PowerEngine> rev-parse HEAD"), 15000,
+               &powerEngineGitOutput);
+  }
   const QString targetArchitecture = virtuaTarget
     ? QStringLiteral("armv7a-none-eabi")
     : nativeWindowsTarget
@@ -2462,8 +2516,7 @@ void PipelineWorker::run(PipelineRequest request) {
     : crossLinuxTarget ? QStringLiteral("x86_64-unknown-linux-gnu")
                   : QSysInfo::currentCpuArchitecture();
   const QString compilerVersion = virtuaTarget
-    ? versionText(QFileInfo(QStringLiteral("/usr/local/opt/llvm/bin/clang")).isExecutable()
-                    ? QStringLiteral("/usr/local/opt/llvm/bin/clang") : hostClang,
+    ? versionText(virtuaCompilerPath(request.llvmRoot),
                   { QStringLiteral("--version") }).section('\n', 0, 0)
     : nativeWindowsTarget
     ? versionText(msvcCl, {}).section('\n', 0, 0)
@@ -2513,6 +2566,8 @@ void PipelineWorker::run(PipelineRequest request) {
     { QStringLiteral("macos_gip_gamepad_compiled"), gipBackendCompiled },
     { QStringLiteral("libusb_version"), libusbVersion },
     { QStringLiteral("framework_commit"), QString::fromUtf8(gitOutput).trimmed() },
+    { QStringLiteral("powerengine_commit"), QString::fromUtf8(powerEngineGitOutput).trimmed() },
+    { QStringLiteral("powerengine_external_bindings"), virtuaTarget },
     { QStringLiteral("source_repository_commit"), sourceCommit },
     { QStringLiteral("cmake"), versionText(cmake, { QStringLiteral("--version") }).section('\n', 0, 0) },
     { QStringLiteral("generator"), nativeWindowsTarget
@@ -3567,13 +3622,24 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     fail(QStringLiteral("Select a writable output directory."));
     return;
   }
-  const QString virtuaRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/virtua"));
+  const QString virtuaSupportRoot =
+    QDir(request.frameworkRoot).filePath(QStringLiteral("extra/virtua"));
   const QString runtimeRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-to-mvii"));
-  if (!QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("Dash/CMakeLists.txt"))).isFile() ||
-      !QFileInfo(QDir(virtuaRoot).filePath(QStringLiteral("binary/virtua.go"))).isFile() ||
+  if (!QFileInfo(QDir(virtuaSupportRoot).filePath(
+        QStringLiteral("CMake/VirtuaArmToolchain.cmake"))).isFile() ||
+      !QFileInfo(QDir(virtuaSupportRoot).filePath(
+        QStringLiteral("CMake/VirtuaPowerEngine.cmake"))).isFile() ||
       !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("CMakeLists.txt"))).isFile() ||
       !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("src/mvii/main.cpp"))).isFile()) {
-    fail(QStringLiteral("The framework does not contain the bundled Virtua SDK and the gba-to-mvii runtime."));
+    fail(QStringLiteral("The framework does not contain the Virtua integration and gba-to-mvii runtime."));
+    return;
+  }
+  if (!isPowerEngineRoot(request.powerEngineRoot)) {
+    fail(QStringLiteral("The selected PowerEngine root does not contain the canonical Virtua/MVII sources."));
+    return;
+  }
+  if (!isVirtuaLlvmRoot(request.llvmRoot)) {
+    fail(QStringLiteral("The selected LLVM root is not a complete PowerEngine compiler bundle."));
     return;
   }
   const QString cmake = findExecutable(QStringLiteral("cmake"));
@@ -3611,7 +3677,8 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   const QString proofDir = QDir(projectDir).filePath(QStringLiteral("proof"));
   const QString inputsDir = QDir(projectDir).filePath(QStringLiteral("package_inputs"));
   if (!QDir().mkpath(proofDir) || !QDir().mkpath(inputsDir) ||
-      !copySourceDirectory(virtuaRoot, QDir(projectDir).filePath(QStringLiteral("virtua")), error) ||
+      !copySourceDirectory(virtuaSupportRoot,
+                           QDir(projectDir).filePath(QStringLiteral("virtua")), error) ||
       !copySourceDirectory(runtimeRoot,
                            QDir(projectDir).filePath(QStringLiteral("gba-to-mvii")), error) ||
       !copyFileReplacing(request.romPath,
@@ -3645,14 +3712,14 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     "required and no ROM code is translated ahead of time — `game.gba` is "
     "interpreted as it runs.\n\n"
     "## Build\n\n"
-    "Requires an LLVM toolchain that can target `armv7a-none-eabi` (`brew install "
-    "llvm`, or any LLVM build with `clang`, `lld` and the LLVM binutils). Point "
-    "`VIRTUA_LLVM_ROOT` at its installation root — MVII uses a custom BSD-style "
-    "syscall ABI and its own libc sysroot, so a host or Linux clang will compile "
-    "and link without complaint and then fail at runtime.\n\n```sh\n"
+    "The generated source does not vendor PowerEngine. Pass the canonical "
+    "PowerEngine checkout and its LLVM/compiler bundle explicitly. Dash, the "
+    "POSIX headers, the Virtua packager, llvm-libc/libc++, and compiler-rt are "
+    "consumed from those roots.\n\n```sh\n"
     "cmake -S . -B build -G Ninja \\\n"
     "  -DCMAKE_TOOLCHAIN_FILE=virtua/CMake/VirtuaArmToolchain.cmake \\\n"
-    "  -DVIRTUA_LLVM_ROOT=/opt/homebrew/opt/llvm \\\n"
+    "  -DPOWERENGINE_ROOT=/path/to/PowerEngine \\\n"
+    "  -DVIRTUA_LLVM_ROOT=/path/to/PowerEngine/compiler-bundle \\\n"
     "  -DCMAKE_BUILD_TYPE=Release\n"
     "cmake --build build --target gba-runtime --parallel\n"
     "```\n\nThe package is written under "
@@ -3785,17 +3852,11 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
     QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(toolchain)
   };
-  // Pin the cross-compiler explicitly. Without this the toolchain file falls
-  // back to searching PATH and can pick up a host clang, producing a binary
-  // whose libc does not match MVII's syscall ABI.
-  if (!request.llvmRoot.isEmpty()) {
-    virtuaConfigureArguments << QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot);
-    emit logLine(QStringLiteral("Virtua ARM toolchain: %1").arg(request.llvmRoot));
-  } else {
-    emit logLine(QStringLiteral(
-      "Virtua ARM toolchain: not configured — searching PATH. Set the LLVM toolchain "
-      "path in Studio if the produced package misbehaves at runtime."));
-  }
+  virtuaConfigureArguments
+    << QStringLiteral("-DPOWERENGINE_ROOT=%1").arg(request.powerEngineRoot)
+    << QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot);
+  emit logLine(QStringLiteral("PowerEngine root: %1").arg(request.powerEngineRoot));
+  emit logLine(QStringLiteral("Virtua ARM LLVM root: %1").arg(request.llvmRoot));
   if (!runCommand(cmake, virtuaConfigureArguments,
                   workspace, QStringLiteral("cmake -S <source> -B <build> -G Ninja -DCMAKE_TOOLCHAIN_FILE=<VirtuaArmToolchain>"),
                   10 * 60 * 1000) ||

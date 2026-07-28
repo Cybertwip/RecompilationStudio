@@ -247,11 +247,11 @@ int main(int argc, char** argv) {
         QStringLiteral("Virtua ARM native GBA request serialization"));
   const QString gbaNativeCmake = psxstudio::generatedGbaNativeProjectCMake(
     QStringLiteral("Studio Test Advance"));
-  check(gbaNativeCmake.contains(QStringLiteral("VirtuaArmApp.cmake")) &&
-          gbaNativeCmake.contains(QStringLiteral("gba_native_main.c")) &&
+  check(!gbaNativeCmake.contains(QStringLiteral("set(VIRTUA_ROOT")) &&
+          gbaNativeCmake.contains(QStringLiteral("add_subdirectory(")) &&
           gbaNativeCmake.contains(QStringLiteral("Studio Test Advance.virtua")) &&
           gbaNativeCmake.contains(QStringLiteral("add_custom_target(gba-runtime")),
-        QStringLiteral("generated native GBA CMake stages a Virtua ARM package"));
+        QStringLiteral("generated native GBA CMake consumes external PowerEngine bindings"));
   const QString gbaProject = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-project"));
   const QString gbaBuild = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-build"));
   check(psxstudio::writeText(QDir(gbaProject).filePath(QStringLiteral("CMakeLists.txt")),

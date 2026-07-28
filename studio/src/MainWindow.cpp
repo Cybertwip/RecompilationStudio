@@ -333,13 +333,19 @@ MainWindow::MainWindow(QWidget* parent)
   toolsLayout->addWidget(makeSectionTitle(QStringLiteral("Analysis and export tools"), toolsCard_));
   ghidraEdit_ = addPathRow(toolsCard_, toolsLayout, QStringLiteral("Ghidra home"),
                            QStringLiteral("Ghidra 11.3.2 installation"), SLOT(chooseGhidraHome()));
+  powerEngineEdit_ = addPathRow(
+    toolsCard_, toolsLayout, QStringLiteral("PowerEngine root"),
+    QStringLiteral("PowerEngine directory containing External/Virtua and OS/MVII"),
+    SLOT(choosePowerEngineRoot()));
+  powerEngineEdit_->setToolTip(
+    QStringLiteral("Canonical PowerEngine source checkout used directly for Dash, POSIX headers,\n"
+                   "the Virtua packager, and MVII ABI headers. These files are not copied into PSXRecomp."));
   llvmEdit_ = addPathRow(toolsCard_, toolsLayout, QStringLiteral("LLVM toolchain"),
-                         QStringLiteral("LLVM root containing bin/clang for armv7a-none-eabi"),
+                         QStringLiteral("PowerEngine compiler bundle containing bin/compiler or bin/clang"),
                          SLOT(chooseLlvmRoot()));
   llvmEdit_->setToolTip(
-    QStringLiteral("Root of the LLVM toolchain used to cross-compile Virtua ARM packages.\n"
-                   "Leave empty to search PATH — but note that a host or Linux clang will\n"
-                   "produce a binary whose libc speaks the wrong syscall ABI for MVII."));
+    QStringLiteral("PowerEngine LLVM/compiler bundle used for Virtua ARM. The matching ARM\n"
+                   "llvm-libc/libc++ sysroot and compiler-rt are resolved from the same PowerEngine build."));
   signingEnabled_ = new QCheckBox(QStringLiteral("Sign macOS app with PFX"), toolsCard_);
   signingEnabled_->setToolTip(
     QStringLiteral("Optional. The PFX is read directly and is never imported into a Keychain."));
@@ -542,7 +548,7 @@ MainWindow::MainWindow(QWidget* parent)
             applyTheme();
           });
   for (auto* edit : { discEdit_, batchDirectoryEdit_, biosEdit_, iconEdit_, titleEdit_, outputEdit_,
-                      certificateEdit_, certificatePasswordEdit_, ghidraEdit_, llvmEdit_,
+                      certificateEdit_, certificatePasswordEdit_, ghidraEdit_, powerEngineEdit_, llvmEdit_,
                       biosInitialSplashEdit_, biosHandoffImageEdit_ }) {
     connect(edit, &QLineEdit::textChanged, this, &MainWindow::updateBuildButton);
   }
@@ -717,25 +723,53 @@ QString MainWindow::detectGhidraHome() const {
   return {};
 }
 
-// Locate an LLVM root whose bin/clang can cross-compile the Virtua ARM
-// baremetal target. Mirrors the hint order in VirtuaArmToolchain.cmake so the
-// value shown in the UI is the one the build would actually pick, except that
-// bare PATH is deliberately not consulted: a PATH clang is usually the host
-// (Apple/Linux) compiler, and silently accepting it is the failure this
-// setting exists to make visible.
+QString MainWindow::detectPowerEngineRoot() const {
+  const auto usable = [](const QString& root) {
+    if (root.isEmpty()) return false;
+    const QDir directory(root);
+    return QFileInfo::exists(directory.filePath(QStringLiteral("External/Virtua/Dash/CMakeLists.txt"))) &&
+           QFileInfo::exists(directory.filePath(QStringLiteral("External/Virtua/binary/virtua.go"))) &&
+           QFileInfo::exists(directory.filePath(
+             QStringLiteral("OS/MVII/Kernel/Shared/posix-shim/include/pthread.h")));
+  };
+  for (const auto& environmentName : { "POWERENGINE_ROOT", "POWER_ENGINE_ROOT" }) {
+    const QString environment = qEnvironmentVariable(environmentName);
+    if (usable(environment)) return QDir::cleanPath(environment);
+  }
+  for (const auto& candidate : {
+         QDir::home().filePath(QStringLiteral("Projects/PowerEngineV3/PowerEngine")),
+         QDir::home().filePath(QStringLiteral("Projects/PowerEngine")) }) {
+    if (usable(candidate)) return QDir::cleanPath(candidate);
+  }
+  return {};
+}
+
 QString MainWindow::detectLlvmRoot() const {
   const auto usable = [](const QString& root) {
-    return !root.isEmpty() && QFileInfo::exists(QDir(root).filePath(QStringLiteral("bin/clang")));
+    if (root.isEmpty()) return false;
+    const QDir bin(QDir(root).filePath(QStringLiteral("bin")));
+    return QFileInfo::exists(bin.filePath(QStringLiteral("compiler"))) ||
+           QFileInfo::exists(bin.filePath(QStringLiteral("clang")));
   };
   const QString environment = qEnvironmentVariable("VIRTUA_LLVM_ROOT");
-  if (usable(environment)) {
-    return environment;
+  if (usable(environment)) return QDir::cleanPath(environment);
+
+  const QString powerEngine = powerEngineEdit_ && !powerEngineEdit_->text().isEmpty()
+    ? powerEngineEdit_->text() : detectPowerEngineRoot();
+  if (!powerEngine.isEmpty()) {
+    const QDir root(powerEngine);
+    for (const auto& relative : {
+           QStringLiteral("build/Release/package/bin/Release/bundles/compiler"),
+           QStringLiteral("build/Release/stage/External/xbox/host/compiler"),
+           QStringLiteral("build/Debug/package/bin/Debug/bundles/compiler"),
+           QStringLiteral("build/Debug/stage/External/xbox/host/compiler") }) {
+      const QString candidate = root.filePath(relative);
+      if (usable(candidate)) return QDir::cleanPath(candidate);
+    }
   }
   for (const auto& candidate : { QStringLiteral("/usr/local/opt/llvm"),
                                  QStringLiteral("/opt/homebrew/opt/llvm") }) {
-    if (usable(candidate)) {
-      return candidate;
-    }
+    if (usable(candidate)) return candidate;
   }
   return {};
 }
@@ -774,6 +808,8 @@ void MainWindow::loadSettings() {
   certificateEdit_->setText(settings.value(QStringLiteral("paths/certificate")).toString());
   signingEnabled_->setChecked(settings.value(QStringLiteral("signing/enabled"), false).toBool());
   ghidraEdit_->setText(settings.value(QStringLiteral("paths/ghidra"), detectGhidraHome()).toString());
+  powerEngineEdit_->setText(
+    settings.value(QStringLiteral("paths/powerengine"), detectPowerEngineRoot()).toString());
   llvmEdit_->setText(settings.value(QStringLiteral("paths/llvm"), detectLlvmRoot()).toString());
   titleEdit_->setText(settings.value(QStringLiteral("app/window_title")).toString());
   biosPatchEnabled_->setChecked(settings.value(QStringLiteral("bios_patch/enabled"), false).toBool());
@@ -829,6 +865,7 @@ void MainWindow::saveSettings() const {
   settings.setValue(QStringLiteral("paths/certificate"), certificateEdit_->text());
   settings.setValue(QStringLiteral("signing/enabled"), signingEnabled_->isChecked());
   settings.setValue(QStringLiteral("paths/ghidra"), ghidraEdit_->text());
+  settings.setValue(QStringLiteral("paths/powerengine"), powerEngineEdit_->text());
   settings.setValue(QStringLiteral("paths/llvm"), llvmEdit_->text());
   settings.setValue(QStringLiteral("app/window_title"), titleEdit_->text());
   settings.setValue(QStringLiteral("bios_patch/enabled"), biosPatchEnabled_->isChecked());
@@ -1336,9 +1373,18 @@ void MainWindow::chooseGhidraHome() {
   }
 }
 
+void MainWindow::choosePowerEngineRoot() {
+  const auto path = QFileDialog::getExistingDirectory(
+    this, QStringLiteral("Select PowerEngine source directory"), powerEngineEdit_->text());
+  if (!path.isEmpty()) {
+    powerEngineEdit_->setText(path);
+    if (llvmEdit_->text().isEmpty()) llvmEdit_->setText(detectLlvmRoot());
+  }
+}
+
 void MainWindow::chooseLlvmRoot() {
   const auto path = QFileDialog::getExistingDirectory(
-    this, QStringLiteral("Select LLVM toolchain root"), llvmEdit_->text());
+    this, QStringLiteral("Select PowerEngine LLVM/compiler bundle"), llvmEdit_->text());
   if (!path.isEmpty()) {
     llvmEdit_->setText(path);
   }
@@ -1367,6 +1413,7 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   }
   request.ghidraHome = ghidraEdit_->text();
   request.llvmRoot = llvmEdit_->text();
+  request.powerEngineRoot = powerEngineEdit_->text();
   request.frameworkRoot = QString::fromUtf8(PSXRECOMP_SOURCE_ROOT);
   request.patchBiosBranding = request.system == SystemKind::PlayStation &&
                                biosPatchEnabled_->isChecked();
@@ -1805,7 +1852,7 @@ void MainWindow::setBusy(bool busy) {
     progressBar_->setValue(0);
   }
   for (auto* edit : { discEdit_, batchDirectoryEdit_, biosEdit_, iconEdit_, titleEdit_, outputEdit_,
-                      certificateEdit_, certificatePasswordEdit_, ghidraEdit_, llvmEdit_,
+                      certificateEdit_, certificatePasswordEdit_, ghidraEdit_, powerEngineEdit_, llvmEdit_,
                       biosInitialSplashEdit_, biosHandoffImageEdit_ }) {
     edit->parentWidget()->setEnabled(!busy);
   }
@@ -1855,12 +1902,14 @@ void MainWindow::updatePlatformControls() {
   certificatePasswordEdit_->parentWidget()->setEnabled(signingRequested && !busy);
   macosGipGamepad_->setVisible(includesMacos);
   macosGipGamepad_->setEnabled(includesMacos && !busy);
-  // Only Virtua ARM cross-compiles against a separate LLVM toolchain; every
-  // other target builds with the host compiler.
-  const bool needsLlvmRoot = selectedPlatform == TargetPlatform::VirtuaArm ||
-                             selectedPlatform == TargetPlatform::All;
-  llvmEdit_->parentWidget()->setVisible(needsLlvmRoot);
-  llvmEdit_->parentWidget()->setEnabled(needsLlvmRoot && !busy);
+  // Virtua consumes PowerEngine in place and uses its LLVM/compiler bundle;
+  // neither dependency is duplicated into the generated framework.
+  const bool needsVirtuaRoots = selectedPlatform == TargetPlatform::VirtuaArm ||
+                                selectedPlatform == TargetPlatform::All;
+  powerEngineEdit_->parentWidget()->setVisible(needsVirtuaRoots);
+  powerEngineEdit_->parentWidget()->setEnabled(needsVirtuaRoots && !busy);
+  llvmEdit_->parentWidget()->setVisible(needsVirtuaRoots);
+  llvmEdit_->parentWidget()->setEnabled(needsVirtuaRoots && !busy);
   nativeExecution_->setVisible(nativeAvailable);
   nativeExecution_->setEnabled(nativeAvailable && !busy);
   biosEdit_->parentWidget()->setVisible(!nativeSelected);
@@ -1958,7 +2007,12 @@ void MainWindow::updateBuildButton() {
   const bool virtuaGbaModeReady = currentSystem_ != SystemKind::GameBoyAdvance ||
                                   selectedPlatform != TargetPlatform::VirtuaArm ||
                                   nativeExecution_->isChecked();
-  const bool ready = gameReady && biosReady && virtuaGbaModeReady &&
+  const bool needsVirtuaRoots = selectedPlatform == TargetPlatform::VirtuaArm ||
+                                selectedPlatform == TargetPlatform::All;
+  const bool virtuaRootsReady = !needsVirtuaRoots ||
+    (!powerEngineEdit_->text().trimmed().isEmpty() &&
+     !llvmEdit_->text().trimmed().isEmpty());
+  const bool ready = gameReady && biosReady && virtuaGbaModeReady && virtuaRootsReady &&
                      !outputEdit_->text().isEmpty() && analysisReady &&
                      signingReady && brandingReady && ciReady && localPlatformReady;
   buildButton_->setText(QStringLiteral("Export"));

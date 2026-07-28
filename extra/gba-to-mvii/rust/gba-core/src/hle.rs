@@ -381,7 +381,7 @@ fn rl_uncomp<B: Bus>(cpu: &mut Cpu, bus: &mut B) {
 fn write_out<B: Bus>(bus: &mut B, dst: u32, data: &[u8]) {
     let mut i = 0;
     while i + 1 < data.len() {
-        bus.write16(dst + i as u32, u16::from_le_bytes([data[i], data[i + 1]]));
+        bus.write16(dst + i as u32, u16::from_le_bytes(data[i..i + 2].try_into().unwrap()));
         i += 2;
     }
     if i < data.len() {

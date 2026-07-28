@@ -486,6 +486,35 @@ pub unsafe extern "C" fn gba_mvii_save_load(
     n
 }
 
+/// Calibrate the host clock used by the sampled frame profiler. Returns the
+/// measured latency in nanoseconds per read and clears startup counters.
+#[no_mangle]
+pub extern "C" fn gba_mvii_prof_calibrate() -> u32 {
+    gba_core::frameprof::calibrate()
+}
+
+/// Drain the per-frame PPU/APU cost counters into `out`, which receives
+/// `[ppu_us, apu_us, scanlines, samples]`. Reading clears them, so the caller
+/// gets the interval since its last call and nothing accumulates across a
+/// report window it did not ask for.
+///
+/// This splits the PPU/APU work hidden inside the caller's `emu` bucket; see
+/// rust/gba-core/src/frameprof.rs for the sampled, clock-calibrated measurement.
+///
+/// # Safety
+/// `out` must point at four writable `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn gba_mvii_prof_take(out: *mut u32) {
+    if out.is_null() {
+        return;
+    }
+    let (ppu_us, apu_us, lines, samples) = gba_core::frameprof::take();
+    *out.add(0) = ppu_us;
+    *out.add(1) = apu_us;
+    *out.add(2) = lines;
+    *out.add(3) = samples;
+}
+
 /// FNV-1a over the save medium — the cheap "has anything changed?" the caller
 /// needs to decide whether a flush to eMMC is worth stalling the machine for.
 ///

@@ -117,8 +117,9 @@ add_custom_command(
         --target-dir "${_gba_cargo_dir}"
     # From rust/, so cargo picks up rust/.cargo/config.toml — which carries the
     # ABI flags that have to match the C++ half: static relocations (all the
-    # virtua packager's relocation handler knows) and strict alignment (this
-    # side is -mno-unaligned-access).
+    # virtua packager's relocation handler knows) and unaligned access (this
+    # side is -munaligned-access; see the long note in that config.toml for why
+    # both halves flipped away from strict alignment and what makes it safe).
     WORKING_DIRECTORY "${GBA_MVII_RUST}"
     DEPENDS ${_gba_rust_sources}
     COMMENT "Building the GBA emulation core (cargo, ${VIRTUA_ARM_TARGET_TRIPLE})"
@@ -168,7 +169,11 @@ target_compile_options(R-Dash PRIVATE
     -mcpu=cortex-a7
     -marm
     -mfloat-abi=soft
-    -mno-unaligned-access
+    # Not -mno-unaligned-access: that costs 4 ldrb + 3 orr per 32-bit load where
+    # the core takes one ldr. SCTLR.A is 0 and the guest lives in Normal-WBWA
+    # DRAM, so the hardware handles the unaligned case. Must stay in step with
+    # rust/.cargo/config.toml's -strict-align, which documents the whole thing.
+    -munaligned-access
     -femulated-tls
     -ffreestanding
     -fpie
@@ -212,7 +217,8 @@ target_compile_options(gba-to-mvii-elf PRIVATE
     -mcpu=cortex-a7
     -marm
     -mfloat-abi=soft
-    -mno-unaligned-access
+    # See the note on the same flag in the R-Dash options above.
+    -munaligned-access
     -femulated-tls
     -ffreestanding
     -fpie

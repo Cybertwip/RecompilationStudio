@@ -326,7 +326,7 @@ impl Apu {
 
         // SOUNDCNT_L: per-channel enables (bits 8-11 right, 12-15 left)
         // and master volumes 0-7 (bits 0-2 right, 4-6 left).
-        let cnt_l = u16::from_le_bytes([io[0x80], io[0x81]]);
+        let cnt_l = u16::from_le_bytes(io[0x80..0x82].try_into().unwrap());
         let mut right: i32 = 0;
         let mut left: i32 = 0;
         for (i, &c) in ch.iter().enumerate() {

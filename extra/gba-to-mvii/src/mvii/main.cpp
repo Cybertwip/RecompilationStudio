@@ -679,6 +679,99 @@ void Runtime::report_stall(uint64_t now) {
     stall_last_clock_ = clock;
 }
 
+// One-shot host calibration, printed once at startup.
+//
+// Why this exists. Two independent parts of this runtime measured about an
+// order of magnitude slower than they have any business being on a 1144 MHz
+// Cortex-A7: the interpreter at ~610 host cycles per emulated guest
+// instruction (from the slope of emu-vs-slices across a frame-rate readback),
+// and the PPU at ~250 cycles per pixel (from the fixed per-frame term of the
+// same fit). Those two share no code. When two unrelated things are both ~10x
+// slow, the cause usually is not either of them, and optimising emulator
+// internals is wasted effort until that is settled. Removing every redundant
+// byte load from the fetch path — verified at the object level, 207 ldrb down
+// to 81 in Machine::step — moved the frame rate by nothing, which is what a
+// systemic cause predicts and an algorithmic one does not.
+//
+// The three numbers separate the candidates:
+//
+//   alu   A dependent integer chain: nothing but the core pipeline and
+//         whatever now_us() measures. ~1-2 cycles/op is the expected answer.
+//         Far above that means the CPU is not running at the speed cpufreq
+//         reports, or now_us() does not measure what it says it does — and
+//         then every "us" in every report on this device is scaled wrong,
+//         including the frame rate.
+//   seq   A linear sweep of a buffer well past L2, with the loads independent.
+//         Measures whether the D-cache and the prefetcher are actually on.
+//   rand  A pointer chase over the same buffer, each load's address depending
+//         on the previous load's value, so the prefetcher cannot help. This is
+//         the access pattern of fetching from a 16 MB ROM. If alu and seq look
+//         sane and this is hundreds of ns, the emulator is memory-latency
+//         bound, and no amount of instruction selection will ever fix it —
+//         the answer would be a smaller working set or a recompiler.
+//
+// Costs one console line and well under a second, once, before the first frame.
+// Deliberately not behind a build flag: it is three numbers that make every
+// future performance claim about this runtime checkable instead of inferred.
+void log_host_calibration()
+{
+    constexpr size_t   kWords    = 512u * 1024u;   // 2 MiB — comfortably past L2
+    constexpr uint32_t kAluIters = 2000000u;
+    constexpr uint32_t kChase    = 200000u;
+
+    // ALU: two dependent ops per iteration, result consumed so it survives -O3.
+    const uint64_t t0 = gbamvii::now_us();
+    uint32_t a = 1u;
+    for (uint32_t i = 0; i < kAluIters; ++i) {
+        a = a * 1664525u + 1013904223u;
+        a ^= a >> 15;
+    }
+    const uint64_t alu_us = gbamvii::now_us() - t0;
+
+    std::vector<uint32_t> buf;
+    buf.resize(kWords);
+
+    // A single cycle through every slot: stride is odd, so gcd(stride, 2^n) = 1
+    // and the chase visits all of them. ~64 KB per hop puts each one on its own
+    // page as well as its own line.
+    constexpr size_t kStride = 16385u;
+    for (size_t i = 0; i < kWords; ++i) {
+        buf[i] = static_cast<uint32_t>((i + kStride) & (kWords - 1u));
+    }
+
+    const uint64_t t1 = gbamvii::now_us();
+    uint32_t sum = 0;
+    for (size_t i = 0; i < kWords; ++i) sum += buf[i];
+    const uint64_t seq_us = gbamvii::now_us() - t1;
+
+    const uint64_t t2 = gbamvii::now_us();
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < kChase; ++i) idx = buf[idx];
+    const uint64_t rand_us = gbamvii::now_us() - t2;
+
+    // Consume both results; otherwise -O3 is entitled to delete the loops.
+    volatile uint32_t sink = a + sum + idx;
+    (void)sink;
+
+    // Integer arithmetic only: this runtime is built -mfloat-abi=soft and a
+    // division here is cheaper to read than a float formatting path.
+    const uint64_t alu_ops  = static_cast<uint64_t>(kAluIters) * 2ull;
+    const uint64_t alu_ps   = alu_us ? (alu_us * 1000000ull) / alu_ops : 0ull;
+    const uint64_t seq_mbs  = seq_us ? (static_cast<uint64_t>(kWords) * 4ull) / seq_us : 0ull;
+    const uint64_t rand_ns  = kChase ? (rand_us * 1000ull) / kChase : 0ull;
+
+    logf("gba: calib alu %llu ps/op (%llu.%02llu cyc @1144MHz) seq %llu MB/s "
+         "rand %llu ns/access ... alu %llu us seq %llu us rand %llu us\n",
+         static_cast<unsigned long long>(alu_ps),
+         static_cast<unsigned long long>((alu_ps * 1144ull) / 1000000ull),
+         static_cast<unsigned long long>(((alu_ps * 1144ull) / 10000ull) % 100ull),
+         static_cast<unsigned long long>(seq_mbs),
+         static_cast<unsigned long long>(rand_ns),
+         static_cast<unsigned long long>(alu_us),
+         static_cast<unsigned long long>(seq_us),
+         static_cast<unsigned long long>(rand_us));
+}
+
 int Runtime::run() {
     const uint32_t rate = gba_mvii_audio_rate();
     audio_.open(rate, 2);   // the core mixes interleaved stereo
@@ -688,6 +781,11 @@ int Runtime::run() {
          static_cast<unsigned>(gba_mvii_screen_width()),
          static_cast<unsigned>(gba_mvii_screen_height()),
          static_cast<unsigned>(rate), audio_.enabled() ? "stereo" : "off");
+
+    log_host_calibration();
+    const uint32_t profiler_clock_ns = gba_mvii_prof_calibrate();
+    logf("gba: frame profiler sampled ppu=1/16 apu=1/64, clock %u ns/read\n",
+         static_cast<unsigned>(profiler_clock_ns));
 
     uint64_t next_frame_us = gbamvii::now_us() + kFrameUs;
     uint64_t report_us     = gbamvii::now_us() + 5000000ull;
@@ -750,9 +848,6 @@ int Runtime::run() {
                 span_us = gbamvii::now_us();
                 sleep_us_ += span_us - now;
             } else {
-
-                gbamvii::yield_now();
-
                 // The clock did not reach the deadline in the time we were
                 // willing to wait for it, so it is not a clock we can pace
                 // against. Stop trying: the previous code looped here until the
@@ -798,6 +893,32 @@ int Runtime::run() {
                  static_cast<unsigned long long>(sleep_us_ / n),
                  static_cast<unsigned long long>(slices_ / n),
                  static_cast<unsigned long long>(yield_count_ ? yield_ns_ / yield_count_ : 0));
+
+            // The breakdown above accounts for everything outside the core; this
+            // one splits what is inside `emu`. Drained here rather than per
+            // frame because reading clears, so the window matches exactly, and
+            // because one FFI call per five seconds costs nothing measurable.
+            // `rest` is what neither pass explains — guest instructions, DMA,
+            // timers — and it is the number that says whether the fixed cost or
+            // the variable cost is the thing worth attacking.
+            uint32_t prof[4] = {0, 0, 0, 0};
+            gba_mvii_prof_take(prof);
+            const uint64_t ppu_us = prof[0];
+            const uint64_t apu_us = prof[1];
+            const uint64_t lines  = prof[2] ? prof[2] : 1;
+            const uint64_t samps  = prof[3] ? prof[3] : 1;
+            const uint64_t inside = ppu_us + apu_us;
+            logf("gba: emu split — ppu %llu us/frame (%llu lines, %llu ns/line) "
+                 "apu %llu us/frame (%llu samples, %llu ns/sample) rest %llu us/frame\n",
+                 static_cast<unsigned long long>(ppu_us / n),
+                 static_cast<unsigned long long>(prof[2] / n),
+                 static_cast<unsigned long long>(ppu_us * 1000ull / lines),
+                 static_cast<unsigned long long>(apu_us / n),
+                 static_cast<unsigned long long>(prof[3] / n),
+                 static_cast<unsigned long long>(apu_us * 1000ull / samps),
+                 static_cast<unsigned long long>(
+                     emu_us_ > inside ? (emu_us_ - inside) / n : 0));
+
             report_frames = frames_;
             report_us = now + 5000000ull;
             emu_us_ = present_us_ = audio_us_ = sleep_us_ = slices_ = 0;

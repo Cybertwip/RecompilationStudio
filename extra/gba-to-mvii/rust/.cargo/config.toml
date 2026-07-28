@@ -5,15 +5,51 @@
 #                      -mfloat-abi=soft in CMakeLists.txt. A mismatch here is
 #                      not a link error, it is a silently wrong calling
 #                      convention for every f64 that crosses the boundary.
-#   +strict-align      mirrors -mno-unaligned-access on the C++ side. Note this
-#                      is not free: every from_le_bytes() on a possibly-
-#                      unaligned slice becomes four byte loads and a shift
-#                      chain instead of one ldr, and an interpreter does that
-#                      on each fetch and each guest memory access. The MMU maps
-#                      DRAM Normal (mt6592_mmu.c) and SCTLR.A is 0, so the
-#                      hardware would in fact take the unaligned access — if
-#                      the frame breakdown lands on emulation, dropping this
-#                      (both halves together) is the first lever to pull.
+#   -strict-align      this lever has been pulled; the note that predicted it is
+#                      kept below because the reasoning is the reason it is safe.
+#
+#                      It used to be +strict-align, mirroring -mno-unaligned-access
+#                      on the C++ side, with the warning that it "is not free:
+#                      every from_le_bytes() on a possibly-unaligned slice
+#                      becomes four byte loads and a shift chain instead of one
+#                      ldr, and an interpreter does that on each fetch and each
+#                      guest memory access", to be dropped "if the frame
+#                      breakdown lands on emulation". It did: a boot-status
+#                      readback put `emu` at 96-98% of every frame, with present
+#                      at 1.4-7% and audio at 0.2-1.1%, i.e. ~623 host cycles per
+#                      emulated guest instruction at 1144 MHz.
+#
+#                      Two things about the negation are easy to get wrong:
+#                        - it must be written -strict-align, not merely omitted.
+#                          armv7a-none-eabi's target spec turns strict-align ON
+#                          by default, so deleting the flag changes nothing.
+#                        - rustc prints "unknown and unstable feature specified
+#                          for -Ctarget-feature: strict-align". It is a warning
+#                          about the stability promise, not about the flag being
+#                          ignored; LLVM does receive it. Verified by diffing
+#                          --emit asm both ways: from_le_bytes(s[i..i+4]) goes
+#                          from 4 ldrb + 3 orr to a single ldr, and
+#                          from_le_bytes(s[i..i+2]) from 2 ldrb + 1 orr to a
+#                          single ldrh.
+#
+#                      What licenses it on this hardware: ARMv7-A permits
+#                      unaligned LDR/LDRH to Normal memory when SCTLR.A == 0.
+#                      Live readback has SCTLR=0x00c5187d (bit 1 clear), and
+#                      mt6592_mmu.c maps all of 0x80000000..0xBFFFFFFF as
+#                      SECTION_NORMAL_WBWA, which is where the guest image, its
+#                      heap and the framebuffer all live. MMIO stays
+#                      Strongly-Ordered, where an unaligned access WOULD fault —
+#                      but no guest access reaches it: emulated GBA I/O is a
+#                      plain byte array in this process (MemMap::io), not a
+#                      window onto real registers.
+#
+#                      Note the flag alone only fixes the 32-bit reads. The
+#                      16-bit ones had to be rewritten from
+#                      from_le_bytes([a[i], a[i+1]]) to the slice form, because
+#                      the two-element array literal compiles to 2 ldrb + 1 orr
+#                      under BOTH settings — see the comments in mem.rs read16()
+#                      and ppu.rs io16(). That matters more than the 32-bit half,
+#                      since GBA code is mostly Thumb.
 #   target-cpu         cortex-a7: in-order, dual-issue, VFPv4/NEON. Without it
 #                      LLVM schedules for a generic ARMv7 pipeline model.
 #   relocation-model   static: absolute data references become R_ARM_ABS32,
@@ -28,6 +64,6 @@ target = "armv7a-none-eabi"
 [target.armv7a-none-eabi]
 rustflags = [
     "-C", "relocation-model=static",
-    "-C", "target-feature=+strict-align",
+    "-C", "target-feature=-strict-align",
     "-C", "target-cpu=cortex-a7",
 ]

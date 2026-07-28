@@ -39,12 +39,18 @@ const OBJ_EMPTY: ObjPixel = ObjPixel {
     semi: false,
 };
 
+// The `a[i..i + 2].try_into()` spelling below is deliberate and is not
+// interchangeable with `[a[i], a[i + 1]]`, which is what these used to be: only
+// the slice form widens into a single `ldrh`, the array literal stays 2 `ldrb`
+// + 1 `orr` on every target setting. pal16() in particular runs once per
+// on-screen pixel. See read16() in mem.rs for the full note.
 fn io16(mem: &MemMap, off: usize) -> u16 {
-    u16::from_le_bytes([mem.io[off], mem.io[off + 1]])
+    u16::from_le_bytes(mem.io[off..off + 2].try_into().unwrap())
 }
 
 fn pal16(mem: &MemMap, index: usize) -> u16 {
-    u16::from_le_bytes([mem.palette[index * 2], mem.palette[index * 2 + 1]]) & 0x7FFF
+    let off = index * 2;
+    u16::from_le_bytes(mem.palette[off..off + 2].try_into().unwrap()) & 0x7FFF
 }
 
 pub fn render_scanline(mem: &mut MemMap, line: usize) {
@@ -138,12 +144,7 @@ pub fn render_scanline(mem: &mut MemMap, line: usize) {
 }
 
 fn read_io32(mem: &MemMap, off: usize) -> u32 {
-    u32::from_le_bytes([
-        mem.io[off],
-        mem.io[off + 1],
-        mem.io[off + 2],
-        mem.io[off + 3],
-    ])
+    u32::from_le_bytes(mem.io[off..off + 4].try_into().unwrap())
 }
 
 fn sign_extend28(v: u32) -> i32 {
@@ -187,7 +188,7 @@ fn render_text_bg(mem: &MemMap, bg: usize, line: usize, out: &mut Line) {
         let block = (ty / 32) * (w_tiles / 32) + tx / 32;
         let entry_idx = block * 1024 + (ty % 32) * 32 + (tx % 32);
         let entry_off = screen_base + entry_idx * 2;
-        let entry = u16::from_le_bytes([mem.vram[entry_off], mem.vram[entry_off + 1]]);
+        let entry = u16::from_le_bytes(mem.vram[entry_off..entry_off + 2].try_into().unwrap());
 
         let tile = (entry & 0x3FF) as usize;
         let hflip = entry & 0x400 != 0;
@@ -303,7 +304,7 @@ fn render_bitmap_bg(mem: &MemMap, mode: u16, dispcnt: u16, line: usize, out: &mu
         3 => {
             for (x, out_px) in out.iter_mut().enumerate() {
                 let off = (line * VISIBLE_WIDTH + x) * 2;
-                let c = u16::from_le_bytes([mem.vram[off], mem.vram[off + 1]]) & 0x7FFF;
+                let c = u16::from_le_bytes(mem.vram[off..off + 2].try_into().unwrap()) & 0x7FFF;
                 *out_px = c;
             }
         }
@@ -322,7 +323,7 @@ fn render_bitmap_bg(mem: &MemMap, mode: u16, dispcnt: u16, line: usize, out: &mu
             for (x, out_px) in out.iter_mut().enumerate() {
                 if x < 160 && line < 128 {
                     let off = page + (line * 160 + x) * 2;
-                    let c = u16::from_le_bytes([mem.vram[off], mem.vram[off + 1]]) & 0x7FFF;
+                    let c = u16::from_le_bytes(mem.vram[off..off + 2].try_into().unwrap()) & 0x7FFF;
                     *out_px = c;
                 } else {
                     *out_px = TRANSPARENT;
@@ -355,9 +356,10 @@ fn render_sprites(
     let line = line as i32;
 
     for i in 0..128 {
-        let a0 = u16::from_le_bytes([mem.oam[i * 8], mem.oam[i * 8 + 1]]);
-        let a1 = u16::from_le_bytes([mem.oam[i * 8 + 2], mem.oam[i * 8 + 3]]);
-        let a2 = u16::from_le_bytes([mem.oam[i * 8 + 4], mem.oam[i * 8 + 5]]);
+        let attr = i * 8;
+        let a0 = u16::from_le_bytes(mem.oam[attr..attr + 2].try_into().unwrap());
+        let a1 = u16::from_le_bytes(mem.oam[attr + 2..attr + 4].try_into().unwrap());
+        let a2 = u16::from_le_bytes(mem.oam[attr + 4..attr + 6].try_into().unwrap());
 
         let affine = a0 & 0x100 != 0;
         if !affine && a0 & 0x200 != 0 {
@@ -394,7 +396,7 @@ fn render_sprites(
         let (pa, pb, pc, pd) = if affine {
             let g = ((a1 >> 9) & 0x1F) as usize * 32;
             let p = |off: usize| {
-                u16::from_le_bytes([mem.oam[g + off], mem.oam[g + off + 1]]) as i16 as i32
+                u16::from_le_bytes(mem.oam[g + off..g + off + 2].try_into().unwrap()) as i16 as i32
             };
             (p(6), p(14), p(22), p(30))
         } else {

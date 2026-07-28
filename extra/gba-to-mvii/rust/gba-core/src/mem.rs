@@ -412,6 +412,11 @@ impl MemMap {
         if self.audio_cursor > until {
             return;
         }
+        // Make the profiler's sampling decision *here*, after the ~99/100
+        // no-work early-outs. Sampled calls read the host clock; the rest only
+        // increment the exact sample count used to scale the estimate.
+        let prof = crate::frameprof::start_apu(self.audio_cursor);
+        let cursor0 = self.audio_cursor;
         // The shadow mixers render on the same grid; hoisted out of
         // `self` so they can read guest memory while we mutate the taps.
         let mut mp2k = self.mp2k.take();
@@ -428,7 +433,7 @@ impl MemMap {
             let (psg_l, psg_r) =
                 self.apu
                     .sample(&self.io, &self.wave_shadow, AUDIO_SAMPLE_CYCLES as u32);
-            let cnt_h = u16::from_le_bytes([self.io[0x82], self.io[0x83]]);
+            let cnt_h = u16::from_le_bytes(self.io[0x82..0x84].try_into().unwrap());
             let a = (self.fifo_sample[0] as i32 * 64) >> ((cnt_h >> 2 & 1) ^ 1);
             let b = (self.fifo_sample[1] as i32 * 64) >> ((cnt_h >> 3 & 1) ^ 1);
             let mut l = psg_l as i32;
@@ -523,6 +528,7 @@ impl MemMap {
         self.mp2k = mp2k;
         self.gax = gax;
         self.rdrv = rdrv;
+        prof.end_apu(((self.audio_cursor - cursor0) / AUDIO_SAMPLE_CYCLES) as u32);
     }
 
     /// GAX HLE hook: dispatch loops call this when PC lands on one of
@@ -610,7 +616,9 @@ impl MemMap {
             VPhase::Hblank => {
                 let line = self.scanline();
                 if line < VISIBLE_SCANLINES {
+                    let prof = crate::frameprof::start_ppu(line as u32);
                     crate::ppu::render_scanline(self, line as usize);
+                    prof.end_ppu(1);
                     self.trigger_dma(2); // HBlank timing (visible lines only)
                 }
                 if self.io[(DISPSTAT & 0x3FF) as usize] & 0x10 != 0 {
@@ -651,7 +659,7 @@ impl MemMap {
     /// scanline — `keys` is written directly by frontends, so there is
     /// no write hook to piggyback on.
     fn check_keypad(&mut self) {
-        let keycnt = u16::from_le_bytes([self.io[0x132], self.io[0x133]]);
+        let keycnt = u16::from_le_bytes(self.io[0x132..0x134].try_into().unwrap());
         let sel = keycnt & 0x3FF;
         let pressed = !self.keys & 0x3FF;
         let cond = if keycnt & 0x8000 != 0 {
@@ -711,7 +719,7 @@ impl MemMap {
         if i < 2 {
             let t = &self.timers[i];
             let period = (((0x1_0000 - t.reload as u64).max(1)) << t.prescaler_shift()) as u32;
-            let soundcnt_h = u16::from_le_bytes([self.io[0x82], self.io[0x83]]);
+            let soundcnt_h = u16::from_le_bytes(self.io[0x82..0x84].try_into().unwrap());
             for f in 0..2 {
                 let timer_sel = (soundcnt_h >> (10 + f * 4)) & 1;
                 if timer_sel as usize == i {
@@ -1243,13 +1251,29 @@ impl Bus for MemMap {
         }
     }
 
+    /// The hottest function in the emulator: every Thumb instruction fetch
+    /// lands here, as does every 16-bit guest load.
+    ///
+    /// Each arm reads its two bytes as `from_le_bytes(a[i..i + 2].try_into())`
+    /// and not as `from_le_bytes([a[i], a[i + 1]])`. The two are identical in
+    /// meaning — same bounds requirement, same bytes, same order — but only the
+    /// slice form compiles to a single `ldrh`. The array-literal form emits
+    /// 2 `ldrb` + 1 `orr` no matter how the target is configured, because LLVM
+    /// sees two independent element reads rather than one two-byte load it is
+    /// allowed to widen. (This whole file used to be written the other way; it
+    /// cost roughly two thirds of the instructions on the fetch path.)
+    ///
+    /// The single `ldrh` may be unaligned, which is fine here and nowhere near
+    /// as obvious as it looks — see rust/.cargo/config.toml, which carries the
+    /// `-strict-align` that lets the widening happen at all, and the SCTLR.A /
+    /// MMU argument for why the hardware takes it.
     fn read16(&mut self, addr: u32) -> u16 {
         match addr >> 24 {
             0x00 => {
                 if addr < 0x4000 {
                     if self.pc_in_bios {
                         let off = (addr & !1) as usize;
-                        u16::from_le_bytes([self.bios[off], self.bios[off + 1]])
+                        u16::from_le_bytes(self.bios[off..off + 2].try_into().unwrap())
                     } else {
                         // BIOS read protection (see read8).
                         (self.bios_open >> ((addr & 2) * 8)) as u16
@@ -1261,7 +1285,7 @@ impl Bus for MemMap {
             0x02 => {
                 let off = (addr & 0x3_FFFF) as usize;
                 if off + 2 <= 0x4_0000 {
-                    u16::from_le_bytes([self.ewram[off], self.ewram[off + 1]])
+                    u16::from_le_bytes(self.ewram[off..off + 2].try_into().unwrap())
                 } else {
                     self.rd16_bytes(addr)
                 }
@@ -1269,7 +1293,7 @@ impl Bus for MemMap {
             0x03 => {
                 let off = (addr & 0x7FFF) as usize;
                 if off + 2 <= 0x8000 {
-                    u16::from_le_bytes([self.iwram[off], self.iwram[off + 1]])
+                    u16::from_le_bytes(self.iwram[off..off + 2].try_into().unwrap())
                 } else {
                     self.rd16_bytes(addr)
                 }
@@ -1277,7 +1301,7 @@ impl Bus for MemMap {
             0x05 => {
                 let off = (addr & 0x3FF) as usize;
                 if off + 2 <= 0x400 {
-                    u16::from_le_bytes([self.palette[off], self.palette[off + 1]])
+                    u16::from_le_bytes(self.palette[off..off + 2].try_into().unwrap())
                 } else {
                     self.rd16_bytes(addr)
                 }
@@ -1285,8 +1309,11 @@ impl Bus for MemMap {
             0x06 => {
                 let i0 = Self::vram_index(addr);
                 let i1 = Self::vram_index(addr.wrapping_add(1));
+                // The guard is what makes the slice legal: only when the second
+                // byte maps to i0 + 1 is this two consecutive bytes rather than
+                // a read straddling one of VRAM's mirror seams.
                 if i1 == i0 + 1 {
-                    u16::from_le_bytes([self.vram[i0], self.vram[i1]])
+                    u16::from_le_bytes(self.vram[i0..i0 + 2].try_into().unwrap())
                 } else {
                     self.rd16_bytes(addr)
                 }
@@ -1294,7 +1321,7 @@ impl Bus for MemMap {
             0x07 => {
                 let off = (addr & 0x3FF) as usize;
                 if off + 2 <= 0x400 {
-                    u16::from_le_bytes([self.oam[off], self.oam[off + 1]])
+                    u16::from_le_bytes(self.oam[off..off + 2].try_into().unwrap())
                 } else {
                     self.rd16_bytes(addr)
                 }
@@ -1305,7 +1332,7 @@ impl Bus for MemMap {
                 }
                 let idx = Self::rom_index(addr);
                 if idx + 2 <= self.rom.len() {
-                    u16::from_le_bytes([self.rom[idx], self.rom[idx + 1]])
+                    u16::from_le_bytes(self.rom[idx..idx + 2].try_into().unwrap())
                 } else {
                     self.rd16_bytes(addr)
                 }

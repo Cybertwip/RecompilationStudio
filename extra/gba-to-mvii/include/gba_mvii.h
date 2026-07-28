@@ -131,6 +131,21 @@ size_t gba_mvii_save_load(GbaMvii* machine, const uint8_t* data, size_t len);
 // whether a flush to eMMC is worth stalling the machine for.
 uint64_t gba_mvii_save_hash(GbaMvii* machine);
 
+// ── profiling ──────────────────────────────────────────────────────────────
+
+// Drain the core's per-frame cost counters: out[0] microseconds inside the
+// scanline renderer, out[1] microseconds generating audio grid samples, out[2]
+// scanlines rendered, out[3] samples generated. Reading clears them.
+//
+// These two are the whole of the per-frame cost that does not scale with how
+// much guest code ran, and they are invisible to the caller's own timers
+// because both happen under gba_mvii_run_steps().
+//
+// Call calibrate once before the first emulated frame. It returns the measured
+// host-clock cost in ns/read and resets the sampled counters.
+uint32_t gba_mvii_prof_calibrate(void);
+void gba_mvii_prof_take(uint32_t* out /* [4] */);
+
 // ── hooks this side must provide ───────────────────────────────────────────
 
 // Diagnostic text from the core (its eprintln!). Not NUL-terminated.
@@ -140,6 +155,10 @@ void gba_mvii_diag_write(const uint8_t* ptr, size_t len);
 // cartridge RTC. Negative means "no clock", and the core falls back to a fixed
 // epoch.
 int64_t gba_mvii_host_epoch(void);
+
+// Monotonic microseconds, the same clock the runtime times frames with, for
+// the profiling counters above.
+uint64_t gba_mvii_host_now_us(void);
 
 #ifdef __cplusplus
 }  // extern "C"

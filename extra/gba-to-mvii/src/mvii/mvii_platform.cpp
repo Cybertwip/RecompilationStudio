@@ -646,3 +646,10 @@ extern "C" int64_t gba_mvii_host_epoch(void) {
     if (now == static_cast<time_t>(-1)) return -1;
     return static_cast<int64_t>(now);
 }
+
+extern "C" uint64_t gba_mvii_host_now_us(void) {
+    // Deliberately the same now_us() the frame report uses, so the core's PPU
+    // and APU numbers can be subtracted from `emu` without a scale conversion
+    // or a second clock's drift between them.
+    return gbamvii::now_us();
+}

@@ -32,6 +32,7 @@ pub mod capi;
 pub mod cpu;
 pub mod engine;
 pub mod exec;
+pub mod frameprof;
 pub mod gax;
 pub mod hle;
 pub mod hostclock;

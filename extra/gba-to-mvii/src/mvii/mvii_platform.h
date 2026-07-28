@@ -47,10 +47,10 @@ public:
     //
     // The source is the GBA's own format — BGR555, red in the low five bits —
     // because that is what the PPU writes and converting on the way out is one
-    // pass instead of two. The expansion runs through a 32768-entry lookup
-    // table built on the heap at open(): 128 KB that costs nothing in the
-    // packaged image (unlike a file-scope array, which the .virtua packager
-    // materializes) and turns per-pixel channel arithmetic into one load.
+    // pass instead of two. The 5-to-8-bit expansion is computed per pixel, not
+    // looked up: a 32768-entry table is 128 KB against this Cortex-A7's 32 KB
+    // L1D, so it missed on most pixels and evicted the interpreter's working
+    // set once a frame on top of that. See rgba8_from_bgr555 in the .cpp.
     void present(const uint16_t* bgr555);
 
     // Present a flat colour. Writes straight into the surface, so it costs no

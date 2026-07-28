@@ -1855,6 +1855,12 @@ void MainWindow::updatePlatformControls() {
   certificatePasswordEdit_->parentWidget()->setEnabled(signingRequested && !busy);
   macosGipGamepad_->setVisible(includesMacos);
   macosGipGamepad_->setEnabled(includesMacos && !busy);
+  // Only Virtua ARM cross-compiles against a separate LLVM toolchain; every
+  // other target builds with the host compiler.
+  const bool needsLlvmRoot = selectedPlatform == TargetPlatform::VirtuaArm ||
+                             selectedPlatform == TargetPlatform::All;
+  llvmEdit_->parentWidget()->setVisible(needsLlvmRoot);
+  llvmEdit_->parentWidget()->setEnabled(needsLlvmRoot && !busy);
   nativeExecution_->setVisible(nativeAvailable);
   nativeExecution_->setEnabled(nativeAvailable && !busy);
   biosEdit_->parentWidget()->setVisible(!nativeSelected);

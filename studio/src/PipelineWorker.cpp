@@ -2043,7 +2043,7 @@ void PipelineWorker::run(PipelineRequest request) {
   }
   const QString cmakeListsPath = QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt"));
   const QString configureExample = virtuaTarget
-    ? QStringLiteral("cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=framework/extra/virtua/CMake/VirtuaArmToolchain.cmake -DCMAKE_BUILD_TYPE=Release")
+    ? QStringLiteral("cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=framework/extra/virtua/CMake/VirtuaArmToolchain.cmake -DVIRTUA_LLVM_ROOT=/opt/homebrew/opt/llvm -DCMAKE_BUILD_TYPE=Release")
     : QStringLiteral("cmake -S . -B build -DCMAKE_BUILD_TYPE=Release");
   const QString sourceReadme = QStringLiteral(
     "# %1 — PSXRecomp source export\n\n"
@@ -2260,6 +2260,9 @@ void PipelineWorker::run(PipelineRequest request) {
                        << QStringLiteral("-DPSX_VIRTUA=ON")
                        << QStringLiteral("-DPSX_SETTINGS_MENU=OFF")
                        << QStringLiteral("-DPSX_MACOS_GIP_GAMEPAD=OFF");
+    if (!request.llvmRoot.isEmpty()) {
+      configureArguments << QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot);
+    }
   } else if (crossWindowsTarget) {
     configureArguments << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(mingwToolchainPath)
                        << QStringLiteral("-DPSX_STATIC_RUNTIME=ON")
@@ -3641,9 +3644,15 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     "against MVII's `/dev/fb0`, `/dev/input0` and `/dev/dac0`. No BIOS image is "
     "required and no ROM code is translated ahead of time — `game.gba` is "
     "interpreted as it runs.\n\n"
-    "## Build\n\n```sh\n"
+    "## Build\n\n"
+    "Requires an LLVM toolchain that can target `armv7a-none-eabi` (`brew install "
+    "llvm`, or any LLVM build with `clang`, `lld` and the LLVM binutils). Point "
+    "`VIRTUA_LLVM_ROOT` at its installation root — MVII uses a custom BSD-style "
+    "syscall ABI and its own libc sysroot, so a host or Linux clang will compile "
+    "and link without complaint and then fail at runtime.\n\n```sh\n"
     "cmake -S . -B build -G Ninja \\\n"
     "  -DCMAKE_TOOLCHAIN_FILE=virtua/CMake/VirtuaArmToolchain.cmake \\\n"
+    "  -DVIRTUA_LLVM_ROOT=/opt/homebrew/opt/llvm \\\n"
     "  -DCMAKE_BUILD_TYPE=Release\n"
     "cmake --build build --target gba-runtime --parallel\n"
     "```\n\nThe package is written under "
@@ -3770,11 +3779,24 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   nextStage(QStringLiteral("Build Virtua ARM native launcher"));
   const QString toolchain = QDir(projectDir).filePath(
     QStringLiteral("virtua/CMake/VirtuaArmToolchain.cmake"));
-  if (!runCommand(cmake,
-                  { QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
-                    QStringLiteral("-G"), QStringLiteral("Ninja"),
-                    QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
-                    QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(toolchain) },
+  QStringList virtuaConfigureArguments{
+    QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
+    QStringLiteral("-G"), QStringLiteral("Ninja"),
+    QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
+    QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(toolchain)
+  };
+  // Pin the cross-compiler explicitly. Without this the toolchain file falls
+  // back to searching PATH and can pick up a host clang, producing a binary
+  // whose libc does not match MVII's syscall ABI.
+  if (!request.llvmRoot.isEmpty()) {
+    virtuaConfigureArguments << QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot);
+    emit logLine(QStringLiteral("Virtua ARM toolchain: %1").arg(request.llvmRoot));
+  } else {
+    emit logLine(QStringLiteral(
+      "Virtua ARM toolchain: not configured — searching PATH. Set the LLVM toolchain "
+      "path in Studio if the produced package misbehaves at runtime."));
+  }
+  if (!runCommand(cmake, virtuaConfigureArguments,
                   workspace, QStringLiteral("cmake -S <source> -B <build> -G Ninja -DCMAKE_TOOLCHAIN_FILE=<VirtuaArmToolchain>"),
                   10 * 60 * 1000) ||
       !runCommand(cmake,

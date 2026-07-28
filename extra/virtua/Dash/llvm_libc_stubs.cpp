@@ -224,13 +224,70 @@ constexpr int kClockMonotonicRaw = CLOCK_MONOTONIC_RAW;
 #define VIRTUA_TIME_TICKS_ARE_MICROS 1
 #endif
 
+// Report a clock fault to stderr exactly once. Returning 0 on failure makes a
+// failed syscall indistinguishable from a genuinely-zero clock, and that
+// ambiguity is what makes a frozen guest clock so hard to localise: the guest
+// reports "0us" identically whether the kernel said no, the ABI slot is empty,
+// or time really has not started. Naming the case once costs a branch on the
+// hot path and nothing after the first occurrence. stderr only -- never eMMC,
+// which would stall the guest.
+static void report_clock_fault_once(bool& latch, const char* text, long code) {
+    if (latch) return;
+    latch = true;
+
+    char buffer[128];
+    size_t n = 0;
+    for (const char* p = text; *p != '\0' && n < sizeof(buffer) - 24; ++p) {
+        buffer[n++] = *p;
+    }
+
+    unsigned long magnitude;
+    if (code < 0) {
+        buffer[n++] = '-';
+        magnitude = static_cast<unsigned long>(-(code + 1)) + 1UL;
+    } else {
+        magnitude = static_cast<unsigned long>(code);
+    }
+
+    char digits[24];
+    size_t d = 0;
+    do {
+        digits[d++] = static_cast<char>('0' + (magnitude % 10UL));
+        magnitude /= 10UL;
+    } while (magnitude != 0UL && d < sizeof(digits));
+    while (d != 0) {
+        buffer[n++] = digits[--d];
+    }
+
+    buffer[n++] = '\n';
+    sys_write(2, buffer, n);
+}
+
 static inline unsigned long long kernel_monotonic_microseconds() {
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 0;
-    if (sys_gettimeofday(&tv, nullptr) != 0) return 0;
-    return static_cast<unsigned long long>(tv.tv_sec) * kMicrosPerSecond +
-           static_cast<unsigned long long>(tv.tv_usec);
+
+    const long rc = sys_gettimeofday(&tv, nullptr);
+    if (rc != 0) {
+        static bool reported_failure = false;
+        report_clock_fault_once(reported_failure,
+            "virtua: sys_gettimeofday failed; guest clock frozen at 0. rc=", rc);
+        return 0;
+    }
+
+    const unsigned long long usec =
+        static_cast<unsigned long long>(tv.tv_sec) * kMicrosPerSecond +
+        static_cast<unsigned long long>(tv.tv_usec);
+    if (usec == 0) {
+        // The syscall succeeded but the kernel handed back zero. That points at
+        // the kernel timebase or the ABI slot, not at this side of the boundary.
+        static bool reported_zero = false;
+        report_clock_fault_once(reported_zero,
+            "virtua: sys_gettimeofday returned 0us; kernel timebase suspect. tv_usec=",
+            static_cast<long>(tv.tv_usec));
+    }
+    return usec;
 }
 
 static inline unsigned long long read_time_ticks() {

@@ -18,7 +18,7 @@
 #                      LLVM schedules for a generic ARMv7 pipeline model.
 #   relocation-model   static: absolute data references become R_ARM_ABS32,
 #                      which is what the .virtua packager rewrites (see
-#                      relocationValue() in extra/virtua/binary/virtua.go).
+#                      relocationValue() in PowerEngine External/Virtua/binary/virtua.go).
 #                      PIC would route them through a GOT the packager can
 #                      only patch heuristically.
 

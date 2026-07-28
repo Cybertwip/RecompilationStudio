@@ -1,17 +1,25 @@
-# Virtua support imported for PSXRecomp
+# Virtua integration for PSXRecomp
 
-This directory contains the minimum Virtua/MVII userspace ABI, packaging tool,
-and ARM runtime material needed by Studio exports and the native ARM bridge
-launchers. The source files under `Dash/`, `CMake/`, `binary/`, `include/`, and
-`posix-shim/` were copied from:
+This directory contains only PSXRecomp-owned Virtua integration code:
 
-`/Users/cybertwip/Projects/PowerEngineV3/PowerEngine`
+- the thin ARM toolchain and PowerEngine path resolver under `CMake/`;
+- the PSXRecomp/MVII native-bridge contract and tiny launchers under `include/`
+  and `native/`;
+- the PSX runtime's SDL compatibility backend under `sdl/`.
 
-The copied baseline is PowerEngine commit
-`1e04e46a69` (July 26, 2026). The ARM sysroot and compiler-rt archive were
-produced by that same tree's MVII LLVM runtime targets.
+PowerEngine is consumed **in place** through `POWERENGINE_ROOT`. PSXRecomp does
+not copy or vendor PowerEngine's `External/Virtua/Dash`, Go packager, ABI
+headers, MVII POSIX shim, ARM llvm-libc/libc++ sysroot, or compiler-rt archive.
+The matching compiler bundle is supplied through `VIRTUA_LLVM_ROOT`; the CMake
+resolver locates its PowerEngine ARM runtime artifacts and fails closed if they
+are unavailable.
 
-`include/native_bridge.h` is the shared PSXRecomp/MVII device contract. Native
-launchers never reinterpret a foreign program in userspace: they open the
-packaged image, negotiate `/dev/native0`, and submit an explicit typed launch
-request. A missing capability is reported as a hard failure.
+Configure a Virtua ARM build with both roots:
+
+```sh
+cmake -S <source> -B <build> -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=extra/virtua/CMake/VirtuaArmToolchain.cmake \
+  -DPOWERENGINE_ROOT=/absolute/path/to/PowerEngine \
+  -DVIRTUA_LLVM_ROOT=/absolute/path/to/PowerEngine/compiler-bundle \
+  -DCMAKE_BUILD_TYPE=Release
+```

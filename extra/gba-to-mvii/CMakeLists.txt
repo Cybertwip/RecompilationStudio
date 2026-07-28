@@ -22,8 +22,8 @@
 #         -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build/gba-to-mvii --target gba-to-mvii
 #
-# Prerequisites beyond the Virtua SDK: a Rust toolchain with the bare-metal ARM
-# standard library, which is one command —
+# Prerequisites beyond PowerEngine + its LLVM/runtime build: a Rust toolchain
+# with the bare-metal ARM standard library, which is one command —
 #
 #   rustup target add armv7a-none-eabi
 #

@@ -121,6 +121,8 @@ int main(int argc, char** argv) {
     request.outputDirectory = QString::fromLocal8Bit(argv[4]);
     request.frameworkRoot = QDir::cleanPath(
       QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("../..")));
+    request.powerEngineRoot = qEnvironmentVariable("POWERENGINE_ROOT");
+    request.llvmRoot = qEnvironmentVariable("VIRTUA_LLVM_ROOT");
     request.windowTitle = argc >= 8 ? QString::fromLocal8Bit(argv[7])
                                     : QStringLiteral("GBA Studio Smoke");
     request.exportAsZip = QString::fromLocal8Bit(argv[5]).endsWith(QStringLiteral("zip"));
@@ -614,6 +616,8 @@ int main(int argc, char** argv) {
   gipRequest.targetPlatform = psxstudio::TargetPlatform::VirtuaArm;
   gipRequest.exportMode = psxstudio::ExportMode::Build;
   gipRequest.exportAsZip = true;
+  gipRequest.powerEngineRoot = QStringLiteral("/host-only/PowerEngine");
+  gipRequest.llvmRoot = QStringLiteral("/host-only/PowerEngine/compiler");
   check(psxstudio::targetPlatformFromKey(QStringLiteral("VIRTUA-ARM")) ==
           psxstudio::TargetPlatform::VirtuaArm &&
           psxstudio::targetPlatformDisplayName(gipRequest.targetPlatform) ==
@@ -622,7 +626,11 @@ int main(int argc, char** argv) {
             QStringLiteral("Evil Zone (Europe)-Virtua-ARM.zip") &&
           psxstudio::gameManifestForRequest(gipRequest)
             .value(QStringLiteral("executable")).toString() ==
-              QStringLiteral("Evil Zone (Europe).virtua"),
+              QStringLiteral("Evil Zone (Europe).virtua") &&
+          gipRequest.toJson().value(QStringLiteral("powerengine_root")).toString() ==
+            gipRequest.powerEngineRoot &&
+          gipRequest.toJson().value(QStringLiteral("llvm_root")).toString() ==
+            gipRequest.llvmRoot,
         QStringLiteral("Virtua ARM platform, output, and manifest round-trip"));
 
   psxstudio::GameDescription generatedGame;
@@ -633,6 +641,8 @@ int main(int argc, char** argv) {
   generatedRequest.windowTitle = QStringLiteral("Portable Test Game");
   generatedRequest.macosGipGamepad = false;
   generatedRequest.frameworkRoot = QStringLiteral("/host-only/framework-root");
+  generatedRequest.powerEngineRoot = QStringLiteral("/host-only/PowerEngine");
+  generatedRequest.llvmRoot = QStringLiteral("/host-only/PowerEngine/compiler");
   for (const auto platform : { psxstudio::TargetPlatform::MacOS,
                                psxstudio::TargetPlatform::Windows,
                                psxstudio::TargetPlatform::Linux,
@@ -657,9 +667,13 @@ int main(int argc, char** argv) {
             QStringLiteral("generated Linux CMake closes imported SDL target properties"));
     } else if (platform == psxstudio::TargetPlatform::VirtuaArm) {
       check(generatedCmake.contains(QStringLiteral("set(PSX_VIRTUA ON")) &&
+              generatedCmake.contains(QStringLiteral("${POWERENGINE_ROOT}/External/Virtua")) &&
+              !generatedCmake.contains(QStringLiteral("framework/extra/virtua/binary")) &&
+              !generatedCmake.contains(generatedRequest.powerEngineRoot) &&
+              !generatedCmake.contains(generatedRequest.llvmRoot) &&
               generatedCmake.contains(QStringLiteral("-scheduler cooperative")) &&
               generatedCmake.contains(QStringLiteral("Portable Test Game.virtua")),
-            QStringLiteral("generated PlayStation CMake emits cooperative Virtua packaging"));
+            QStringLiteral("generated PlayStation CMake consumes external PowerEngine bindings"));
     }
   }
 

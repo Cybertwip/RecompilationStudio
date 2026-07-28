@@ -1,9 +1,10 @@
 {
-  "schema": 1,
-  "source_root": "/Users/cybertwip/Projects/PowerEngineV3/PowerEngine",
-  "source_commit": "1e04e46a69",
-  "copied_on": "2026-07-26",
-  "components": [
+  "schema": 2,
+  "integration": "external-powerengine",
+  "vendored_powerengine_components": [],
+  "powerengine_root_variable": "POWERENGINE_ROOT",
+  "llvm_root_variable": "VIRTUA_LLVM_ROOT",
+  "powerengine_sources": [
     "External/Virtua/CMake/GoTooling.cmake",
     "External/Virtua/binary",
     "External/Virtua/Dash",
@@ -11,7 +12,10 @@
     "External/Virtua/ioctl.h",
     "External/Virtua/media.h",
     "OS/MVII/Kernel/Shared/posix-shim/include",
-    "MVII arm-eabi llvm runtime sysroot",
-    "MVII ARMv7 compiler-rt builtins"
+    "OS/MVII/Examples/Pong/linker_armv7.ld"
+  ],
+  "powerengine_build_outputs": [
+    "MVII/toolchains/llvm-runtimes/install/arm-eabi",
+    "MVII/architecture/armv7/mediatek-j36-ultra/compiler-rt-builtins-armv7"
   ]
 }

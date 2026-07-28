@@ -90,8 +90,11 @@ label.
 
 Every export requires CMake; non-Windows hosts also require Ninja. PlayStation
 exports additionally require Python 3, Ghidra 11.3.2, and OpenJDK 21. GBA
-exports do not use Ghidra or Java. Virtua ARM builds additionally require Go and
-the bundled PowerEngine-derived LLVM/MVII SDK under `extra/virtua`. On macOS, Studio detects both registered JDK bundles
+exports do not use Ghidra or Java. Virtua ARM builds additionally require Go, a PowerEngine source checkout, and
+its LLVM/compiler bundle. Studio passes `POWERENGINE_ROOT` and
+`VIRTUA_LLVM_ROOT`; Dash, MVII POSIX headers, the Virtua packager, llvm-libc,
+libc++, and compiler-rt are consumed directly from those roots rather than
+copied under `extra/virtua`. On macOS, Studio detects both registered JDK bundles
 and keg-only Homebrew `openjdk@21` installations, then passes that exact
 `JAVA_HOME` to Ghidra.
 macOS exports additionally require:

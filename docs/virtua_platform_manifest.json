@@ -24,5 +24,10 @@
     "recompilation": false,
     "servctl_commands": 13
   },
-  "proof": "runtime/proofs/virtua_platform_smoke.json"
+  "proof": "runtime/proofs/virtua_platform_smoke.json",
+  "dependencies": {
+    "powerengine_source": "POWERENGINE_ROOT",
+    "llvm_compiler_bundle": "VIRTUA_LLVM_ROOT",
+    "vendored_powerengine_components": false
+  }
 }

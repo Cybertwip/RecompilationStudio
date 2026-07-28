@@ -35,11 +35,20 @@ byte-for-byte aligned with:
 - `Reference/horizon-linux/kernel/horizon/servctl.c`
 - `Reference/mizu/horizon_servctl.h`
 
-## Bundled toolchain material
+## External PowerEngine bindings
 
-`extra/virtua/` carries the required PowerEngine Virtua packager, Dash ABI,
-POSIX compatibility surface, ARM LLVM runtime sysroot, framebuffer/audio/input
-headers, and CMake helpers. Provenance is recorded in
+Virtua ARM builds require two explicit roots:
+
+- `POWERENGINE_ROOT`: the canonical PowerEngine source checkout. Dash, the MVII
+  POSIX headers, Virtua ABI headers, the Go packager, and the ARM linker script
+  are consumed directly from this tree.
+- `VIRTUA_LLVM_ROOT`: the PowerEngine LLVM/compiler bundle selected in Studio.
+  The toolchain resolves the matching ARM llvm-libc/libc++ sysroot and
+  compiler-rt output from that PowerEngine build.
+
+`extra/virtua/` contains only PSXRecomp's thin CMake integration, SDL backend,
+and native-bridge-specific sources. No PowerEngine SDK, Dash tree, or shim tree
+is duplicated in this repository. The external binding manifest is recorded in
 `extra/virtua/PROVENANCE.json`.
 
 ## Verification policy

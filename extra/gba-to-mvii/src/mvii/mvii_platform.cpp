@@ -479,10 +479,31 @@ void Audio::submit(const int16_t* samples, std::size_t sample_count) {
 // ── time / scheduling ──────────────────────────────────────────────────────
 
 uint64_t now_us() {
+    // Returning 0 on a failed read — which is what this used to do — is the
+    // worst possible answer: 0 is below every deadline in the runtime, so a
+    // clock that stops answering reads as "the deadline is still ahead of us",
+    // forever. Carry the last good reading instead and advance it, so the
+    // failure costs pacing accuracy rather than the process. See the note in
+    // the header for why standing still is the specific hazard here.
+    //
+    // A static local is fine: a .virtua image is one process with one thread,
+    // and the toolchain builds with -fno-threadsafe-statics.
+    static uint64_t last_us = 0;
+
     struct timespec ts {};
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
-    return static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
-           static_cast<uint64_t>(ts.tv_nsec) / 1000ull;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        const uint64_t us = static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
+                            static_cast<uint64_t>(ts.tv_nsec) / 1000ull;
+        // Clamped forward only. A clock that jumps backwards would otherwise
+        // push every outstanding deadline out of reach by the size of the jump,
+        // which is the same freeze by a different route — and MVII's clock can
+        // change domain underneath a running guest, because sys_gettimeofday()
+        // answers uptime until the kernel finds a wall clock and the date from
+        // then on.
+        if (us > last_us) last_us = us;
+        return last_us;
+    }
+    return ++last_us;
 }
 
 void yield_now() { (void)sched_yield(); }
@@ -496,13 +517,44 @@ void sleepFor(std::chrono::nanoseconds duration)
     nanosleep(&ts, nullptr);
 }
 
-void sleep_until(uint64_t deadline_us)
+// Nothing here waits longer than this in one call, whatever it is asked for.
+// One second is the kernel's own ceiling on a guest sleep, for the same reason:
+// no real wait a guest has — frame pacing, a condvar poll, sleep(1) — is longer,
+// so anything beyond it is a broken deadline rather than an intended one.
+constexpr uint64_t kSleepMaxWaitUs = 1000000ull;
+
+// Belt to the budget's braces. The budget below is denominated in microseconds
+// asked for, which only grows on the sleeping branch; the yielding branch can
+// spin without adding to it, so bound the rounds as well. 4096 yields is far
+// more than any single frame pause needs and still returns promptly.
+constexpr unsigned kSleepMaxRounds = 4096;
+
+bool sleep_until(uint64_t deadline_us)
 {
-    for (;;)
+    const uint64_t start = now_us();
+    if (start >= deadline_us) return true;
+
+    // Refuse an implausible deadline outright rather than discovering it a
+    // second at a time. This is the mixed-clock-domain case: an absolute
+    // realtime deadline handed to a monotonic wait, or microseconds where
+    // nanoseconds were meant.
+    if (deadline_us - start > kSleepMaxWaitUs) return false;
+
+    // How much sleep this call is willing to ask for before concluding the
+    // clock is not moving. Twice the wait, plus a floor so that a sub-
+    // millisecond deadline still gets a few rounds to land. Measured in
+    // requested microseconds on purpose: elapsed time is what a stopped clock
+    // misreports, so a budget denominated in it would never be spent.
+    const uint64_t budget_us = (deadline_us - start) * 2ull + 2000ull;
+    uint64_t asked_us = 0;
+
+    for (unsigned round = 0; round < kSleepMaxRounds; ++round)
     {
         const uint64_t now = now_us();
         if (now >= deadline_us)
-            return;
+            return true;
+        if (asked_us >= budget_us)
+            return false;
 
         const uint64_t remaining = deadline_us - now;
 
@@ -514,13 +566,16 @@ void sleep_until(uint64_t deadline_us)
         if (remaining > 1000ull)
         {
             // sleep a little less than the remaining time so we don't overshoot
-            sleepFor(std::chrono::nanoseconds((remaining - 500ull) * 1000ull));
+            const uint64_t ask = remaining - 500ull;
+            sleepFor(std::chrono::nanoseconds(ask * 1000ull));
+            asked_us += ask;
         }
         else
         {
             (void)sched_yield();
         }
     }
+    return false;
 }
 
 void logf(const char* fmt, ...) {

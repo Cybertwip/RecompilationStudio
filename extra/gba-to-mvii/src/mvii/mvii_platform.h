@@ -151,6 +151,14 @@ private:
 // Microseconds from MVII's clock. Both CLOCK_MONOTONIC and gettimeofday land
 // on the same kernel counter here, so the two are interchangeable; this is the
 // one every deadline in the runtime is expressed in.
+//
+// Guaranteed to never go backwards and never to repeat a reading when the
+// underlying clock refuses one. Every wait in this runtime is `while (now <
+// deadline)`, so a reading that stands still turns a 16 ms frame pause into a
+// permanent one — and a guest parked on a cooperative scheduler is never
+// preempted back out of it. From the outside that is indistinguishable from a
+// crash: healthy heartbeat, sane wake deadline, a window that never updates
+// again. A clock that is slightly wrong is far cheaper than one that is stuck.
 uint64_t now_us();
 
 // Offer the CPU back to the MVII cooperative scheduler.
@@ -170,7 +178,22 @@ void yield_now();
 
 // Sleep until `deadline_us`, yielding cooperatively; returns immediately if
 // the deadline has already passed.
-void sleep_until(uint64_t deadline_us);
+//
+// Returns true when the deadline was actually reached and false when this gave
+// up waiting for it. The wait is bounded, and by how much sleep it has *asked
+// for* rather than by how much the clock says has elapsed — the clock being the
+// one input a waiting function cannot use to check itself. Two things it
+// refuses to do, both of which park a guest permanently:
+//
+//   * a deadline further out than any frame pause could be, which is what a
+//     caller that mixed two clock domains hands over (the kernel clamps guest
+//     sleeps to one second for the same reason — see minos_user_sleep_until_us);
+//   * a deadline the clock is not advancing towards, where each round sleeps,
+//     wakes, re-reads the same time and sleeps again.
+//
+// A false return is a fault report, not a timeout to retry: the caller should
+// stop pacing against this clock rather than call again.
+bool sleep_until(uint64_t deadline_us);
 
 // Write a line to stderr, which MVII surfaces in the app log. Cheap, but not
 // free: call it on startup and failure paths, never per frame.

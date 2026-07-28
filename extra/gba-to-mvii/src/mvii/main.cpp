@@ -211,6 +211,17 @@ private:
     uint64_t frames_  = 0;
     bool     running_ = true;
 
+    // Cleared the first time the frame clock fails to reach a deadline. From
+    // then on the loop runs unpaced: a game running too fast is a bug, a window
+    // that never updates again is not distinguishable from a crash.
+    bool     pacing_ok_ = true;
+
+    // Latches so the two faults that used to be silent report exactly once.
+    // Once each, because both are wiring faults rather than conditions that
+    // come and go, and stderr is not free on this box.
+    bool     warned_pacing_ = false;
+    bool     warned_no_framebuffer_ = false;
+
     uint64_t stall_report_us_ = 0;
     uint64_t stall_last_clock_ = 0;
 
@@ -456,7 +467,20 @@ bool Runtime::load(int argc, char** argv) {
 
 void Runtime::present_frame() {
     ++frames_;
-    video_.present(gba_mvii_framebuffer(machine_));
+
+    // Video::present() drops a null source on the floor, which is right for it
+    // — a frame it cannot draw is not a reason to take the process down — but
+    // it made a core that produces no pixels look exactly like a core producing
+    // identical ones: frames counted, nothing on screen, nothing said. Ask
+    // first, so the two are distinguishable from the log alone.
+    const uint16_t* pixels = gba_mvii_framebuffer(machine_);
+    if (pixels) {
+        video_.present(pixels);
+    } else if (!warned_no_framebuffer_) {
+        warned_no_framebuffer_ = true;
+        logf("gba: core signalled a frame but its framebuffer is null\n");
+    }
+
     gba_mvii_frame_consume(machine_);
     if (!input_.poll()) running_ = false;
     gba_mvii_set_keys(machine_, input_.keyinput());
@@ -563,11 +587,21 @@ void Runtime::hold_failure() {
     // once is deliberate: the compositor owns the buffer pair, so a guest that
     // presents once and then sleeps can have its image exchanged out from
     // under it by an unrelated window.
-    const uint64_t until = gbamvii::now_us() + 30000000ull;
-    while (gbamvii::now_us() < until) {
+    //
+    // Counted in rounds as well as against the clock. Thirty seconds is a wait
+    // the user is expected to sit through, so it is the one place where a clock
+    // that does not advance would hold the screen — and the process — for good,
+    // on the failure path, where the runtime is least able to say so.
+    constexpr uint64_t kHoldUs        = 30000000ull;
+    constexpr uint64_t kHoldStepUs    = 100000ull;
+    constexpr unsigned kHoldMaxRounds = kHoldUs / kHoldStepUs;
+
+    const uint64_t until = gbamvii::now_us() + kHoldUs;
+    for (unsigned round = 0; round < kHoldMaxRounds; ++round) {
+        if (gbamvii::now_us() >= until) break;
         video_.message(0x50, 0x0C, 0x0C, lines.data(), static_cast<int>(lines.size()));
         if (!input_.poll()) break;
-        gbamvii::sleep_until(gbamvii::now_us() + 100000ull);
+        if (!gbamvii::sleep_until(gbamvii::now_us() + kHoldStepUs)) break;
     }
 }
 
@@ -651,13 +685,42 @@ int Runtime::run() {
         // when we are behind — which on this part is the case we should expect.
         // sleep_until() parks the process, so an early frame hands its slack to
         // the rest of the box rather than spinning it away.
-        if (now < next_frame_us) {
-            gbamvii::sleep_until(next_frame_us);
-            next_frame_us += kFrameUs;
+        if (pacing_ok_ && now < next_frame_us) {
+            if (gbamvii::sleep_until(next_frame_us)) {
+                next_frame_us += kFrameUs;
+            } else {
+                // The clock did not reach the deadline in the time we were
+                // willing to wait for it, so it is not a clock we can pace
+                // against. Stop trying: the previous code looped here until the
+                // deadline passed, which for a clock that is not advancing is
+                // never — one park, and the guest was gone. The emulator keeps
+                // running and keeps drawing, unpaced, which is a fault that can
+                // be seen and reported rather than one that looks like a hang.
+                pacing_ok_ = false;
+                if (!warned_pacing_) {
+                    warned_pacing_ = true;
+                    logf("gba: frame pacing off — clock at %lluus never reached %lluus\n",
+                         static_cast<unsigned long long>(now),
+                         static_cast<unsigned long long>(next_frame_us));
+                }
+            }
         } else {
             // Do not let the deadline drift into the past and turn every
             // subsequent frame into an instant one.
             next_frame_us = now + kFrameUs;
+        }
+
+        // Two reports, and they answer different questions. This one is gated
+        // on the emulator's own frame count, so it survives the clock being the
+        // thing at fault — the fps line below cannot, because a clock that
+        // stops takes `now >= report_us` with it and the log goes quiet exactly
+        // when there is something to say. Three lines total and then silent:
+        // this is startup diagnosis, not telemetry.
+        if (frames_ == 1 || frames_ == 60 || frames_ == 600) {
+            logf("gba: frame %llu at %lluus (pacing %s)\n",
+                 static_cast<unsigned long long>(frames_),
+                 static_cast<unsigned long long>(now),
+                 pacing_ok_ ? "on" : "off");
         }
 
         if (now >= report_us) {

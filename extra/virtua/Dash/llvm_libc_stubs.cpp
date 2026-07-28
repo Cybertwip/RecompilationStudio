@@ -168,10 +168,21 @@ extern "C" void* __wrap___cxa_get_globals_fast() {
 // monotonic clock through sys_gettimeofday keeps Virtua user-space and the
 // kernel in lockstep on time — otherwise a non-1GHz TSC makes Virtua's
 // frame pacing diverge from kernel-driven Engine pacing.
-struct minos_virtua_timeval {
-    long tv_sec;
-    long tv_usec;
-};
+// The kernel fills a real `struct timeval`, so pass it one. This used to
+// declare a private
+//
+//     struct minos_virtua_timeval { long tv_sec; long tv_usec; };
+//
+// which happens to be right on x86_64 (both members 8 bytes) and is wrong on
+// every 32-bit target. llvm-libc's time_t is 64-bit unconditionally while
+// suseconds_t is `long`, so on armv7 the kernel's struct is {int64 @0, int32
+// @8, pad} = 16 bytes and the private one is 8. The kernel wrote sixteen bytes
+// into an eight-byte stack object -- eight bytes of guest stack corrupted on
+// every single clock read -- and the guest then read tv_usec out of the *high
+// half of tv_sec*, which is zero. That is why the ARM guest clock only ever
+// moved in whole seconds, and why it read as a constant when it moved at all.
+// gettimeofday() below always passed the real struct and was always correct;
+// only the monotonic path went through the private one.
 extern "C" long sys_gettimeofday(void* tv, void* tz);
 
 struct __llvm_libc_stdio_cookie {
@@ -205,7 +216,9 @@ constexpr int kClockMonotonicRaw = CLOCK_MONOTONIC_RAW;
 #endif
 
 static inline unsigned long long kernel_monotonic_microseconds() {
-    minos_virtua_timeval tv{0, 0};
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
     if (sys_gettimeofday(&tv, nullptr) != 0) return 0;
     return static_cast<unsigned long long>(tv.tv_sec) * kMicrosPerSecond +
            static_cast<unsigned long long>(tv.tv_usec);

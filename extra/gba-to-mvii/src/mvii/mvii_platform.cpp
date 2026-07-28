@@ -500,17 +500,43 @@ uint64_t now_us() {
     // and the toolchain builds with -fno-threadsafe-statics.
     static uint64_t last_us = 0;
 
+    // Integrate deltas rather than tracking the raw reading, because the domain
+    // change described above happens in *both* directions and an absolute
+    // forward clamp only survives one of them. It used to read
+    //
+    //     if (us > last_us) last_us = us;
+    //
+    // and the device showed what that costs: one reading in the date domain
+    // (tv_sec ≈ 421165528, thirteen years of microseconds) latched last_us up
+    // there, every later reading was smaller, and the clock never moved again --
+    // `gba: frame 1` and `gba: frame 60` logged the identical timestamp, pacing
+    // switched itself off on the first frame, and the fps report could never
+    // fire because its deadline was unreachable. A forward clamp turns a single
+    // spurious high sample into a permanently stopped clock.
+    //
+    // Deltas have neither failure: the output still never goes backwards, but a
+    // domain change costs one frame of pacing accuracy instead of the clock.
+    static uint64_t prev_raw = 0;
+    static bool     anchored = false;
+
+    // Any step past this is a domain change, not elapsed time -- no real gap
+    // between two frames of a running guest is a second wide. Contributing the
+    // cap rather than nothing keeps a genuinely long stall moving forward.
+    constexpr uint64_t kDomainStepUs = 1000000ull;
+
     struct timespec ts {};
     if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
-        const uint64_t us = static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
-                            static_cast<uint64_t>(ts.tv_nsec) / 1000ull;
-        // Clamped forward only. A clock that jumps backwards would otherwise
-        // push every outstanding deadline out of reach by the size of the jump,
-        // which is the same freeze by a different route — and MVII's clock can
-        // change domain underneath a running guest, because sys_gettimeofday()
-        // answers uptime until the kernel finds a wall clock and the date from
-        // then on.
-        if (us > last_us) last_us = us;
+        const uint64_t raw = static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
+                             static_cast<uint64_t>(ts.tv_nsec) / 1000ull;
+        if (!anchored) {
+            anchored = true;
+        } else if (raw >= prev_raw) {
+            const uint64_t delta = raw - prev_raw;
+            last_us += (delta <= kDomainStepUs) ? delta : kDomainStepUs;
+        }
+        // raw < prev_raw is the backwards domain change: contribute nothing and
+        // re-anchor, so the next delta is measured against the new domain.
+        prev_raw = raw;
         return last_us;
     }
     return ++last_us;

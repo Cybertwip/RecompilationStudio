@@ -333,6 +333,13 @@ MainWindow::MainWindow(QWidget* parent)
   toolsLayout->addWidget(makeSectionTitle(QStringLiteral("Analysis and export tools"), toolsCard_));
   ghidraEdit_ = addPathRow(toolsCard_, toolsLayout, QStringLiteral("Ghidra home"),
                            QStringLiteral("Ghidra 11.3.2 installation"), SLOT(chooseGhidraHome()));
+  llvmEdit_ = addPathRow(toolsCard_, toolsLayout, QStringLiteral("LLVM toolchain"),
+                         QStringLiteral("LLVM root containing bin/clang for armv7a-none-eabi"),
+                         SLOT(chooseLlvmRoot()));
+  llvmEdit_->setToolTip(
+    QStringLiteral("Root of the LLVM toolchain used to cross-compile Virtua ARM packages.\n"
+                   "Leave empty to search PATH — but note that a host or Linux clang will\n"
+                   "produce a binary whose libc speaks the wrong syscall ABI for MVII."));
   signingEnabled_ = new QCheckBox(QStringLiteral("Sign macOS app with PFX"), toolsCard_);
   signingEnabled_->setToolTip(
     QStringLiteral("Optional. The PFX is read directly and is never imported into a Keychain."));
@@ -535,7 +542,7 @@ MainWindow::MainWindow(QWidget* parent)
             applyTheme();
           });
   for (auto* edit : { discEdit_, batchDirectoryEdit_, biosEdit_, iconEdit_, titleEdit_, outputEdit_,
-                      certificateEdit_, certificatePasswordEdit_, ghidraEdit_,
+                      certificateEdit_, certificatePasswordEdit_, ghidraEdit_, llvmEdit_,
                       biosInitialSplashEdit_, biosHandoffImageEdit_ }) {
     connect(edit, &QLineEdit::textChanged, this, &MainWindow::updateBuildButton);
   }
@@ -710,6 +717,29 @@ QString MainWindow::detectGhidraHome() const {
   return {};
 }
 
+// Locate an LLVM root whose bin/clang can cross-compile the Virtua ARM
+// baremetal target. Mirrors the hint order in VirtuaArmToolchain.cmake so the
+// value shown in the UI is the one the build would actually pick, except that
+// bare PATH is deliberately not consulted: a PATH clang is usually the host
+// (Apple/Linux) compiler, and silently accepting it is the failure this
+// setting exists to make visible.
+QString MainWindow::detectLlvmRoot() const {
+  const auto usable = [](const QString& root) {
+    return !root.isEmpty() && QFileInfo::exists(QDir(root).filePath(QStringLiteral("bin/clang")));
+  };
+  const QString environment = qEnvironmentVariable("VIRTUA_LLVM_ROOT");
+  if (usable(environment)) {
+    return environment;
+  }
+  for (const auto& candidate : { QStringLiteral("/usr/local/opt/llvm"),
+                                 QStringLiteral("/opt/homebrew/opt/llvm") }) {
+    if (usable(candidate)) {
+      return candidate;
+    }
+  }
+  return {};
+}
+
 void MainWindow::loadSettings() {
   QSettings settings;
   const QString systemKey = settings.value(
@@ -744,6 +774,7 @@ void MainWindow::loadSettings() {
   certificateEdit_->setText(settings.value(QStringLiteral("paths/certificate")).toString());
   signingEnabled_->setChecked(settings.value(QStringLiteral("signing/enabled"), false).toBool());
   ghidraEdit_->setText(settings.value(QStringLiteral("paths/ghidra"), detectGhidraHome()).toString());
+  llvmEdit_->setText(settings.value(QStringLiteral("paths/llvm"), detectLlvmRoot()).toString());
   titleEdit_->setText(settings.value(QStringLiteral("app/window_title")).toString());
   biosPatchEnabled_->setChecked(settings.value(QStringLiteral("bios_patch/enabled"), false).toBool());
   biosInitialSplashEdit_->setText(settings.value(QStringLiteral("bios_patch/initial_image")).toString());
@@ -798,6 +829,7 @@ void MainWindow::saveSettings() const {
   settings.setValue(QStringLiteral("paths/certificate"), certificateEdit_->text());
   settings.setValue(QStringLiteral("signing/enabled"), signingEnabled_->isChecked());
   settings.setValue(QStringLiteral("paths/ghidra"), ghidraEdit_->text());
+  settings.setValue(QStringLiteral("paths/llvm"), llvmEdit_->text());
   settings.setValue(QStringLiteral("app/window_title"), titleEdit_->text());
   settings.setValue(QStringLiteral("bios_patch/enabled"), biosPatchEnabled_->isChecked());
   settings.setValue(QStringLiteral("bios_patch/initial_image"), biosInitialSplashEdit_->text());
@@ -1304,6 +1336,14 @@ void MainWindow::chooseGhidraHome() {
   }
 }
 
+void MainWindow::chooseLlvmRoot() {
+  const auto path = QFileDialog::getExistingDirectory(
+    this, QStringLiteral("Select LLVM toolchain root"), llvmEdit_->text());
+  if (!path.isEmpty()) {
+    llvmEdit_->setText(path);
+  }
+}
+
 PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   PipelineRequest request;
   request.system = systemKindFromKey(systemCombo_->currentData().toString());
@@ -1326,6 +1366,7 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
     request.certificatePassword = certificatePasswordEdit_->text();
   }
   request.ghidraHome = ghidraEdit_->text();
+  request.llvmRoot = llvmEdit_->text();
   request.frameworkRoot = QString::fromUtf8(PSXRECOMP_SOURCE_ROOT);
   request.patchBiosBranding = request.system == SystemKind::PlayStation &&
                                biosPatchEnabled_->isChecked();
@@ -1764,7 +1805,7 @@ void MainWindow::setBusy(bool busy) {
     progressBar_->setValue(0);
   }
   for (auto* edit : { discEdit_, batchDirectoryEdit_, biosEdit_, iconEdit_, titleEdit_, outputEdit_,
-                      certificateEdit_, certificatePasswordEdit_, ghidraEdit_,
+                      certificateEdit_, certificatePasswordEdit_, ghidraEdit_, llvmEdit_,
                       biosInitialSplashEdit_, biosHandoffImageEdit_ }) {
     edit->parentWidget()->setEnabled(!busy);
   }

@@ -487,105 +487,104 @@ void Audio::submit(const int16_t* samples, std::size_t sample_count) {
 }
 
 // ── time / scheduling ──────────────────────────────────────────────────────
+// ── time / scheduling ──────────────────────────────────────────────────────
+//
+// Everything is expressed in steady_clock.  The MVII kernel’s CLOCK_MONOTONIC
+// is the only reliable time base, and std::chrono::steady_clock is exactly that
+// on this platform.  We still keep a small amount of defensive code around
+// domain changes (the kernel has been observed to jump the clock by years when
+// a guest first starts) because a single huge jump would otherwise lock the
+// pacing loop forever.
 
-uint64_t now_us() {
-    // Returning 0 on a failed read — which is what this used to do — is the
-    // worst possible answer: 0 is below every deadline in the runtime, so a
-    // clock that stops answering reads as "the deadline is still ahead of us",
-    // forever. Carry the last good reading instead and advance it, so the
-    // failure costs pacing accuracy rather than the process. See the note in
-    // the header for why standing still is the specific hazard here.
-    //
-    // A static local is fine: a .virtua image is one process with one thread,
-    // and the toolchain builds with -fno-threadsafe-statics.
-    static uint64_t last_us = 0;
+using SteadyClock = std::chrono::steady_clock;
+using SteadyTime  = SteadyClock::time_point;
+using SteadyNs    = std::chrono::nanoseconds;
+using SteadyUs    = std::chrono::microseconds;
 
-    // Integrate deltas rather than tracking the raw reading, because the domain
-    // change described above happens in *both* directions and an absolute
-    // forward clamp only survives one of them. It used to read
-    //
-    //     if (us > last_us) last_us = us;
-    //
-    // and the device showed what that costs: one reading in the date domain
-    // (tv_sec ≈ 421165528, thirteen years of microseconds) latched last_us up
-    // there, every later reading was smaller, and the clock never moved again --
-    // `gba: frame 1` and `gba: frame 60` logged the identical timestamp, pacing
-    // switched itself off on the first frame, and the fps report could never
-    // fire because its deadline was unreachable. A forward clamp turns a single
-    // spurious high sample into a permanently stopped clock.
-    //
-    // Deltas have neither failure: the output still never goes backwards, but a
-    // domain change costs one frame of pacing accuracy instead of the clock.
-    static uint64_t prev_raw = 0;
-    static bool     anchored = false;
+namespace {
 
-    // Any step past this is a domain change, not elapsed time -- no real gap
-    // between two frames of a running guest is a second wide. Contributing the
-    // cap rather than nothing keeps a genuinely long stall moving forward.
-    constexpr uint64_t kDomainStepUs = 1000000ull;
+// Convert a steady_clock time_point to the microsecond epoch that the rest of
+// the runtime (and the Rust core) still speaks.
+uint64_t to_us(SteadyTime t)
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<SteadyUs>(t.time_since_epoch()).count());
+}
 
-    struct timespec ts {};
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
-        const uint64_t raw = static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
-                             static_cast<uint64_t>(ts.tv_nsec) / 1000ull;
-        if (!anchored) {
-            anchored = true;
-        } else if (raw >= prev_raw) {
-            const uint64_t delta = raw - prev_raw;
-            last_us += (delta <= kDomainStepUs) ? delta : kDomainStepUs;
-        }
-        // raw < prev_raw is the backwards domain change: contribute nothing and
-        // re-anchor, so the next delta is measured against the new domain.
-        prev_raw = raw;
+// The largest step we will ever treat as “real elapsed time”.  Anything bigger
+// is assumed to be a domain change.
+constexpr SteadyUs kDomainStep{1'000'000};   // 1 s
+
+// Hard ceiling on any single wait.  Matches the kernel’s own guest-sleep limit.
+constexpr SteadyUs kSleepMaxWait{1'000'000};
+
+// Safety bound on the number of yield rounds we will do before giving up.
+constexpr unsigned kSleepMaxRounds = 4096;
+
+} // namespace
+
+uint64_t now_us()
+{
+    // Integrate deltas rather than clamping absolute readings.  A single
+    // spurious high sample (date-domain value) used to permanently stop the
+    // clock; measuring only the delta between successive good samples turns
+    // that into a one-frame glitch.
+    static SteadyTime prev{};
+    static uint64_t   last_us = 0;
+    static bool       anchored = false;
+
+    const SteadyTime now = SteadyClock::now();
+
+    if (!anchored) {
+        anchored = true;
+        prev     = now;
         return last_us;
     }
-    return ++last_us;
+
+    SteadyUs delta = std::chrono::duration_cast<SteadyUs>(now - prev);
+    if (delta < SteadyUs::zero()) {
+        // Backwards jump – re-anchor, contribute nothing.
+        prev = now;
+        return last_us;
+    }
+
+    if (delta > kDomainStep)
+        delta = kDomainStep;          // cap the domain-change step
+
+    last_us += static_cast<uint64_t>(delta.count());
+    prev     = now;
+    return last_us;
 }
 
-void yield_now() { (void)sched_yield(); }
-
-void sleepFor(std::chrono::nanoseconds duration)
+void yield_now()
 {
-    if (duration.count() <= 0) return;
-    timespec ts {};
-    ts.tv_sec = static_cast<time_t>(duration.count() / std::nano::den);
-    ts.tv_nsec = static_cast<long>(duration.count() % std::nano::den);
-    nanosleep(&ts, nullptr);
+    std::this_thread::yield();
 }
 
-// Nothing here waits longer than this in one call, whatever it is asked for.
-// One second is the kernel's own ceiling on a guest sleep, for the same reason:
-// no real wait a guest has — frame pacing, a condvar poll, sleep(1) — is longer,
-// so anything beyond it is a broken deadline rather than an intended one.
-constexpr uint64_t kSleepMaxWaitUs = 1000000ull;
-
-// Belt to the budget's braces. The budget below is denominated in microseconds
-// asked for, which only grows on the sleeping branch; the yielding branch can
-// spin without adding to it, so bound the rounds as well. 4096 yields is far
-// more than any single frame pause needs and still returns promptly.
-constexpr unsigned kSleepMaxRounds = 4096;
+void sleepFor(SteadyNs duration)
+{
+    if (duration <= SteadyNs::zero())
+        return;
+    std::this_thread::sleep_for(duration);
+}
 
 bool sleep_until(uint64_t deadline_us)
 {
     const uint64_t start = now_us();
-    if (start >= deadline_us) return true;
+    if (start >= deadline_us)
+        return true;
 
-    // Refuse an implausible deadline outright rather than discovering it a
-    // second at a time. This is the mixed-clock-domain case: an absolute
-    // realtime deadline handed to a monotonic wait, or microseconds where
-    // nanoseconds were meant.
-    if (deadline_us - start > kSleepMaxWaitUs) return false;
+    // Refuse an implausible deadline rather than discovering it one second at
+    // a time (mixed clock-domain case).
+    if (deadline_us - start > static_cast<uint64_t>(kSleepMaxWait.count()))
+        return false;
 
-    // How much sleep this call is willing to ask for before concluding the
-    // clock is not moving. Twice the wait, plus a floor so that a sub-
-    // millisecond deadline still gets a few rounds to land. Measured in
-    // requested microseconds on purpose: elapsed time is what a stopped clock
-    // misreports, so a budget denominated in it would never be spent.
+    // Budget is expressed in requested microseconds so a stopped clock still
+    // eventually exhausts it.
     const uint64_t budget_us = (deadline_us - start) * 2ull + 2000ull;
     uint64_t asked_us = 0;
 
-    for (unsigned round = 0; round < kSleepMaxRounds; ++round)
-    {
+    for (unsigned round = 0; round < kSleepMaxRounds; ++round) {
         const uint64_t now = now_us();
         if (now >= deadline_us)
             return true;
@@ -594,21 +593,15 @@ bool sleep_until(uint64_t deadline_us)
 
         const uint64_t remaining = deadline_us - now;
 
-        // usleep() lands on MVII's sleep_until_us syscall, which parks the
-        // process and lets the scheduler run everything else — that is what
-        // makes an idle frame cheap instead of a spin. Short waits are handed
-        // to the yield instead: parking for a few hundred microseconds costs
-        // more in scheduler round-trip than it saves.
-        if (remaining > 1000ull)
-        {
-            // sleep a little less than the remaining time so we don't overshoot
-            const uint64_t ask = remaining - 500ull;
-            sleepFor(std::chrono::nanoseconds(ask * 1000ull));
+        // Short waits go to yield; longer ones park via sleep_for.
+        // (Parking for a few hundred µs costs more in scheduler round-trip
+        // than it saves.)
+        if (remaining > 1000ull) {
+            const uint64_t ask = remaining - 500ull;   // leave a little headroom
+            sleepFor(SteadyUs{ask});
             asked_us += ask;
-        }
-        else
-        {
-            (void)sched_yield();
+        } else {
+            yield_now();
         }
     }
     return false;

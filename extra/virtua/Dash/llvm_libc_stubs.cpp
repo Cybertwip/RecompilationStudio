@@ -173,16 +173,18 @@ extern "C" void* __wrap___cxa_get_globals_fast() {
 //
 //     struct minos_virtua_timeval { long tv_sec; long tv_usec; };
 //
-// which happens to be right on x86_64 (both members 8 bytes) and is wrong on
-// every 32-bit target. llvm-libc's time_t is 64-bit unconditionally while
-// suseconds_t is `long`, so on armv7 the kernel's struct is {int64 @0, int32
-// @8, pad} = 16 bytes and the private one is 8. The kernel wrote sixteen bytes
-// into an eight-byte stack object -- eight bytes of guest stack corrupted on
-// every single clock read -- and the guest then read tv_usec out of the *high
-// half of tv_sec*, which is zero. That is why the ARM guest clock only ever
-// moved in whole seconds, and why it read as a constant when it moved at all.
-// gettimeofday() below always passed the real struct and was always correct;
-// only the monotonic path went through the private one.
+// which happens to be right on x86_64 (both members 8 bytes) but hard-codes a
+// layout instead of deriving it. Never do that here: `struct timeval` sits on
+// the guest/kernel boundary, so both sides must obtain it from the same
+// headers rather than assume a width. llvm-libc's time_t is *configurable*
+// (llvm-libc-types/time_t.h selects time_t_32 or time_t_64 on
+// LIBC_TYPES_TIME_T_IS_32_BIT), so its width is a property of the sysroot the
+// toolchain was built with, not of the architecture. Both the MVII ARM sysroot
+// and the Virtua ARM SDK currently resolve to time_t_32, giving
+// {int32 @0, long @4} = 8 bytes -- but a private struct would silently
+// disagree the moment either sysroot is rebuilt with the other setting, and a
+// disagreement here corrupts guest stack on every single clock read.
+// Passing the real `struct timeval` is correct under either configuration.
 extern "C" long sys_gettimeofday(void* tv, void* tz);
 
 struct __llvm_libc_stdio_cookie {
@@ -211,7 +213,14 @@ constexpr int kClockMonotonicRaw = kClockMonotonic;
 #else
 constexpr int kClockMonotonicRaw = CLOCK_MONOTONIC_RAW;
 #endif
-#if defined(__x86_64__) || defined(__i386__) || defined(__arm__) || defined(__aarch64__)
+// Every target except RISC-V reads time by asking the kernel, and the kernel
+// answers in microseconds. This used to be an explicit allow-list of
+// architecture macros with a `#else return 0` fallback in read_time_ticks(),
+// which is a silent-zero trap: any target not on the list -- or any build where
+// the toolchain is not the one we think it is -- compiles cleanly and then
+// reports a clock that never advances, with no diagnostic anywhere. Invert it
+// so the kernel path is the default and only RISC-V opts out.
+#if !defined(__riscv)
 #define VIRTUA_TIME_TICKS_ARE_MICROS 1
 #endif
 
@@ -234,7 +243,9 @@ static inline unsigned long long read_time_ticks() {
     // read_time_ticks() as microseconds (see fill_timespec_from_ticks).
     return kernel_monotonic_microseconds();
 #else
-    return 0;
+    // Unreachable: VIRTUA_TIME_TICKS_ARE_MICROS is defined for every non-RISC-V
+    // target above. Fail the build rather than return a frozen zero clock.
+#error "read_time_ticks(): no time source for this target"
 #endif
 }
 

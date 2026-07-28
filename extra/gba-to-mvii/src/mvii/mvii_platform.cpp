@@ -426,8 +426,17 @@ bool Input::poll() {
             keyinput_ |= bits_for_keycode(ev.x);
             break;
         case TOUCH_BEGIN:
-        case TOUCH_MOVE:
             keyinput_ &= static_cast<uint16_t>(~GBA_A);
+            break;
+        case TOUCH_MOVE:
+            // Deliberately not a press. MVII's TouchEvent ABI has no hover
+            // event, so the shell forwards a bare PointerMove as TOUCH_MOVE
+            // too — and on the J36 the d-pad drives the pointer as well as the
+            // direction keys (local_pointer_pump in mt6592_usb.c). Treating a
+            // move as a begin therefore latched A down the instant the player
+            // touched the d-pad, with no TOUCH_END ever coming to lift it. A
+            // drag that started on the screen is already held by the
+            // TOUCH_BEGIN above, so nothing is lost by ignoring this.
             break;
         case TOUCH_END:
             keyinput_ |= GBA_A;

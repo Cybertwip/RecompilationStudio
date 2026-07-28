@@ -5,6 +5,21 @@ set(CMAKE_OSX_ARCHITECTURES "" CACHE STRING "" FORCE)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "" CACHE STRING "" FORCE)
 set(CMAKE_OSX_SYSROOT "" CACHE STRING "" FORCE)
 
+# CMake reloads this toolchain inside compiler ABI try_compile projects. Custom
+# cache variables are not forwarded to those child configures unless they are
+# named here, so the child used to lose POWERENGINE_ROOT/VIRTUA_LLVM_ROOT and
+# fail before it could identify the compiler.
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
+    POWERENGINE_ROOT
+    VIRTUA_LLVM_ROOT
+    VIRTUA_ARM_SYSROOT
+    VIRTUA_ARM_COMPILER_RT
+    VIRTUA_ARM_TARGET_TRIPLE)
+list(REMOVE_DUPLICATES CMAKE_TRY_COMPILE_PLATFORM_VARIABLES)
+set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
+    "${CMAKE_TRY_COMPILE_PLATFORM_VARIABLES}" CACHE STRING
+    "Virtua ARM variables propagated into CMake try_compile projects" FORCE)
+
 include("${CMAKE_CURRENT_LIST_DIR}/VirtuaPowerEngine.cmake")
 
 set(CMAKE_C_COMPILER "${VIRTUA_CLANG_EXECUTABLE}" CACHE FILEPATH "" FORCE)

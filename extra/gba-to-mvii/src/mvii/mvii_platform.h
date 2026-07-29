@@ -45,13 +45,14 @@ public:
 
     // Blit one frame of exactly width() x height() pixels and present it.
     //
-    // The source is the GBA's own format — BGR555, red in the low five bits —
-    // because that is what the PPU writes and converting on the way out is one
-    // pass instead of two. The 5-to-8-bit expansion is computed per pixel, not
-    // looked up: a 32768-entry table is 128 KB against this Cortex-A7's 32 KB
-    // L1D, so it missed on most pixels and evicted the interpreter's working
-    // set once a frame on top of that. See rgba8_from_bgr555 in the .cpp.
-    void present(const uint16_t* bgr555);
+    // The source is RGB888 — three bytes per pixel in R, G, B order, tightly
+    // packed — which is what gbarecomp's PPU produces (its palette lookup
+    // already did the 5-to-8-bit expansion) and the same channel order as the
+    // RGBA8 surface. So this is a widen: read three bytes, write four. No
+    // shuffle, no arithmetic, no table. Presenting a 15-bit format here instead
+    // would mean narrowing the PPU's output and expanding it again on this
+    // side, twice the work for strictly less colour.
+    void present(const uint8_t* rgb888);
 
     // Present a flat colour. Writes straight into the surface, so it costs no
     // source buffer — worth having, because a 240x160 RGB24 scratch frame is
@@ -125,10 +126,11 @@ private:
 
 // ── audio ──────────────────────────────────────────────────────────────────
 
-// The core mixes interleaved stereo signed-16 at 65536 Hz — 16777216 / 256,
-// AUDIO_SAMPLE_CYCLES in gba-core's mem.rs. We hand the DAC that rate and let
-// the kernel resample; if the device rejects it, audio is simply disabled — a
-// silent game is far better than a dead one.
+// The core mixes signed-16 at 32768 Hz — 16777216 / 512, kDefaultCyclesPerSample
+// in gbarecomp's gba_audio.h — and hands it over interleaved as stereo. Ask
+// gba_mvii_audio_rate() for the figure rather than hard-coding it. We give the
+// DAC that rate and let the kernel resample; if the device rejects it, audio is
+// simply disabled — a silent game is far better than a dead one.
 class Audio {
 public:
     ~Audio();

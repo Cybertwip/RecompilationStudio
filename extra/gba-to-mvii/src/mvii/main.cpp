@@ -8,19 +8,25 @@
 // open failed, the stub returned 122, and the window opened and closed. There
 // was never a GBA runtime on the device; there was a request for one.
 //
-// So this is the runtime, and the emulator inside it is the Rust port: the
-// gba-core and armv4t crates from extra/gba-rust, vendored under rust/ and
-// ported to no_std so they link into a Virtua executable (see rust/Cargo.toml).
-// The C++ here is only MVII — devices, scheduling, files — and it reaches the
-// core through the dozen calls in include/gba_mvii.h. Keeping the boundary that
-// narrow is the point: the emulation stays the reference implementation, byte
-// for byte, and every syscall this program makes is in this directory.
+// So this is the runtime, and the emulator inside it is extra/gbarecomp,
+// cross-compiled for Cortex-A7 as a curated static library (see the
+// gbarecomp-mvii target in ../../CMakeLists.txt) — the same sources the desktop
+// build uses, not a port and not a second implementation. The C++ here is only
+// MVII — devices, scheduling, files — and it reaches the core through the
+// couple of dozen calls in include/gba_mvii.h. Keeping the boundary that narrow
+// is the point: the emulation stays the reference implementation, byte for
+// byte, and every syscall this program makes is in this directory.
 //
-// Interpreted, not recompiled, and that is a deliberate trade. The recompiler
-// needs an offline per-game C-emission pass; the interpreter runs whatever ROM
-// is staged, which is what "drop a package in System/Applications and it plays"
-// requires. Speed on a Cortex-A7 at 845 MHz is the open question, and the
-// reason the loop reports its frame rate.
+// Recompiled, with the interpreter as a bridge — and the distinction is
+// reported, never hidden. Packaging a game runs gbarecomp's static recompiler
+// and compiles its output into this image, so cartridge code executes as native
+// ARM. Anything the recompiler could not reach at build time (indirect branches
+// into data, code written at runtime) misses the dispatch tables and is bridged
+// by the reference interpreter, which is correct but slow. Those misses are
+// counted, named in the log and totalled at exit by gbamvii::report_coverage():
+// a build with no recompiled corpus at all says NOT STATIC rather than quietly
+// interpreting a whole game. Speed on a Cortex-A7 at 845 MHz is the open
+// question, and the reason the loop reports its frame rate.
 
 #include <cstdarg>
 #include <cstddef>
@@ -37,6 +43,7 @@
 #include <unistd.h>
 
 #include "gba_mvii.h"
+#include "gba_mvii_heal.h"
 #include "mvii_platform.h"
 
 namespace {
@@ -90,6 +97,27 @@ constexpr uint32_t kStallPollSlices = 128;
 #else
 constexpr uint32_t kStallPollSlices =
     kStallPollInstructions / kStepsPerYield > 1 ? kStallPollInstructions / kStepsPerYield : 1;
+#endif
+
+// How many distinct coverage misses get named in the log before the runtime
+// stops listing them and only counts.
+//
+// A coverage miss is a genuine finding — an address the recompiler did not
+// translate, which the interpreter then bridged — and the address is the whole
+// value of the report, because it is what a `game.toml` proposal is keyed to.
+// So the first ones are printed in full. But stderr here is a serial console at
+// a byte at a time, and a cartridge whose entry point itself missed will miss
+// on nearly every block: printing all of those would cost more time than the
+// emulation and would bury the first, most diagnostic one under thousands of
+// lines. The count keeps going after the listing stops, and report_coverage()
+// prints the total, so nothing is lost — only the middle of the list.
+//
+// AOT builds only, because only those get a per-call miss signal back from the
+// core. A build with no recompiled corpus misses on literally every dispatch;
+// listing addresses there would say nothing that the one-line NOT STATIC
+// verdict at exit does not already say better.
+#if defined(GBA_MVII_NATIVE_AOT)
+constexpr uint32_t kMaxReportedMisses = 32;
 #endif
 
 // The GBA's real refresh: 16777216 / (308 * 228 * 4) = 59.727 Hz.
@@ -215,6 +243,7 @@ public:
     void hold_failure();
 
 private:
+    void find_bios(const std::string& dir);
     bool find_rom(int argc, char** argv);
     bool load_rom(const std::string& path);
     void present_frame();
@@ -229,6 +258,9 @@ private:
     GbaMvii* machine_ = nullptr;
 
     std::string rom_path_;
+    // The real BIOS image, when the package ships one. Empty means HLE boot.
+    std::string          bios_path_;
+    std::vector<uint8_t> bios_;
     std::vector<std::string> notes_;   // the failure screen, one line each
 
     std::string save_path_;
@@ -378,13 +410,68 @@ bool Runtime::load_rom(const std::string& path) {
     }
 
     // Ownership of `rom` transfers here whether or not the machine is built.
-    machine_ = gba_mvii_create(rom, size);
+    machine_ = bios_.empty()
+        ? gba_mvii_create(rom, size)
+        : gba_mvii_create_with_bios(rom, size, bios_.data(), bios_.size());
     if (!machine_) {
         note("THE CORE REFUSED %s", leaf.c_str());
+        if (!bios_.empty()) {
+            // The size was checked before we got here, so the only way the core
+            // refuses a right-sized image is the SHA-1 gate: this file is not
+            // the real BIOS. Say which file, because the alternative report —
+            // "no cartridge found" — blames the one thing that is fine.
+            note("%s IS NOT THE REAL BIOS",
+                 file_name_of(bios_path_).c_str());
+            note("REMOVE IT TO BOOT WITHOUT ONE");
+        }
         return false;
     }
     logf("gba: loaded '%s' (%u bytes)\n", path.c_str(), static_cast<unsigned>(done));
     return true;
+}
+
+// Look for a real BIOS image beside the package.
+//
+// Optional by design: with no image the core boots HLE, which is a reduced but
+// working machine. With one, the whole boot ROM runs — logo, chime, and the
+// exact register and RAM state a game's first instruction is entitled to
+// expect. So this searches rather than requires, and says which way it went.
+//
+// Only the size is checked here. The image's identity is the core's gate to
+// keep (it hashes what it is given), and duplicating the SHA-1 on this side
+// would mean two places that can disagree about what the real BIOS is.
+void Runtime::find_bios(const std::string& dir) {
+    const std::size_t want = gba_mvii_bios_size();
+
+    // gba_bios.bin is what gbarecomp's own tooling names it, so a package
+    // assembled from a recompile already has the right name. bios.bin is the
+    // other name every GBA emulator has ever used.
+    const std::string candidates[] = {
+        dir + "gba_bios.bin",
+        "gba_bios.bin",
+        dir + "bios.bin",
+        "bios.bin",
+    };
+
+    for (const std::string& path : candidates) {
+        std::vector<uint8_t> bytes;
+        if (!read_whole_file(path.c_str(), bytes)) continue;
+        if (bytes.size() != want) {
+            // Found and unusable is worth a line: it is almost always a
+            // truncated copy, and silently HLE-booting past it would leave the
+            // user wondering why their BIOS "did nothing".
+            note("%s IS %u BYTES, NOT %u",
+                 file_name_of(path).c_str(),
+                 static_cast<unsigned>(bytes.size()),
+                 static_cast<unsigned>(want));
+            continue;
+        }
+        bios_ = std::move(bytes);
+        bios_path_ = path;
+        logf("gba: BIOS image '%s'\n", path.c_str());
+        return;
+    }
+    logf("gba: no BIOS image — booting HLE\n");
 }
 
 // Find the cartridge and build the machine around it.
@@ -448,6 +535,10 @@ bool Runtime::find_rom(int argc, char** argv) {
     for (const std::string& name : entries) {
         if (looks_like_a_cartridge(name)) consider(dir + name);
     }
+
+    // Before the first load_rom, because the BIOS is an argument to building
+    // the machine rather than something that can be installed afterwards.
+    find_bios(dir);
 
     for (const std::string& path : candidates) {
         if (load_rom(path)) {
@@ -527,7 +618,7 @@ void Runtime::present_frame() {
     // it made a core that produces no pixels look exactly like a core producing
     // identical ones: frames counted, nothing on screen, nothing said. Ask
     // first, so the two are distinguishable from the log alone.
-    const uint16_t* pixels = gba_mvii_framebuffer(machine_);
+    const uint8_t* pixels = gba_mvii_framebuffer(machine_);
     if (pixels) {
         video_.present(pixels);
     } else if (!warned_no_framebuffer_) {
@@ -789,24 +880,28 @@ int Runtime::run() {
     audio_.open(rate, 2);   // the core mixes interleaved stereo
     gba_mvii_set_keys(machine_, input_.keyinput());
 
-    logf("gba: running (%ux%u, audio %u Hz %s%s)\n",
+    logf("gba: running (%ux%u, audio %u Hz %s%s, %s BIOS)\n",
          static_cast<unsigned>(gba_mvii_screen_width()),
          static_cast<unsigned>(gba_mvii_screen_height()),
          static_cast<unsigned>(rate), audio_.enabled() ? "stereo" : "off",
 #if defined(GBA_MVII_NATIVE_AOT)
-         " · gba-rust AOT native"
+         " · statically recompiled",
 #else
-         " · interpreter"
+         " · interpreter",
 #endif
-    );
+         bios_.empty() ? "HLE" : "real");
 #if defined(GBA_MVII_NATIVE_AOT)
-    logf("gba: linked %u native blocks; interpreter fallback disabled\n",
+    // Zero here means the .virtua carries no recompiled code at all, in which
+    // case every dispatch will bridge and the run is an interpreter run wearing
+    // the AOT build's name. Worth knowing in the first line of the log rather
+    // than five seconds later from the frame rate.
+    logf("gba: %u recompiled entries linked\n",
          static_cast<unsigned>(gba_mvii_native_block_count()));
 #endif
 
     log_host_calibration();
     const uint32_t profiler_clock_ns = gba_mvii_prof_calibrate();
-    logf("gba: frame profiler sampled ppu=1/16 apu=1/64, clock %u ns/read\n",
+    logf("gba: frame profiler armed, clock %u ns/read\n",
          static_cast<unsigned>(profiler_clock_ns));
 
     uint64_t next_frame_us = gbamvii::now_us() + kFrameUs;
@@ -823,14 +918,29 @@ int Runtime::run() {
 #if defined(GBA_MVII_NATIVE_AOT)
         const uint32_t run_status = gba_mvii_run_native_blocks(machine_, kBlocksPerYield);
         if (run_status == 2u) {
-            const uint32_t miss = gba_mvii_native_miss_key();
-            note("NATIVE COVERAGE MISS AT %08X (%s)",
-                 static_cast<unsigned>(miss & ~1u),
-                 (miss & 1u) ? "THUMB" : "ARM");
-            running_ = false;
-            break;
+            // A guest PC the static corpus does not cover. The core already
+            // bridged it through the reference interpreter and recorded it, so
+            // the game is still running correctly — just not natively, at that
+            // address. Name it and carry on: killing a running game over a
+            // coverage gap that the next recompile closes helps nobody, and the
+            // whole point of recording is that the address goes home.
+            //
+            // Logged, not note()d, and rate-limited by the distinct count so a
+            // gap inside a per-frame routine cannot flood the console. The exit
+            // banner reports the totals.
+            const uint32_t misses = gba_mvii_native_miss_count();
+            if (misses <= kMaxReportedMisses) {
+                const uint32_t miss = gba_mvii_native_miss_key();
+                logf("gba: coverage miss %u at %08X (%s) — interpreted\n",
+                     static_cast<unsigned>(misses),
+                     static_cast<unsigned>(miss & ~1u),
+                     (miss & 1u) ? "thumb" : "arm");
+                if (misses == kMaxReportedMisses) {
+                    logf("gba: further coverage misses counted, not listed\n");
+                }
+            }
         }
-        const uint32_t frame_ready = run_status;
+        const uint32_t frame_ready = (run_status == 1u) ? 1u : 0u;
 #else
         const uint32_t frame_ready = gba_mvii_run_steps(machine_, kStepsPerYield);
 #endif
@@ -932,27 +1042,38 @@ int Runtime::run() {
             // The breakdown above accounts for everything outside the core; this
             // one splits what is inside `emu`. Drained here rather than per
             // frame because reading clears, so the window matches exactly, and
-            // because one FFI call per five seconds costs nothing measurable.
-            // `rest` is what neither pass explains — guest instructions, DMA,
-            // timers — and it is the number that says whether the fixed cost or
-            // the variable cost is the thing worth attacking.
+            // because one call per five seconds costs nothing measurable.
+            //
+            // `rest` is what the PPU does not explain — guest code, DMA, timers,
+            // the mixer — and the split between it and `ppu` says whether the
+            // fixed per-frame cost or the variable cost is worth attacking.
             uint32_t prof[4] = {0, 0, 0, 0};
             gba_mvii_prof_take(prof);
-            const uint64_t ppu_us = prof[0];
-            const uint64_t apu_us = prof[1];
-            const uint64_t lines  = prof[2] ? prof[2] : 1;
-            const uint64_t samps  = prof[3] ? prof[3] : 1;
-            const uint64_t inside = ppu_us + apu_us;
+            const uint64_t ppu_us  = prof[0];
+            const uint64_t lines   = prof[1] ? prof[1] : 1;
+            const uint64_t bridged = prof[3];
             logf("gba: emu split — ppu %llu us/frame (%llu lines, %llu ns/line) "
-                 "apu %llu us/frame (%llu samples, %llu ns/sample) rest %llu us/frame\n",
+                 "audio %llu samples/frame rest %llu us/frame\n",
                  static_cast<unsigned long long>(ppu_us / n),
-                 static_cast<unsigned long long>(prof[2] / n),
+                 static_cast<unsigned long long>(prof[1] / n),
                  static_cast<unsigned long long>(ppu_us * 1000ull / lines),
-                 static_cast<unsigned long long>(apu_us / n),
-                 static_cast<unsigned long long>(prof[3] / n),
-                 static_cast<unsigned long long>(apu_us * 1000ull / samps),
+                 static_cast<unsigned long long>(prof[2] / n),
                  static_cast<unsigned long long>(
-                     emu_us_ > inside ? (emu_us_ - inside) / n : 0));
+                     emu_us_ > ppu_us ? (emu_us_ - ppu_us) / n : 0));
+
+            // Reported separately, and only when it is not zero, because it is
+            // not a cost breakdown — it is a correctness finding wearing a
+            // performance number. Every one of these instructions is guest code
+            // the recompiler did not translate, executed by the interpreter
+            // instead. It belongs in `rest` above and it is the first thing to
+            // look at when `rest` is large: a slow frame with a five-figure
+            // bridge count is not a slow emulator, it is a coverage gap.
+            if (bridged) {
+                logf("gba: %llu bridged guest insns/frame — %u addresses missing "
+                     "from the recompiled corpus\n",
+                     static_cast<unsigned long long>(bridged / n),
+                     static_cast<unsigned>(gbamvii::heal_miss_count()));
+            }
 
             report_frames = frames_;
             report_us = now + 5000000ull;
@@ -962,6 +1083,14 @@ int Runtime::run() {
     }
 
     logf("gba: stopped after %u frames\n", static_cast<unsigned>(frames_));
+
+    // The verdict on the run, printed unconditionally — including when it is
+    // clean, because "FULLY STATIC" is the result the packaging pipeline exists
+    // to produce and a report that only appears on failure cannot confirm it.
+    // Printed before the save flush so it is on record even if writing the save
+    // is what goes wrong.
+    gbamvii::report_coverage();
+
     if (save_supported_ && save_writable_ &&
         gba_mvii_save_hash(machine_) != save_written_hash_) {
         write_save();

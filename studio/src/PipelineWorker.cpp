@@ -3667,6 +3667,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
   const bool linuxTarget = request.targetPlatform == TargetPlatform::Linux;
   const bool macosTarget = request.targetPlatform == TargetPlatform::MacOS;
+  const bool virtuaTarget = request.targetPlatform == TargetPlatform::VirtuaArm;
   const bool sourceExport = request.exportMode == ExportMode::Source;
   const bool remoteCiBuild = request.exportMode == ExportMode::Build &&
                              request.buildBackend == BuildBackend::RemoteCi;
@@ -3695,18 +3696,21 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     fail(QStringLiteral("The All platform selection must be expanded before the GBA pipeline starts."));
     return;
   }
-  if (request.targetPlatform == TargetPlatform::VirtuaArm) {
-    // The gbarecomp host layer calls SDL entry points that the bundled Virtua
-    // compatibility surface (extra/virtua/sdl) does not implement — renderer
-    // viewport/fill/line, blend modes, audio device status, controller sensors,
-    // and touch events. Emitting a desktop project for a Virtua request would
-    // deliver a package that cannot run on the target, so this stops instead.
-    fail(QStringLiteral("Virtua ARM GBA packages are not available yet: the bundled Virtua SDL surface does not cover the gbarecomp host layer. Select macOS, Windows, or Linux."));
-    return;
-  }
-  if (localBuild && request.targetPlatform != hostTargetPlatform()) {
+  // Virtua is the one cross target here: the package is an ARMv7 .virtua built
+  // with PowerEngine's own toolchain, so it does not build "on its target
+  // operating system" and never could. The other three are desktop builds of
+  // gbarecomp's host runtime and do.
+  if (localBuild && !virtuaTarget && request.targetPlatform != hostTargetPlatform()) {
     fail(QStringLiteral("GBA packages build on their target operating system. Enable CI for %1 or export source.")
            .arg(targetPlatformDisplayName(request.targetPlatform)));
+    return;
+  }
+  if (virtuaTarget && !isPowerEngineRoot(request.powerEngineRoot)) {
+    fail(QStringLiteral("The selected PowerEngine root does not contain the canonical Virtua/MVII sources."));
+    return;
+  }
+  if (virtuaTarget && !isVirtuaLlvmRoot(request.llvmRoot)) {
+    fail(QStringLiteral("The selected LLVM root is not a complete PowerEngine compiler bundle."));
     return;
   }
   GbaDescription game;
@@ -3757,6 +3761,28 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     fail(QStringLiteral("The curated gbarecomp BIOS recompilation config is missing; the BIOS cannot be stubbed."));
     return;
   }
+  // The MVII half of a Virtua package: gba-to-mvii compiles gbarecomp's
+  // emulation sources for Cortex-A7 and links them against MVII's devices, and
+  // it resolves PowerEngine through extra/virtua/CMake — which is why both
+  // travel into the generated project, in that same relative arrangement.
+  const QString gbaToMviiRoot =
+    QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-to-mvii"));
+  const QString virtuaRoot =
+    QDir(request.frameworkRoot).filePath(QStringLiteral("extra/virtua"));
+  const QString elfInfoTool = QDir(virtuaRoot).filePath(QStringLiteral("tools/elfinfo.py"));
+  if (virtuaTarget) {
+    for (const auto& required : { QDir(gbaToMviiRoot).filePath(QStringLiteral("CMakeLists.txt")),
+                                  QDir(gbaToMviiRoot).filePath(QStringLiteral("src/mvii/main.cpp")),
+                                  QDir(virtuaRoot).filePath(QStringLiteral("CMake/VirtuaArmToolchain.cmake")),
+                                  QDir(virtuaRoot).filePath(QStringLiteral("CMake/VirtuaPowerEngine.cmake")),
+                                  elfInfoTool }) {
+      if (!QFileInfo(required).isFile()) {
+        fail(QStringLiteral("The framework does not contain the MVII GBA runtime: %1 is missing.")
+               .arg(required));
+        return;
+      }
+    }
+  }
   for (const auto& script : { QStringLiteral("SeedGbaEntry.java"),
                               QStringLiteral("ExportGbaAnalysis.java") }) {
     if (!QFileInfo(QDir(ghidraScriptsPath).filePath(script)).isFile()) {
@@ -3786,6 +3812,29 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
       (hostTargetPlatform() != TargetPlatform::Windows && ninja.isEmpty())) {
     fail(QStringLiteral("GBA exports require CMake, Git, and (on non-Windows hosts) Ninja to build the gbarecomp recompiler."));
     return;
+  }
+  // The Virtua package is cross-compiled with a single-configuration generator
+  // whatever the host is, and PowerEngine's packager is a Go program built from
+  // source on first use. Python reads the linked ELF afterwards: the compiler
+  // bundle ships no llvm-nm and macOS nm cannot read ELF at all.
+  const QString virtuaNinja = localBuild && virtuaTarget
+    ? (ninja.isEmpty() ? findExecutable(QStringLiteral("ninja")) : ninja) : QString();
+  const QString go = localBuild && virtuaTarget
+    ? findExecutable(QStringLiteral("go")) : QString();
+  const QString python = localBuild && virtuaTarget ? findWorkingPython() : QString();
+  if (localBuild && virtuaTarget) {
+    const QList<QPair<QString, QString>> virtuaTools{
+      { QStringLiteral("Ninja"), virtuaNinja },
+      { QStringLiteral("Go for the Virtua packager"), go },
+      { QStringLiteral("Python 3 for ELF verification"), python },
+    };
+    for (const auto& tool : virtuaTools) {
+      if (tool.second.isEmpty()) {
+        fail(QStringLiteral("A Virtua ARM GBA package requires %1 on the build host.")
+               .arg(tool.first));
+        return;
+      }
+    }
   }
   const QString rcodesign = signingRequested ? findRcodesign() : QString();
   if (signingRequested && rcodesign.isEmpty()) {
@@ -3869,6 +3918,22 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     fail(error);
     return;
   }
+  // gba-to-mvii includes ../virtua/CMake/VirtuaPowerEngine.cmake by relative
+  // path, so the two have to land in the project the way they sit in the
+  // framework. Nothing from PowerEngine itself is copied: the toolchain,
+  // sysroot, Dash, linker script and packager are all resolved out of
+  // POWERENGINE_ROOT at configure time.
+  if (virtuaTarget) {
+    const QString frameworkExtra =
+      QDir(projectDir).filePath(QStringLiteral("framework/extra"));
+    if (!copySourceDirectory(gbaToMviiRoot,
+                             QDir(frameworkExtra).filePath(QStringLiteral("gba-to-mvii")), error) ||
+        !copySourceDirectory(virtuaRoot,
+                             QDir(frameworkExtra).filePath(QStringLiteral("virtua")), error)) {
+      fail(error);
+      return;
+    }
+  }
   if (macosTarget &&
       !createIcns(iconSourcePath, workspace,
                   QDir(projectDir).filePath(QStringLiteral("AppIcon.icns")), error)) {
@@ -3877,11 +3942,20 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   }
   const QString bundleId = sanitizedBundleIdentifier(
     game.gameCode.isEmpty() ? QStringLiteral("gba") : game.gameCode, request.windowTitle);
+  // src/main.cpp is the desktop entry point: it opens gbarecomp's host window,
+  // audio device and TOML loader. The MVII image has its own main in
+  // framework/extra/gba-to-mvii/src/mvii, so a Virtua export does not get one —
+  // an unbuilt second entry point in the tree would only invite the question of
+  // which one runs.
+  if (!virtuaTarget &&
+      !writeText(QDir(sourceDir).filePath(QStringLiteral("main.cpp")),
+                 generatedGbaMainCpp(bundleName, romSha1, romCrc32), error)) {
+    fail(error);
+    return;
+  }
   if (!writeText(QDir(resourcesDir).filePath(QStringLiteral("game.toml")),
                  generatedGbaGameToml(request, game, romSha1, romCrc32, biosSha1,
                                       biosCrc32, /*biosHle=*/false), error) ||
-      !writeText(QDir(sourceDir).filePath(QStringLiteral("main.cpp")),
-                 generatedGbaMainCpp(bundleName, romSha1, romCrc32), error) ||
       !writeText(QDir(recompilerDir).filePath(QStringLiteral("game.recomp.toml")),
                  generatedGbaRecompilerToml(request, game, romSha1), error) ||
       !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
@@ -4557,25 +4631,62 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   }
 
   nextStage(QStringLiteral("Finalize gbarecomp CMake repository"));
+  const QString readmeLayout = virtuaTarget
+    ? QStringLiteral(
+        "- `generated/` — the translated cartridge (`recompiled_*.cpp`, "
+        "`dispatch_table.cpp`), compiled for Cortex-A7 and linked into the "
+        "`.virtua` image.\n"
+        "- `gbarecomp/` — the emulation core. `framework/extra/gba-to-mvii` "
+        "compiles a curated subset of it (no window, no audio device, no "
+        "overlay recompiler — none of those exist on MVII) plus the recompiled "
+        "BIOS in `gbarecomp/src/runtime/generated_bios/`.\n"
+        "- `framework/extra/gba-to-mvii/` — the MVII runtime: `/dev/fb0`, "
+        "`/dev/input0`, `/dev/dac0` and the cooperative yield.\n"
+        "- `framework/extra/virtua/` — the CMake that resolves PowerEngine. "
+        "Nothing from PowerEngine is vendored here; the toolchain, sysroot, "
+        "R-Dash, linker script and packager all come out of "
+        "`POWERENGINE_ROOT`.\n"
+        "- `recompiler/` — the `gba_recompile` configuration and the Ghidra "
+        "seed table it was driven with.\n"
+        "- `resources/game.toml` — the export's record of cartridge identity "
+        "and save configuration. The MVII image does not read it: it resolves "
+        "`game.gba` and `gba_bios.bin` beside its own executable.\n"
+        "- `proof/` — Ghidra verification and the static-coverage proof.\n")
+    : QStringLiteral(
+        "- `generated/` — the translated cartridge (`recompiled_*.cpp`, "
+        "`dispatch_table.cpp`).\n"
+        "- `gbarecomp/src/runtime/generated_bios/` — the recompiled BIOS, "
+        "linked into `gbarecomp_runtime`.\n"
+        "- `recompiler/` — the `gba_recompile` configuration and the Ghidra "
+        "seed table it was driven with.\n"
+        "- `proof/` — Ghidra verification and the static-coverage proof.\n");
+  const QString readmeBuild = virtuaTarget
+    ? QStringLiteral(
+        "## Build\n\nThe guest is ARMv4T and the device is ARMv7-A, so the "
+        "translation is compiled, not interpreted — but it is compiled by "
+        "PowerEngine's toolchain, not the host's:\n\n"
+        "```sh\ncmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \\\n"
+        "  -DCMAKE_TOOLCHAIN_FILE=framework/extra/virtua/CMake/VirtuaArmToolchain.cmake \\\n"
+        "  -DPOWERENGINE_ROOT=/path/to/PowerEngine \\\n"
+        "  -DVIRTUA_LLVM_ROOT=/path/to/PowerEngine/compiler-bundle\n"
+        "cmake --build build --target gba-runtime --parallel\n```\n\n"
+        "The package is emitted under "
+        "`build/steganos-package/gba-runtime/Release/`: the `.virtua` image "
+        "with `game.gba` and `gba_bios.bin` beside it.\n")
+    : QStringLiteral(
+        "## Build\n\n```sh\ncmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
+        "cmake --build build --target gba-runtime --parallel\n```\n\n"
+        "The package is emitted under "
+        "`build/steganos-package/gba-runtime/<configuration>/`.\n");
   const QString readme = QStringLiteral(
     "# %1 — gbarecomp Studio source export\n\n"
     "Generated by PSXRecomp Studio for **%2**. The cartridge and the GBA BIOS "
     "were statically recompiled to C++ during export by `gba_recompile`, seeded "
     "from a verified headless Ghidra analysis. This project compiles that "
     "translation; it never recompiles at build time and never needs the ROM to "
-    "build.\n\n"
-    "- `generated/` — the translated cartridge (`recompiled_*.cpp`, "
-    "`dispatch_table.cpp`).\n"
-    "- `gbarecomp/src/runtime/generated_bios/` — the recompiled BIOS, linked "
-    "into `gbarecomp_runtime`.\n"
-    "- `recompiler/` — the `gba_recompile` configuration and the Ghidra seed "
-    "table it was driven with.\n"
-    "- `proof/` — Ghidra verification and the static-coverage proof.\n\n"
-    "## Build\n\n```sh\ncmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
-    "cmake --build build --target gba-runtime --parallel\n```\n\n"
-    "The package is emitted under "
-    "`build/steganos-package/gba-runtime/<configuration>/`.\n")
-      .arg(request.windowTitle, targetPlatformDisplayName(request.targetPlatform));
+    "build.\n\n%3\n%4")
+      .arg(request.windowTitle, targetPlatformDisplayName(request.targetPlatform),
+           readmeLayout, readmeBuild);
   if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
                  generatedGbaProjectCMake(request, game, bundleName, bundleId), error) ||
       !writeText(QDir(projectDir).filePath(QStringLiteral("README.md")), readme, error) ||
@@ -4710,9 +4821,24 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     return;
   }
 
-  nextStage(QStringLiteral("Build gbarecomp package through CMake"));
+  nextStage(virtuaTarget
+    ? QStringLiteral("Cross-compile gbarecomp package for Virtua ARM")
+    : QStringLiteral("Build gbarecomp package through CMake"));
   QStringList configure{ QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir };
-  if (hostTargetPlatform() == TargetPlatform::Windows) {
+  if (virtuaTarget) {
+    // Ninja whatever the host is: this is a freestanding ARM cross-compile
+    // driven by PowerEngine's clang, which the Visual Studio generator cannot
+    // express. POWERENGINE_ROOT and VIRTUA_LLVM_ROOT are passed, never copied —
+    // the sysroot, R-Dash, the linker script and the packager stay where they
+    // are installed.
+    configure << QStringLiteral("-G") << QStringLiteral("Ninja")
+              << QStringLiteral("-DCMAKE_BUILD_TYPE=Release")
+              << QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1")
+                   .arg(QDir(projectDir).filePath(QStringLiteral(
+                     "framework/extra/virtua/CMake/VirtuaArmToolchain.cmake")))
+              << QStringLiteral("-DPOWERENGINE_ROOT=%1").arg(request.powerEngineRoot)
+              << QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot);
+  } else if (hostTargetPlatform() == TargetPlatform::Windows) {
     configure << QStringLiteral("-G") << QStringLiteral("Visual Studio 17 2022")
               << QStringLiteral("-A") << QStringLiteral("x64");
   } else {
@@ -4722,7 +4848,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   QStringList build{ QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
                      QStringLiteral("gba-runtime"), QStringLiteral("--parallel"),
                      QString::number(std::max(1, QThread::idealThreadCount())) };
-  if (hostTargetPlatform() == TargetPlatform::Windows)
+  if (!virtuaTarget && hostTargetPlatform() == TargetPlatform::Windows)
     build << QStringLiteral("--config") << QStringLiteral("Release");
   if (!runCommand(cmake, configure, workspace,
                   QStringLiteral("cmake -S <gbarecomp project> -B <build>"), 10 * 60 * 1000) ||
@@ -4744,18 +4870,28 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
 
   const QString stagedApp = macosTarget
     ? QDir(stageDir).filePath(bundleName + QStringLiteral(".app")) : stageDir;
+  const QString executableExtension = windowsTarget ? QStringLiteral(".exe")
+    : virtuaTarget ? QStringLiteral(".virtua") : QString();
   const QString mainExecutable = macosTarget
     ? QDir(stagedApp).filePath(QStringLiteral("Contents/MacOS/") + bundleName)
-    : QDir(stageDir).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()));
+    : QDir(stageDir).filePath(bundleName + executableExtension);
   // game.toml resolves [rom].path and [bios].path against its own directory, so
-  // the runtime reads them from exactly these locations.
+  // the runtime reads them from exactly these locations. The MVII image has no
+  // config file at all: it resolves both assets as dirname(argv[0])/<name>, so
+  // its package is the three files side by side.
   const QString packagedResources = macosTarget
     ? QDir(stagedApp).filePath(QStringLiteral("Contents/Resources")) : stageDir;
-  const QString packagedConfig = QDir(packagedResources).filePath(QStringLiteral("game.toml"));
-  const QString packagedRom = QDir(packagedResources).filePath(QStringLiteral("game/game.gba"));
-  const QString packagedBios = QDir(packagedResources).filePath(QStringLiteral("bios/gba_bios.bin"));
-  if (!QFileInfo(mainExecutable).isFile() || !QFileInfo(packagedConfig).isFile()) {
-    fail(QStringLiteral("The gbarecomp package is missing its executable or game.toml."));
+  const QString packagedConfig = virtuaTarget
+    ? QString() : QDir(packagedResources).filePath(QStringLiteral("game.toml"));
+  const QString packagedRom = QDir(packagedResources).filePath(
+    virtuaTarget ? QStringLiteral("game.gba") : QStringLiteral("game/game.gba"));
+  const QString packagedBios = QDir(packagedResources).filePath(
+    virtuaTarget ? QStringLiteral("gba_bios.bin") : QStringLiteral("bios/gba_bios.bin"));
+  if (!QFileInfo(mainExecutable).isFile() ||
+      (!virtuaTarget && !QFileInfo(packagedConfig).isFile())) {
+    fail(virtuaTarget
+      ? QStringLiteral("The Virtua ARM gbarecomp package is missing its .virtua image.")
+      : QStringLiteral("The gbarecomp package is missing its executable or game.toml."));
     return;
   }
   if (sha256File(packagedRom, error) != romSha256 ||
@@ -4795,7 +4931,78 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   // The recompiled cartridge is compiled into this executable, so the dispatch
   // table's own symbol is the packaged proof that the translation was linked
   // rather than dropped by the linker.
-  {
+  if (virtuaTarget) {
+    // A .virtua is the packager's own container, not an ELF, so the symbol
+    // question is asked of the ELF it was made from. The compiler bundle ships
+    // no llvm-nm and macOS nm cannot read ELF at all, hence elfinfo.py.
+    const QString linkedElf = QDir(buildDir).filePath(
+      QStringLiteral("gba-to-mvii/%1.elf").arg(bundleName));
+    if (!QFileInfo(linkedElf).isFile()) {
+      fail(QStringLiteral("The Virtua ARM link did not produce %1, so the package cannot be verified.")
+             .arg(linkedElf));
+      return;
+    }
+    const QString projectElfInfo = QDir(projectDir).filePath(
+      QStringLiteral("framework/extra/virtua/tools/elfinfo.py"));
+    QByteArray attributes;
+    if (!runCommand(python, { projectElfInfo, QStringLiteral("armattrs"), linkedElf },
+                    workspace, QStringLiteral("elfinfo.py armattrs <gba-to-mvii ELF>"),
+                    5 * 60 * 1000, &attributes)) {
+      fail(QStringLiteral("The Virtua ARM ELF has no readable .ARM.attributes section."));
+      return;
+    }
+    const QString attributeText = QString::fromUtf8(attributes);
+    // Tag_CPU_arch 10 is ARMv7 and Tag_CPU_arch_profile 65 is 'A'. A guest built
+    // for anything else would load and then fault on the first instruction the
+    // Cortex-A7 does not have.
+    if (!attributeText.contains(QStringLiteral("Tag_CPU_arch = 10")) ||
+        !attributeText.contains(QStringLiteral("Tag_CPU_arch_profile = 65"))) {
+      fail(QStringLiteral("The linked image is not tagged ARMv7-A:\n%1").arg(attributeText));
+      return;
+    }
+    // Nothing may be left undefined: the image is statically linked and there is
+    // no dynamic loader on MVII to resolve a straggler at run time.
+    QByteArray undefined;
+    if (!runCommand(python, { projectElfInfo, QStringLiteral("undef"), linkedElf },
+                    workspace, QStringLiteral("elfinfo.py undef <gba-to-mvii ELF>"),
+                    5 * 60 * 1000, &undefined)) {
+      fail(QStringLiteral("The Virtua ARM image has undefined symbols, which MVII has no loader to resolve:\n%1")
+             .arg(QString::fromUtf8(undefined)));
+      return;
+    }
+    QByteArray dispatchSymbol;
+    if (!runCommand(python,
+                    { projectElfInfo, QStringLiteral("symbols"), linkedElf,
+                      QStringLiteral("kDispatchTable") },
+                    workspace, QStringLiteral("elfinfo.py symbols <gba-to-mvii ELF> kDispatchTable"),
+                    5 * 60 * 1000, &dispatchSymbol)) {
+      fail(QStringLiteral("The linked Virtua ARM image does not contain the recompiled cartridge dispatch table."));
+      return;
+    }
+    // And the packaged container itself: a v3 image, ARM32, cooperatively
+    // scheduled. A preemptive image would be descheduled mid-frame by a kernel
+    // that expects the guest to yield.
+    QFile container(mainExecutable);
+    if (!container.open(QIODevice::ReadOnly)) {
+      fail(QStringLiteral("The staged .virtua image could not be read."));
+      return;
+    }
+    const QByteArray header = container.read(56);
+    container.close();
+    if (header.size() != 56 ||
+        qFromLittleEndian<quint32>(header.constData()) != 0x56495254u ||
+        qFromLittleEndian<quint32>(header.constData() + 4) != 3u) {
+      fail(QStringLiteral("The staged executable is not a Virtua v3 image."));
+      return;
+    }
+    const quint64 containerFlags = qFromLittleEndian<quint64>(header.constData() + 48);
+    if (((containerFlags >> 8u) & 0xffu) != 4u ||
+        (containerFlags & (1u << 1u)) == 0u) {
+      fail(QStringLiteral("The staged .virtua image is not a cooperative ARM32 executable (flags 0x%1).")
+             .arg(containerFlags, 16, 16, QLatin1Char('0')));
+      return;
+    }
+  } else {
     QByteArray symbols;
     const QString nm = hostTargetPlatform() == TargetPlatform::Windows
       ? findExecutable(QStringLiteral("dumpbin")) : findExecutable(QStringLiteral("nm"));
@@ -4817,7 +5024,9 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
       return;
     }
   }
-  emit logLine(QStringLiteral("Verified: the packaged executable carries the recompiled cartridge dispatch table."));
+  emit logLine(virtuaTarget
+    ? QStringLiteral("Verified: a cooperative ARMv7-A Virtua image, nothing undefined, carrying the recompiled cartridge dispatch table.")
+    : QStringLiteral("Verified: the packaged executable carries the recompiled cartridge dispatch table."));
 
   nextStage(signingRequested ? QStringLiteral("Sign gbarecomp app")
                              : QStringLiteral("Seal gbarecomp package"));
@@ -4828,6 +5037,15 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("runtime"), QStringLiteral("gbarecomp") },
     { QStringLiteral("execution"), QStringLiteral("static-recompilation") },
     { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
+    { QStringLiteral("target_architecture"), virtuaTarget
+        ? QStringLiteral("armv7a-none-eabi (Cortex-A7)")
+        : QSysInfo::currentCpuArchitecture() },
+    // The guest is ARMv4T and the MVII device is ARMv7-A: two different
+    // instruction sets, so this is the same static recompilation the desktop
+    // packages get, compiled by PowerEngine's toolchain instead of the host's.
+    { QStringLiteral("host_runtime"), virtuaTarget
+        ? QStringLiteral("gba-to-mvii on MVII devices (/dev/fb0, /dev/input0, /dev/dac0)")
+        : QStringLiteral("gbarecomp desktop host runtime (SDL2)") },
     { QStringLiteral("cartridge_dispatch_entries"), dispatchRows },
     { QStringLiteral("cartridge_dispatch_addresses"), dispatchAddresses },
     { QStringLiteral("bios_dispatch_entries"), biosDispatchRows },
@@ -4925,7 +5143,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   if (!request.exportAsZip) {
     const QString deliveredExecutable = macosTarget
       ? QDir(output).filePath(QStringLiteral("Contents/MacOS/") + bundleName)
-      : QDir(output).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()));
+      : QDir(output).filePath(bundleName + executableExtension);
     if (sha256File(deliveredExecutable, error) != sealedExecutableHash) {
       fail(error.isEmpty() ? QStringLiteral("The delivered gbarecomp executable changed during publication.") : error);
       return;

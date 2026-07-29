@@ -422,12 +422,119 @@ QString generatedGbaInfoPlist(const QString& bundleName, const QString& bundleId
 )PLIST").arg(bundleName.toHtmlEscaped(), bundleId.toHtmlEscaped());
 }
 
+namespace {
+
+/* The Virtua ARM form of the package.
+ *
+ * The desktop project below builds gbarecomp's own host runtime — a window, an
+ * audio device, a TOML loader, a Stage-2 overlay recompiler that shells out to
+ * a compiler. None of that exists on an 845 MHz Cortex-A7 with seven character
+ * devices, so this project does not try to cross-compile it. It hands the
+ * recompiled cartridge to extra/gba-to-mvii, which compiles the *emulation*
+ * half of gbarecomp — the same sources, not a port — against MVII's own
+ * framebuffer, input and DAC.
+ *
+ * The guest is ARMv4T and the host is ARMv7-A, so this is still static
+ * recompilation: the generated C++ is compiled for Cortex-A7 and runs natively.
+ * Nothing here interprets that a desktop build would not, and a coverage miss
+ * bridges through the same reference interpreter and is reported the same way. */
+QString generatedGbaVirtuaProjectCMake(const QString& bundleName) {
+  return QStringLiteral(R"CMAKE(cmake_minimum_required(VERSION 3.20)
+project(GeneratedGbaVirtuaPackage CXX C ASM)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# Configure with the Virtua ARM toolchain; there is no host form of this
+# package. gba-to-mvii refuses a non-ARM CMAKE_SYSTEM_PROCESSOR itself, but it
+# is worth saying here, where the mistake is actually made.
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|armv7)")
+  message(FATAL_ERROR
+    "This package targets MVII/Virtua. Configure with "
+    "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_CURRENT_SOURCE_DIR}/framework/extra/virtua/CMake/VirtuaArmToolchain.cmake "
+    "-DPOWERENGINE_ROOT=<PowerEngine> -DVIRTUA_LLVM_ROOT=<compiler bundle>")
+endif()
+
+set(GBA_APP_NAME %1)
+
+# gba_recompile emitted these during export. Their presence IS the proof that
+# the cartridge was translated; an empty generated/ is a hard error rather than
+# a silent fall back to interpretation.
+file(GLOB GBA_RECOMPILED_SOURCES CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/generated/recompiled_*.cpp")
+if(NOT GBA_RECOMPILED_SOURCES)
+  message(FATAL_ERROR
+    "generated/ contains no recompiled translation units. "
+    "Re-export from PSXRecomp Studio; this project never recompiles at build time.")
+endif()
+foreach(_required dispatch_table.cpp recompiled.h)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/${_required}")
+    message(FATAL_ERROR "generated/${_required} is missing; the recompilation is incomplete.")
+  endif()
+endforeach()
+list(APPEND GBA_RECOMPILED_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/generated/dispatch_table.cpp")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/symbol_map.cpp")
+  list(APPEND GBA_RECOMPILED_SOURCES
+       "${CMAKE_CURRENT_SOURCE_DIR}/generated/symbol_map.cpp")
+endif()
+list(LENGTH GBA_RECOMPILED_SOURCES _gba_unit_count)
+message(STATUS "gbarecomp: linking ${_gba_unit_count} recompiled cartridge units for Cortex-A7")
+
+# gba-to-mvii links the recompiled BIOS out of the gbarecomp copy this export
+# carries. The export wrote it there; refuse the placeholder dispatch stub,
+# which would mean the BIOS was never translated.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gbarecomp/src/runtime/generated_bios/bios_recompiled.cpp")
+  message(FATAL_ERROR
+    "The recompiled GBA BIOS is missing. gba-to-mvii would fall back to its "
+    "placeholder dispatch stub, and the BIOS must never be stubbed.")
+endif()
+
+# Plain variables, read by framework/extra/gba-to-mvii/CMakeLists.txt before it
+# defines anything. The cartridge goes in as GBA_MVII_NATIVE_SOURCES, which is
+# also what switches that project into its AOT configuration.
+set(_GBA_SRC "${CMAKE_CURRENT_SOURCE_DIR}")
+set(_GBA_STAGE "${CMAKE_BINARY_DIR}/steganos-package/gba-runtime/$<CONFIG>")
+set(GBARECOMP_ROOT "${_GBA_SRC}/gbarecomp")
+set(GBA_MVII_NATIVE_SOURCES ${GBA_RECOMPILED_SOURCES})
+set(GBA_MVII_OUTPUT_NAME "${GBA_APP_NAME}")
+set(GBA_MVII_ROM "${_GBA_SRC}/package_inputs/game.gba")
+set(GBA_MVII_BIOS "${_GBA_SRC}/package_inputs/gba_bios.bin")
+set(GBA_MVII_STAGE_DIR "${_GBA_STAGE}")
+add_subdirectory(framework/extra/gba-to-mvii "${CMAKE_BINARY_DIR}/gba-to-mvii")
+
+# gba-to-mvii stages the .virtua, game.gba and gba_bios.bin side by side — the
+# runtime resolves both assets as dirname(argv[0])/<name>, so there is no
+# resources directory and no game.toml in the package. The rest of what a
+# Steganos package carries is added here.
+add_custom_target(gba-runtime ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_GBA_SRC}/AppIcon.png" "${_GBA_STAGE}/AppIcon.png"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_GBA_SRC}/game.manifest.json" "${_GBA_STAGE}/game.manifest.json"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${_GBA_SRC}/PSXRecomp-Proof.zip" "${_GBA_STAGE}/PSXRecomp-Proof.zip"
+  DEPENDS "${_GBA_SRC}/AppIcon.png"
+          "${_GBA_SRC}/game.manifest.json"
+          "${_GBA_SRC}/PSXRecomp-Proof.zip"
+  COMMENT "Staging the statically recompiled GBA Virtua package"
+  VERBATIM)
+add_dependencies(gba-runtime gba-to-mvii-stage)
+)CMAKE")
+    .arg(cmakeQuoted(bundleName));
+}
+
+}  // namespace
+
 QString generatedGbaProjectCMake(const PipelineRequest& request,
                                  const GbaDescription& game,
                                  const QString& bundleName,
                                  const QString& bundleId) {
   Q_UNUSED(game);
   Q_UNUSED(bundleId);
+  if (request.targetPlatform == TargetPlatform::VirtuaArm)
+    return generatedGbaVirtuaProjectCMake(bundleName);
   // The cartridge and the BIOS were statically recompiled during export, so
   // this project compiles checked-in C++ and never needs the ROM to build.
   return QStringLiteral(R"CMAKE(cmake_minimum_required(VERSION 3.20)

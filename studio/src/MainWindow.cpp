@@ -1915,24 +1915,6 @@ void MainWindow::setBusy(bool busy) {
 }
 
 void MainWindow::updatePlatformControls() {
-  // A GBA package has no Virtua ARM form yet, so the entry is greyed out rather
-  // than left selectable and failing once the pipeline has already started.
-  {
-    const int virtuaIndex =
-      platformCombo_->findData(targetPlatformKey(TargetPlatform::VirtuaArm));
-    if (virtuaIndex >= 0) {
-      const bool selectable = currentSystem_ != SystemKind::GameBoyAdvance;
-      platformCombo_->setItemData(
-        virtuaIndex,
-        selectable ? QVariant(Qt::ItemIsSelectable | Qt::ItemIsEnabled) : QVariant(0),
-        Qt::UserRole - 1);
-      if (!selectable && platformCombo_->currentIndex() == virtuaIndex) {
-        const QSignalBlocker blocker(platformCombo_);
-        platformCombo_->setCurrentIndex(
-          platformCombo_->findData(targetPlatformKey(hostTargetPlatform())));
-      }
-    }
-  }
   const auto selectedPlatform =
     targetPlatformFromKey(platformCombo_->currentData().toString());
   const ExportMode exportMode =
@@ -1998,8 +1980,8 @@ void MainWindow::updatePlatformControls() {
   } else if (selectedPlatform == TargetPlatform::VirtuaArm) {
     signingNote_->setText(currentSystem_ == SystemKind::GameBoyAdvance
       ? QStringLiteral(
-          "Game Boy Advance titles cannot target Virtua ARM yet: the bundled Virtua SDL "
-          "surface does not cover the gbarecomp host layer.")
+          "Virtua ARM builds compile the recompiled cartridge and gbarecomp's emulation "
+          "core for Cortex-A7, on MVII's own framebuffer, input and DAC.")
       : QStringLiteral(
           "Virtua ARM builds link the recompiled PlayStation program into a cooperative "
           "ARMv7 .virtua executable."));

@@ -274,48 +274,42 @@ void Video::flush() {
     (void)::ioctl(fd_, FB_IOCTL_SWAP_RGBA8, &draw);
 }
 
-// BGR555 -> RGBA8, computed rather than looked up.
+// RGB888 -> RGBA8: a widen, not a conversion.
 //
-// The obvious implementation of this is a 32768-entry table, and that is what
-// it was. It is the wrong shape for this part: 128 KB indexed by pixel value
-// against a Cortex-A7's 32 KB four-way L1D means most pixels are an L2 hit, and
-// an L2 hit here costs more than the dozen single-cycle ALU ops it was there to
-// avoid. Doing the arithmetic touches no memory at all, so it also stops the
-// conversion evicting the emulator's own working set once per frame — which is
-// the larger of the two effects, since the interpreter is what sets the frame
-// rate and it runs 150k instructions between presents.
+// The core hands over the PPU's own frame, and that frame is already 8 bits per
+// channel in R, G, B order — the palette lookup that produced it did the
+// 5-to-8-bit expansion (replicating the top bits, so 0x1F reaches 0xFF and
+// whites stay white) once per palette entry rather than once per pixel. The
+// kernel's RGBA8 surface is little-endian byte 0 R, byte 1 G, byte 2 B, byte 3
+// A, which is the same order. So all that is left here is inserting an opaque
+// alpha byte every fourth position.
 //
-// The 5-to-8-bit expansion replicates the top bits (v << 3 | v >> 2) so that
-// 0x1F reaches 0xFF rather than 0xF8, which is what keeps whites white.
-// Little-endian: byte 0 is R, byte 1 G, byte 2 B, byte 3 A — the channel order
-// the kernel's RGBA8 surface expects. Red is in the LOW five bits of the
-// source, because that is the GBA's own layout, not the framebuffer's.
-static inline uint32_t rgba8_from_bgr555(uint16_t v) {
-    const uint32_t r5 = v & 0x1Fu;
-    const uint32_t g5 = (v >> 5) & 0x1Fu;
-    const uint32_t b5 = (v >> 10) & 0x1Fu;
-    return ((r5 << 3) | (r5 >> 2)) |
-           (((g5 << 3) | (g5 >> 2)) << 8) |
-           (((b5 << 3) | (b5 >> 2)) << 16) |
+// Deliberately reads three bytes rather than one unaligned 32-bit load and a
+// mask: this loop runs 38400 times a frame and the source is 3-byte-strided, so
+// three quarters of those loads would straddle a word boundary, and the last
+// pixel of the buffer would read one byte past the end.
+static inline uint32_t rgba8_from_rgb888(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
            0xFF000000u;
 }
 
-void Video::present(const uint16_t* bgr555) {
-    if (!bgr555) return;
+void Video::present(const uint8_t* rgb888) {
+    if (!rgb888) return;
     int span = 0;
     uint8_t* dst = surface(span);
     if (!dst) return;
 
     // One row at a time: the destination stride is the kernel's (1280 pixels
     // for the shared surface), not ours, so this cannot be a single linear
-    // pass. Writing 32 bits at a time rather than four bytes matters here —
-    // this loop runs 38400 times a frame.
+    // pass. Writing 32 bits at a time rather than four bytes matters here.
     for (int y = 0; y < height_; ++y) {
-        const uint16_t* src = bgr555 + static_cast<std::size_t>(y) * width_;
+        const uint8_t* src = rgb888 + static_cast<std::size_t>(y) * width_ * 3;
         uint32_t* out = reinterpret_cast<uint32_t*>(dst) +
                         static_cast<std::size_t>(y) * span;
         for (int x = 0; x < width_; ++x) {
-            out[x] = rgba8_from_bgr555(src[x]);
+            out[x] = rgba8_from_rgb888(src + static_cast<std::size_t>(x) * 3);
         }
     }
     flush();
@@ -502,14 +496,6 @@ using SteadyNs    = std::chrono::nanoseconds;
 using SteadyUs    = std::chrono::microseconds;
 
 namespace {
-
-// Convert a steady_clock time_point to the microsecond epoch that the rest of
-// the runtime (and the Rust core) still speaks.
-uint64_t to_us(SteadyTime t)
-{
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<SteadyUs>(t.time_since_epoch()).count());
-}
 
 // The largest step we will ever treat as “real elapsed time”.  Anything bigger
 // is assumed to be a domain change.

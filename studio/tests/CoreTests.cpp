@@ -115,7 +115,6 @@ int main(int argc, char** argv) {
     const QString smokeMode = QString::fromLocal8Bit(argv[5]);
     request.exportMode = smokeMode.startsWith(QStringLiteral("source"))
       ? psxstudio::ExportMode::Source : psxstudio::ExportMode::Build;
-    request.nativeExecution = smokeMode.contains(QStringLiteral("native"));
     request.romPath = QString::fromLocal8Bit(argv[2]);
     request.biosPath = QString::fromLocal8Bit(argv[3]);
     request.outputDirectory = QString::fromLocal8Bit(argv[4]);
@@ -123,6 +122,7 @@ int main(int argc, char** argv) {
       QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("../..")));
     request.powerEngineRoot = qEnvironmentVariable("POWERENGINE_ROOT");
     request.llvmRoot = qEnvironmentVariable("VIRTUA_LLVM_ROOT");
+    request.ghidraHome = qEnvironmentVariable("GHIDRA_HOME");
     request.windowTitle = argc >= 8 ? QString::fromLocal8Bit(argv[7])
                                     : QStringLiteral("GBA Studio Smoke");
     request.exportAsZip = QString::fromLocal8Bit(argv[5]).endsWith(QStringLiteral("zip"));
@@ -201,97 +201,81 @@ int main(int argc, char** argv) {
     QString(40, QLatin1Char('b')), 0x87654321u, false);
   check(gbaToml.contains(QStringLiteral("path = \"bios/gba_bios.bin\"")) &&
           gbaToml.contains(QStringLiteral("path = \"game/game.gba\"")) &&
-          gbaToml.contains(QStringLiteral("window_title = \"Studio Test Advance\"")) &&
-          !gbaToml.contains(QStringLiteral("debug_port")) &&
+          gbaToml.contains(QStringLiteral("short_name = \"StudioTestAdvance\"")) &&
           gbaToml.contains(QStringLiteral("hle = false")) &&
           gbaToml.contains(QStringLiteral("shadow = false")) &&
-          gbaToml.contains(QStringLiteral("entry_point = \"0X080000C0\"")),
+          gbaToml.contains(QStringLiteral("type = \"flash1m\"")),
         QStringLiteral("generated GBA runtime configuration pins packaged inputs"));
+  // The runtime silently ignores keys it does not know, so an inert section
+  // would read as configuration that does something. Only keys gbarecomp
+  // actually dispatches on may appear.
+  for (const auto& inert : { QStringLiteral("[recompiler]"), QStringLiteral("[runtime]"),
+                             QStringLiteral("window_title"), QStringLiteral("entry_point"),
+                             QStringLiteral("debug_port"), QStringLiteral("interpreter") }) {
+    check(!gbaToml.contains(inert),
+          QStringLiteral("generated GBA game.toml omits the inert key %1").arg(inert));
+  }
   const QString gbaHleToml = psxstudio::generatedGbaGameToml(
     gbaRequest, gbaDescription, QString(40, QLatin1Char('a')), 0x12345678u,
     QString(40, QLatin1Char('b')), 0x87654321u, true);
   check(gbaHleToml.contains(QStringLiteral("hle = true")) &&
           gbaHleToml.contains(QStringLiteral("hle_keep_intro = false")),
-        QStringLiteral("noncanonical or absent GBA BIOS selects standalone HLE"));
-  const QString gbaPack = psxstudio::generatedGbaPackToml(
-    gbaRequest, QStringLiteral("Studio Test Advance"),
-    QString(64, QLatin1Char('a')), QString(64, QLatin1Char('b')));
-  check(gbaPack.contains(QStringLiteral("platforms = [\"macos\"]")) &&
-          gbaPack.contains(QStringLiteral("menu = true")) &&
-          gbaPack.contains(QStringLiteral("screen-sim = true")) &&
-          gbaPack.contains(QStringLiteral("skip-bios = true")) &&
-          gbaPack.contains(QStringLiteral("bios-sha256")) &&
-          gbaPack.contains(QStringLiteral("embed-inputs = true")) &&
-          gbaPack.contains(QStringLiteral("interpreter = true")),
-        QStringLiteral("generated Rust GBA pack config enables the shipping host frontend"));
+        QStringLiteral("GBA boot skip selects the runtime HLE boot path"));
+  const QString gbaRecompilerToml = psxstudio::generatedGbaRecompilerToml(
+    gbaRequest, gbaDescription, QString(40, QLatin1Char('a')));
+  check(gbaRecompilerToml.contains(QStringLiteral("[program]")) &&
+          gbaRecompilerToml.contains(QStringLiteral("load_address = 0x08000000")) &&
+          gbaRecompilerToml.contains(QStringLiteral("entry_pc = 0x080000C0")) &&
+          gbaRecompilerToml.contains(
+            QStringLiteral("size = %1").arg(gbaDescription.romSize)) &&
+          gbaRecompilerToml.contains(QStringLiteral("[identity]")) &&
+          gbaRecompilerToml.contains(
+            QStringLiteral("sha1 = \"%1\"").arg(QString(40, QLatin1Char('a')))),
+        QStringLiteral("generated gba_recompile configuration pins the image it was derived from"));
   const QString gbaCmake = psxstudio::generatedGbaProjectCMake(
     gbaRequest, gbaDescription, QStringLiteral("Studio Test Advance"),
     QStringLiteral("org.psxrecomp.gba.test"));
-  check(gbaCmake.contains(QStringLiteral("project(GeneratedGbaRustPackage NONE)")) &&
-          gbaCmake.contains(QStringLiteral("$ENV{HOME}/.cargo/bin")) &&
-          gbaCmake.contains(QStringLiteral("${GBA_CARGO} build")) &&
-          gbaCmake.contains(QStringLiteral("gba-pack")) &&
+  check(gbaCmake.contains(QStringLiteral("project(GeneratedGbaRecompPackage")) &&
+          gbaCmake.contains(QStringLiteral("generated/recompiled_*.cpp")) &&
+          gbaCmake.contains(QStringLiteral("generated/dispatch_table.cpp")) &&
+          gbaCmake.contains(QStringLiteral("generated_bios/bios_recompiled.cpp")) &&
+          gbaCmake.contains(QStringLiteral("add_subdirectory(gbarecomp")) &&
+          gbaCmake.contains(QStringLiteral("target_link_gbarecomp_runtime_stack")) &&
+          gbaCmake.contains(QStringLiteral("package_inputs/gba_bios.bin")) &&
           gbaCmake.contains(QStringLiteral("add_custom_target(gba-runtime")) &&
           gbaCmake.contains(QStringLiteral("steganos-package/gba-runtime")) &&
-          !gbaCmake.contains(QStringLiteral("--defer-translation")) &&
-          gbaCmake.contains(QStringLiteral("GBA_CARGO_TARGET_DIR")) &&
-          gbaCmake.contains(QStringLiteral("CARGO_PROFILE_DIST_STRIP=none")) &&
-          gbaCmake.contains(QStringLiteral("package_inputs/gba_bios.bin")) &&
-          gbaCmake.contains(QStringLiteral("USES_TERMINAL")) &&
+          !gbaCmake.contains(QStringLiteral("GBA_CARGO")) &&
           !gbaCmake.contains(QStringLiteral("add_executable(psx-runtime")),
-        QStringLiteral("generated GBA CMake drives the Rust runtime and target-specific CI package"));
-  psxstudio::PipelineRequest gbaNativeRequest = gbaRequest;
-  gbaNativeRequest.targetPlatform = psxstudio::TargetPlatform::VirtuaArm;
-  gbaNativeRequest.nativeExecution = true;
-  check(gbaNativeRequest.toJson().value(QStringLiteral("native")).toBool() &&
-          gbaNativeRequest.toJson().value(QStringLiteral("platform")).toString() ==
-            QStringLiteral("virtua-arm"),
-        QStringLiteral("Virtua ARM native GBA request serialization"));
-  const QString gbaNativeCmake = psxstudio::generatedGbaNativeProjectCMake(
-    QStringLiteral("Studio Test Advance"));
-  check(!gbaNativeCmake.contains(QStringLiteral("set(VIRTUA_ROOT")) &&
-          gbaNativeCmake.contains(QStringLiteral("RECOMP_EMIT_ONLY=1")) &&
-          gbaNativeCmake.contains(QStringLiteral("RECOMP_DISABLE_CHAIN_GROUPS=1")) &&
-          gbaNativeCmake.contains(QStringLiteral("GBA_MVII_NATIVE_SOURCES")) &&
-          gbaNativeCmake.contains(QStringLiteral("${_GBA_RUST_ROOT}/gamedb.sqlite")) &&
-          gbaNativeCmake.contains(QStringLiteral("add_subdirectory(")) &&
-          gbaNativeCmake.contains(QStringLiteral("AppIcon.png")) &&
-          gbaNativeCmake.contains(QStringLiteral("Studio Test Advance.virtua")) &&
-          gbaNativeCmake.contains(QStringLiteral("add_custom_target(gba-runtime")),
-        QStringLiteral("generated native GBA CMake emits and links gba-rust AOT code"));
-  const QString gbaProject = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-project"));
-  const QString gbaBuild = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-build"));
+        QStringLiteral("generated GBA CMake compiles the recompiled cartridge and BIOS"));
+  // An export that produced no translation must stop the build rather than
+  // quietly ship an executable with nothing recompiled in it.
+  // A separate root: CMake's compiler probe drops *.bin files into its build
+  // tree, and the disc catalog scan below recurses. Sharing `temp` would make
+  // those probe artifacts look like PlayStation tracks.
+  QTemporaryDir gbaCmakeTemp;
+  check(gbaCmakeTemp.isValid(), QStringLiteral("gbarecomp CMake fixture root"));
+  const QString gbaProject =
+    QDir(gbaCmakeTemp.path()).filePath(QStringLiteral("generated-gbarecomp-project"));
+  const QString gbaBuild =
+    QDir(gbaCmakeTemp.path()).filePath(QStringLiteral("generated-gbarecomp-build"));
   check(psxstudio::writeText(QDir(gbaProject).filePath(QStringLiteral("CMakeLists.txt")),
                              gbaCmake, error) &&
-        QDir().mkpath(QDir(gbaProject).filePath(QStringLiteral("gba-rust"))) &&
-        QDir().mkpath(QDir(gbaProject).filePath(QStringLiteral("recomp_gamepad"))) &&
+        QDir().mkpath(QDir(gbaProject).filePath(QStringLiteral("generated"))) &&
         QDir().mkpath(QDir(gbaProject).filePath(QStringLiteral("package_inputs"))),
-        error.isEmpty() ? QStringLiteral("generated Rust GBA CMake fixture") : error);
+        error.isEmpty() ? QStringLiteral("generated gbarecomp CMake fixture") : error);
   QProcess gbaConfigure;
   gbaConfigure.start(QStringLiteral("cmake"),
     { QStringLiteral("-S"), gbaProject, QStringLiteral("-B"), gbaBuild,
       QStringLiteral("-G"), QStringLiteral("Ninja"),
-      QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
-      QStringLiteral("-DGBA_CLEAN_CARGO_TARGET=OFF") });
-  check(gbaConfigure.waitForStarted(5000) && gbaConfigure.waitForFinished(30000) &&
-          gbaConfigure.exitStatus() == QProcess::NormalExit &&
-          gbaConfigure.exitCode() == 0,
-        QStringLiteral("generated Rust GBA CMake configures: %1")
-          .arg(QString::fromUtf8(gbaConfigure.readAllStandardError())));
-
-  const QByteArray savedCargoHome = qgetenv("CARGO_HOME");
-  const QString fakeCargoHome = QDir(temp.path()).filePath(QStringLiteral("cargo-home"));
-  const QString fakeCargo = QDir(fakeCargoHome).filePath(QStringLiteral("bin/cargo-studio-probe"));
-  check(psxstudio::writeText(fakeCargo, QStringLiteral("cargo"), error), error);
-#if !defined(Q_OS_WIN)
-  QFile::setPermissions(fakeCargo, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                                   QFileDevice::ExeOwner);
-#endif
-  qputenv("CARGO_HOME", fakeCargoHome.toUtf8());
-  check(psxstudio::findExecutable(QStringLiteral("cargo-studio-probe")) == fakeCargo,
-        QStringLiteral("Cargo discovery searches CARGO_HOME for GUI-launched Studio"));
-  if (savedCargoHome.isNull()) qunsetenv("CARGO_HOME");
-  else qputenv("CARGO_HOME", savedCargoHome);
+      QStringLiteral("-DCMAKE_BUILD_TYPE=Release") });
+  const bool gbaConfigureRan = gbaConfigure.waitForStarted(5000) &&
+                               gbaConfigure.waitForFinished(30000) &&
+                               gbaConfigure.exitStatus() == QProcess::NormalExit;
+  const QString gbaConfigureError = QString::fromUtf8(gbaConfigure.readAllStandardError());
+  check(gbaConfigureRan && gbaConfigure.exitCode() != 0 &&
+          gbaConfigureError.contains(QStringLiteral("no recompiled translation units")),
+        QStringLiteral("generated gbarecomp CMake refuses an empty translation: %1")
+          .arg(gbaConfigureError));
 
   const QString fakeGhidraHome = QDir(temp.path()).filePath(QStringLiteral("ghidra"));
   const QString fakeGhidraProperties =
@@ -417,7 +401,9 @@ int main(int argc, char** argv) {
         QStringLiteral("batch catalog groups a CUE set and an unowned standalone BIN"));
   check(catalogWarnings.size() == 1 &&
           catalogWarnings.constFirst().contains(QStringLiteral("missing-track.bin")),
-        QStringLiteral("batch catalog reports an incomplete CUE"));
+        QStringLiteral("batch catalog reports an incomplete CUE (got: %1)")
+          .arg(catalogWarnings.isEmpty() ? QStringLiteral("<none>")
+                                         : catalogWarnings.join(QStringLiteral(" | "))));
   const auto catalogHasSource = [&](const QString& path) {
     const QString canonical = QFileInfo(path).canonicalFilePath();
     return std::any_of(catalog.cbegin(), catalog.cend(), [&](const auto& entry) {
@@ -939,6 +925,116 @@ int main(int argc, char** argv) {
           packageSource, {}, cancelledZip, error, {}, []() { return true; }) &&
           !QFileInfo::exists(cancelledZip),
         QStringLiteral("cancelled package ZIP is not delivered"));
+
+  // ── Ghidra seed admission ──────────────────────────────────────────────────
+  //
+  // These guard the rule that keeps compressed art out of the dispatch table.
+  // Seeding on Ghidra's reference class instead admits data: on Final Fantasy
+  // VI Advance it offers 113,516 COMPUTED_CALL references against 22 real
+  // COMPUTED_JUMP, and because every admitted seed widens the translated extent
+  // that the next pass anchors to, the run cascades — 834,559 dispatch rows and
+  // 1.5 GB of generated C++ by pass 11, against 16,129 rows at the fixed point.
+  {
+    constexpr quint32 kRomBase = 0x08000000u;
+    const QString generatedDir = QDir(temp.path()).filePath(QStringLiteral("gba-generated"));
+    check(QDir().mkpath(generatedDir), QStringLiteral("seed-admission fixture directory"));
+
+    // A THUMB BL is two halfwords and gba_recompile lowers it as a `bl.hi`/
+    // `bl.lo` pair, so 0x08000102 is a complete call and 0x08000108 — sitting
+    // behind a `bx`, not a `bl.hi` — is an orphan second halfword. Ghidra turns
+    // exactly that shape into a call through LR with an invented destination.
+    QByteArray rom(0x400, '\0');
+    const auto pokeHalf = [&rom](quint32 address, quint16 value) {
+      qToLittleEndian(value, reinterpret_cast<uchar*>(rom.data()) + (address - kRomBase));
+    };
+    const auto pokeWord = [&rom](quint32 address, quint32 value) {
+      qToLittleEndian(value, reinterpret_cast<uchar*>(rom.data()) + (address - kRomBase));
+    };
+    pokeHalf(0x08000100u, 0xF000u);  // BL, upper half
+    pokeHalf(0x08000102u, 0xF87Eu);  // BL, lower half -> 0x08000200
+    pokeWord(0x08000130u, 0x08000601u);  // a THUMB function pointer
+
+    QString shard = QStringLiteral(
+      "/* 0x08000100  mode=thumb  end=0x08000140  branches=3 */\n"
+      "void gf_tfunc_08000100(void) {\n"
+      "    /* 08000100  08000100 T bl.hi 0x08000104 */\n"
+      "    /* 08000102  08000102 T bl.lo 0x00000000 */\n"
+      "    /* 08000104  08000104 T b 0x08000120 */\n"
+      "    /* 08000106  08000106 T bx r3 */\n"
+      "    /* 08000108  08000108 T bl.lo 0x00000000 */\n"
+      "    /* 0800010A  0800010a T movs r0,r0 */\n"
+      "}\n");
+    check(psxstudio::writeText(
+            QDir(generatedDir).filePath(QStringLiteral("recompiled_000.cpp")), shard, error),
+          error);
+
+    QSet<quint32> wanted;
+    for (quint32 address = 0x080000FEu; address <= 0x08000140u; address += 1) {
+      wanted.insert(address);
+    }
+    QList<psxstudio::GbaTranslatedSpan> spans;
+    psxstudio::GbaInstructionMap instructions;
+    check(psxstudio::readGbaTranslation(generatedDir, wanted, spans, instructions, error) &&
+            spans.size() == 1 && instructions.size() == 6 &&
+            psxstudio::gbaTranslatedBytes(spans) == 0x40u &&
+            psxstudio::gbaSpanContaining(spans, 0x08000102u) != nullptr &&
+            psxstudio::gbaSpanContaining(spans, 0x08000140u) == nullptr,
+          error.isEmpty() ? QStringLiteral("gbarecomp shard spans and instructions parse")
+                          : error);
+
+    const auto candidate = [](quint32 entry, bool thumb, const QVector<quint32>& computed,
+                              const QVector<quint32>& pointers = {}) {
+      psxstudio::GbaSeedCandidate value;
+      value.entry = entry;
+      value.thumb = thumb;
+      value.name = QStringLiteral("fixture");
+      value.computedSources = computed;
+      value.pointerSources = pointers;
+      return value;
+    };
+    const auto admit = [&](const psxstudio::GbaSeedCandidate& value, QString& rule,
+                           bool& modeCrossed, QString& reason) {
+      quint32 evidence = 0;
+      rule.clear();
+      reason.clear();
+      modeCrossed = false;
+      return psxstudio::admitGbaSeed(value, spans, instructions, rom, kRomBase,
+                                     rule, evidence, modeCrossed, reason);
+    };
+
+    QString rule;
+    QString reason;
+    bool modeCrossed = false;
+    check(admit(candidate(0x08000200u, true, { 0x08000102u }), rule, modeCrossed, reason) &&
+            rule == QStringLiteral("direct-branch") && !modeCrossed,
+          QStringLiteral("a complete BL pair resolving to the entry is admitted"));
+    check(admit(candidate(0x08000120u, true, { 0x08000104u }), rule, modeCrossed, reason) &&
+            rule == QStringLiteral("direct-branch"),
+          QStringLiteral("a direct B printing the entry as its target is admitted"));
+    check(admit(candidate(0x08000400u, false, { 0x08000106u }), rule, modeCrossed, reason) &&
+            rule == QStringLiteral("register-indirect") && modeCrossed,
+          QStringLiteral("a BX admits either instruction set and reports the crossing"));
+    check(admit(candidate(0x08000600u, true, {}, { 0x08000130u }), rule, modeCrossed, reason) &&
+            rule == QStringLiteral("pointer-word"),
+          QStringLiteral("a ROM word holding entry|1 is admitted as a THUMB pointer"));
+
+    check(!admit(candidate(0x08000300u, true, { 0x08000108u }), rule, modeCrossed, reason) &&
+            reason.contains(QStringLiteral("orphan bl.lo")),
+          QStringLiteral("an orphan bl.lo is rejected: its destination is unknown"));
+    check(!admit(candidate(0x08000500u, true, { 0x08000109u }), rule, modeCrossed, reason),
+          QStringLiteral("an address inside a span but off the instruction boundary is rejected"));
+    check(!admit(candidate(0x08000200u, false, { 0x08000102u }), rule, modeCrossed, reason) &&
+            reason.contains(QStringLiteral("no BLX")),
+          QStringLiteral("a direct branch cannot enter its target in the other instruction set"));
+    check(!admit(candidate(0x08000700u, true, { 0x08000104u }), rule, modeCrossed, reason),
+          QStringLiteral("a direct branch resolving elsewhere does not seed this entry"));
+    check(!admit(candidate(0x08000800u, true, { 0x08009000u }), rule, modeCrossed, reason) &&
+            reason.isEmpty(),
+          QStringLiteral("a source outside every translated extent is unsupported, not contradicted"));
+    check(!admit(candidate(0x08000900u, true, {}, { 0x08000130u }), rule, modeCrossed, reason) &&
+            reason.contains(QStringLiteral("holds")),
+          QStringLiteral("a pointer word holding some other address is rejected"));
+  }
 
   if (failures == 0) {
     qInfo() << "PSXRecomp Studio core tests passed";

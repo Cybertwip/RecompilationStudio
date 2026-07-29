@@ -34,7 +34,6 @@ signals:
 
 private:
   void runGba(const psxstudio::PipelineRequest& request);
-  void runGbaNative(const psxstudio::PipelineRequest& request);
   bool runCommand(const QString& program,
                   const QStringList& arguments,
                   const QString& workingDirectory,

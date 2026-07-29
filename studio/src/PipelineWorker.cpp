@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -133,6 +134,91 @@ QSet<quint32> readDynamicTargets(const QString& path, QString& error) {
     targets.insert(target);
   }
   return targets;
+}
+
+/* Every guest address gbarecomp translated to a native function, read out of
+ * the dispatch table it emits. That table is the runtime's own lookup, so it
+ * is the honest measure of static coverage: an address absent from it is an
+ * address the runtime would have to interpret or self-heal. Entries look like
+ *   { 0x080000C0u, 0u, gf_start_vector },
+ * with the middle column carrying the THUMB flag. */
+// `lengthSymbol` is kDispatchTableLen for a cartridge table and
+// kBiosDispatchTableLen for a BIOS table. Naming the expected symbol rather than
+// accepting either keeps a swapped output path from reading as a valid table.
+//
+// The table is keyed by (address, mode), not by address: interworking and
+// mid-function resume points legitimately put one address in the table twice,
+// once ARM and once THUMB. `modesByAddress` therefore carries a bitmask —
+// kGbaModeArm and/or kGbaModeThumb — and the declared length is compared against
+// the row count, not against the number of distinct addresses.
+//
+// Returns the number of parsed rows, or -1 when the table cannot be trusted.
+constexpr quint8 kGbaModeArm = 1u;
+constexpr quint8 kGbaModeThumb = 2u;
+
+QString describeGbaModes(quint8 modes) {
+  if ((modes & kGbaModeArm) && (modes & kGbaModeThumb))
+    return QStringLiteral("arm+thumb");
+  if (modes & kGbaModeThumb) return QStringLiteral("thumb");
+  if (modes & kGbaModeArm) return QStringLiteral("arm");
+  return QStringLiteral("none");
+}
+
+int readGbaDispatchEntries(const QString& path,
+                           const QString& lengthSymbol,
+                           QHash<quint32, quint8>& modesByAddress,
+                           QString& error) {
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    error = QStringLiteral("Could not read the gbarecomp dispatch table %1: %2")
+              .arg(path, file.errorString());
+    return -1;
+  }
+  const QString text = QString::fromUtf8(file.readAll());
+  static const QRegularExpression entryPattern(
+    QStringLiteral(R"(\{\s*0x([0-9A-Fa-f]{1,8})u?\s*,\s*([01])u?\s*,)"));
+  int rows = 0;
+  auto matches = entryPattern.globalMatch(text);
+  while (matches.hasNext()) {
+    const auto match = matches.next();
+    bool ok = false;
+    const quint32 address = match.captured(1).toUInt(&ok, 16);
+    if (!ok) {
+      error = QStringLiteral("Invalid dispatch entry address in %1.").arg(path);
+      return -1;
+    }
+    modesByAddress[address] |= match.captured(2) == QStringLiteral("1")
+      ? kGbaModeThumb : kGbaModeArm;
+    ++rows;
+  }
+  const QRegularExpression lengthPattern(
+    QStringLiteral(R"(\b%1\s*=\s*(\d+))").arg(QRegularExpression::escape(lengthSymbol)));
+  const auto lengthMatch = lengthPattern.match(text);
+  if (!lengthMatch.hasMatch()) {
+    error = QStringLiteral("%1 does not declare %2.").arg(path, lengthSymbol);
+    return -1;
+  }
+  const int declared = lengthMatch.captured(1).toInt();
+  if (declared != rows) {
+    error = QStringLiteral(
+      "The gbarecomp dispatch table declares %1 entries but %2 parsed; the "
+      "coverage oracle cannot be trusted.").arg(declared).arg(rows);
+    return -1;
+  }
+  return rows;
+}
+
+QVector<quint32> readGbaSourceList(const QJsonObject& function, const QString& key) {
+  QVector<quint32> addresses;
+  for (const auto& value : function.value(key).toArray()) {
+    bool ok = false;
+    const quint32 address = value.toString().toUInt(&ok, 16);
+    // Ghidra records synthetic sources such as "Entry Point" for references
+    // with no originating instruction. Those carry no location evidence, so
+    // they are dropped rather than parsed into a bogus address.
+    if (ok) addresses.append(address);
+  }
+  return addresses;
 }
 
 QList<QPair<quint32, quint32>> readDataRanges(const QString& path, QString& error) {
@@ -959,15 +1045,7 @@ bool PipelineWorker::runCommand(const QString& program,
 void PipelineWorker::run(PipelineRequest request) {
   cancelRequested_.store(false, std::memory_order_relaxed);
   if (request.system == SystemKind::GameBoyAdvance) {
-    if (request.targetPlatform == TargetPlatform::VirtuaArm) {
-      if (request.nativeExecution) {
-        runGbaNative(request);
-      } else {
-        emit failed(QStringLiteral("Virtua ARM GBA exports require Native so gba-rust can emit and link the ARMv4T AOT translation."), {});
-      }
-    } else {
-      runGba(request);
-    }
+    runGba(request);
     return;
   }
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
@@ -3583,401 +3661,6 @@ void PipelineWorker::run(PipelineRequest request) {
   emit completed(outputApp);
 }
 
-void PipelineWorker::runGbaNative(const PipelineRequest& request) {
-  const bool sourceExport = request.exportMode == ExportMode::Source;
-  const bool remoteCiBuild = request.exportMode == ExportMode::Build &&
-                             request.buildBackend == BuildBackend::RemoteCi;
-  const bool localBuild = request.exportMode == ExportMode::Build && !remoteCiBuild;
-  const int totalStages = localBuild ? 6 : 4;
-  int stage = 0;
-  QString workspace;
-  QString error;
-  auto nextStage = [&](const QString& name) {
-    emit stageChanged(name, ++stage, totalStages);
-    emit logLine(QStringLiteral("\n=== %1 ===").arg(name));
-  };
-  auto fail = [&](const QString& message) {
-    emit logLine(QStringLiteral("ERROR: %1").arg(message));
-    emit failed(message, workspace);
-  };
-  auto cancelledOut = [&]() {
-    if (!workspace.isEmpty()) QDir(workspace).removeRecursively();
-    emit cancelled();
-  };
-
-  nextStage(QStringLiteral("Validate Virtua ARM native inputs"));
-  if (request.targetPlatform != TargetPlatform::VirtuaArm || !request.nativeExecution) {
-    fail(QStringLiteral("The GBA native pipeline requires the Virtua ARM target and Native option."));
-    return;
-  }
-  if (remoteCiBuild) {
-    fail(QStringLiteral("Virtua ARM native packages are built locally or exported as source; CI dispatch is not enabled."));
-    return;
-  }
-  GbaDescription game;
-  if (!inspectGbaRom(request.romPath, game, error)) {
-    fail(error);
-    return;
-  }
-  if (!game.warning.isEmpty()) emit logLine(QStringLiteral("Warning: %1").arg(game.warning));
-  const QString bundleName = cleanBundleName(request.windowTitle);
-  if (bundleName.isEmpty()) {
-    fail(QStringLiteral("The window title cannot be converted to a valid app name."));
-    return;
-  }
-  const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
-    ? QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg")
-    : request.iconPath;
-  if (!QFileInfo(iconSourcePath).isFile() &&
-      !iconSourcePath.startsWith(QStringLiteral(":/"))) {
-    fail(QStringLiteral("The selected app icon is not readable."));
-    return;
-  }
-  if (!QFileInfo(request.outputDirectory).isDir() ||
-      !QFileInfo(request.outputDirectory).isWritable()) {
-    fail(QStringLiteral("Select a writable output directory."));
-    return;
-  }
-  const QString virtuaSupportRoot =
-    QDir(request.frameworkRoot).filePath(QStringLiteral("extra/virtua"));
-  const QString runtimeRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-to-mvii"));
-  const QString gbaRustRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-rust"));
-  if (!QFileInfo(QDir(virtuaSupportRoot).filePath(
-        QStringLiteral("CMake/VirtuaArmToolchain.cmake"))).isFile() ||
-      !QFileInfo(QDir(virtuaSupportRoot).filePath(
-        QStringLiteral("CMake/VirtuaPowerEngine.cmake"))).isFile() ||
-      !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("CMakeLists.txt"))).isFile() ||
-      !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("src/mvii/main.cpp"))).isFile() ||
-      !QFileInfo(QDir(gbaRustRoot).filePath(QStringLiteral("Cargo.toml"))).isFile() ||
-      !QFileInfo(QDir(gbaRustRoot).filePath(QStringLiteral("crates/recomp-core/src/emit.rs"))).isFile() ||
-      !QFileInfo(QDir(gbaRustRoot).filePath(QStringLiteral("gamedb.sqlite"))).isFile()) {
-    fail(QStringLiteral("The framework does not contain gba-rust, gba-to-mvii, and the Virtua integration."));
-    return;
-  }
-  if (!isPowerEngineRoot(request.powerEngineRoot)) {
-    fail(QStringLiteral("The selected PowerEngine root does not contain the canonical Virtua/MVII sources."));
-    return;
-  }
-  if (!isVirtuaLlvmRoot(request.llvmRoot)) {
-    fail(QStringLiteral("The selected LLVM root is not a complete PowerEngine compiler bundle."));
-    return;
-  }
-  const QString cmake = findExecutable(QStringLiteral("cmake"));
-  const QString git = findExecutable(QStringLiteral("git"));
-  const QString ninja = localBuild ? findExecutable(QStringLiteral("ninja")) : QString();
-  const QString go = localBuild ? findExecutable(QStringLiteral("go")) : QString();
-  const QString cargo = localBuild ? findExecutable(QStringLiteral("cargo")) : QString();
-  if (cmake.isEmpty() || git.isEmpty() ||
-      (localBuild && (ninja.isEmpty() || go.isEmpty() || cargo.isEmpty()))) {
-    fail(QStringLiteral("Virtua ARM native exports require CMake and Git; local builds also require Ninja, Go, and Cargo."));
-    return;
-  }
-
-  const QString romSha256 = sha256File(request.romPath, error);
-  const QString runtimeSha256 = sha256File(
-    QDir(runtimeRoot).filePath(QStringLiteral("src/mvii/main.cpp")), error);
-  const QString recompilerSha256 = sha256File(
-    QDir(gbaRustRoot).filePath(QStringLiteral("crates/recomp-core/src/emit.rs")), error);
-  if (romSha256.isEmpty() || runtimeSha256.isEmpty() || recompilerSha256.isEmpty()) {
-    fail(error.isEmpty() ? QStringLiteral("The native GBA inputs could not be hashed.") : error);
-    return;
-  }
-  emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · cartridge entry 0x08000000")
-    .arg(game.title, game.gameCode).arg(game.romSize));
-  emit logLine(QStringLiteral("gba-rust native AOT + gba-to-mvii hardware runtime · emitter SHA-256 %1 · runtime SHA-256 %2")
-    .arg(recompilerSha256, runtimeSha256));
-
-  nextStage(QStringLiteral("Create Virtua ARM native source repository"));
-  const QString root = QDir::tempPath();
-  QTemporaryDir temporary(QDir(root).filePath(QStringLiteral("psxrecomp-gba-virtua-native-XXXXXX")));
-  temporary.setAutoRemove(false);
-  if (!temporary.isValid()) {
-    fail(QStringLiteral("Could not create a temporary Virtua native workspace."));
-    return;
-  }
-  workspace = temporary.path();
-  const QString projectDir = QDir(workspace).filePath(QStringLiteral("source"));
-  const QString buildDir = QDir(workspace).filePath(QStringLiteral("build"));
-  const QString proofDir = QDir(projectDir).filePath(QStringLiteral("proof"));
-  const QString inputsDir = QDir(projectDir).filePath(QStringLiteral("package_inputs"));
-  if (!QDir().mkpath(proofDir) || !QDir().mkpath(inputsDir) ||
-      !copySourceDirectory(virtuaSupportRoot,
-                           QDir(projectDir).filePath(QStringLiteral("virtua")), error) ||
-      !copySourceDirectory(runtimeRoot,
-                           QDir(projectDir).filePath(QStringLiteral("gba-to-mvii")), error) ||
-      !copySourceDirectory(gbaRustRoot,
-                           QDir(projectDir).filePath(QStringLiteral("gba-rust")), error) ||
-      !copyFileReplacing(request.romPath,
-                         QDir(inputsDir).filePath(QStringLiteral("game.gba")), error) ||
-      !createPngIcon(iconSourcePath,
-                     QDir(projectDir).filePath(QStringLiteral("AppIcon.png")), error)) {
-    fail(error.isEmpty() ? QStringLiteral("Could not stage the Virtua native source tree.") : error);
-    return;
-  }
-
-  QJsonObject manifest = gameManifestForRequest(request);
-  manifest.insert(QStringLiteral("system"), QStringLiteral("gba"));
-  manifest.insert(QStringLiteral("execution"), QStringLiteral("gba-rust-aot-arm"));
-  manifest.insert(QStringLiteral("rom"), QStringLiteral("game.gba"));
-  const QJsonObject inputProof{
-    { QStringLiteral("schema"), 2 },
-    { QStringLiteral("system"), QStringLiteral("gba") },
-    { QStringLiteral("execution"), QStringLiteral("gba-rust-aot-arm") },
-    { QStringLiteral("guest_kind"), QStringLiteral("GBA_RUST_AOT_ARMV4T") },
-    { QStringLiteral("runtime"), QStringLiteral("gba-rust-aot+gba-to-mvii") },
-    { QStringLiteral("interpreter_fallback"), false },
-    { QStringLiteral("runtime_main_sha256"), runtimeSha256 },
-    { QStringLiteral("recompiler_emitter_sha256"), recompilerSha256 },
-    { QStringLiteral("name"), request.windowTitle },
-    { QStringLiteral("icon"), QStringLiteral("AppIcon.png") },
-    { QStringLiteral("custom_icon"), !request.iconPath.trimmed().isEmpty() },
-    { QStringLiteral("bios"), QStringLiteral("standalone-hle") },
-    { QStringLiteral("rom_sha256"), romSha256 },
-    { QStringLiteral("rom_size"), QString::number(game.romSize) },
-    { QStringLiteral("entry"), QStringLiteral("0x08000000") },
-  };
-  const QString readme = QStringLiteral(
-    "# %1 — Native GBA for MVII / Virtua ARM\n\n"
-    "This source export uses `gba-rust` to analyze the selected ARMv4T cartridge "
-    "ahead of time, emit bounded C translation units, and compile those units "
-    "directly into the cooperative ARMv7 `.virtua` executable. `gba-to-mvii` "
-    "provides only the GBA hardware model and MVII device glue. The device build "
-    "has no ARM7TDMI interpreter fallback: an uncovered or unsupported guest PC "
-    "is reported as a native coverage defect.\n\n"
-    "## Build\n\n"
-    "The generated source does not vendor PowerEngine. Pass the canonical "
-    "PowerEngine checkout and its LLVM/compiler bundle explicitly. Dash, the "
-    "POSIX headers, the Virtua packager, llvm-libc/libc++, and compiler-rt are "
-    "consumed from those roots.\n\n```sh\n"
-    "cmake -S . -B build -G Ninja \\\n"
-    "  -DCMAKE_TOOLCHAIN_FILE=virtua/CMake/VirtuaArmToolchain.cmake \\\n"
-    "  -DPOWERENGINE_ROOT=/path/to/PowerEngine \\\n"
-    "  -DVIRTUA_LLVM_ROOT=/path/to/PowerEngine/compiler-bundle \\\n"
-    "  -DCMAKE_BUILD_TYPE=Release\n"
-    "cmake --build build --target gba-runtime --parallel\n"
-    "```\n\nThe package is written under "
-    "`build/steganos-package/gba-runtime/Release/`.\n").arg(request.windowTitle);
-  if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
-                 generatedGbaNativeProjectCMake(bundleName), error) ||
-      !writeText(QDir(projectDir).filePath(QStringLiteral("README.md")), readme, error) ||
-      !writeText(QDir(projectDir).filePath(QStringLiteral(".gitignore")),
-                 QStringLiteral("/build*/\n.DS_Store\n"), error) ||
-      !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
-                 manifest, error) ||
-      !writeJson(QDir(proofDir).filePath(QStringLiteral("gba_native_inputs.json")),
-                 inputProof, error) ||
-      !writeJson(QDir(proofDir).filePath(QStringLiteral("request.json")),
-                 request.toJson(false), error) ||
-      !createProofArchive(proofDir,
-                          QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
-                          error)) {
-    fail(error);
-    return;
-  }
-
-  nextStage(QStringLiteral("Commit Virtua ARM native source"));
-  QByteArray commitOutput;
-  if (!runCommand(git, { QStringLiteral("init"), QStringLiteral("--initial-branch=main") },
-                  projectDir, QStringLiteral("git init --initial-branch=main"), 60000) ||
-      !runCommand(git, { QStringLiteral("config"), QStringLiteral("user.name"),
-                         QStringLiteral("PSXRecomp Studio") }, projectDir,
-                  QStringLiteral("git config user.name <studio>"), 30000) ||
-      !runCommand(git, { QStringLiteral("config"), QStringLiteral("user.email"),
-                         QStringLiteral("studio@psxrecomp.local") }, projectDir,
-                  QStringLiteral("git config user.email <studio>"), 30000) ||
-      !runCommand(git, { QStringLiteral("add"), QStringLiteral("-A") }, projectDir,
-                  QStringLiteral("git add -A"), 10 * 60 * 1000) ||
-      !runCommand(git, { QStringLiteral("commit"), QStringLiteral("-m"),
-                         QStringLiteral("Generate %1 Virtua ARM native GBA source")
-                           .arg(request.windowTitle) }, projectDir,
-                  QStringLiteral("git commit -m <generated Virtua GBA source>"),
-                  10 * 60 * 1000) ||
-      !runCommand(git, { QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
-                  projectDir, QStringLiteral("git rev-parse HEAD"), 30000,
-                  &commitOutput)) {
-    if (cancellationRequested()) cancelledOut();
-    else fail(QStringLiteral("The generated Virtua ARM native source repository could not be committed."));
-    return;
-  }
-  const QString sourceCommit = QString::fromUtf8(commitOutput).trimmed().section('\n', -1);
-  emit logLine(QStringLiteral("Generated Virtua ARM native source commit: %1").arg(sourceCommit));
-
-  auto removeEntry = [](const QString& path) {
-    const QFileInfo info(path);
-    if (!info.exists() && !info.isSymLink()) return true;
-    return info.isDir() && !info.isSymLink() ? QDir(path).removeRecursively()
-                                             : QFile::remove(path);
-  };
-  auto publishDirectory = [&](const QString& source, const QString& output) -> bool {
-    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
-    const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
-    removeEntry(staging); removeEntry(backup);
-    if (!copyDirectoryTree(source, staging, error)) return false;
-    const bool exists = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
-    if (exists && !request.overwriteOutput) {
-      error = QStringLiteral("The output already exists and overwrite was not approved: %1").arg(output);
-      removeEntry(staging); return false;
-    }
-    if (exists && !QDir().rename(output, backup)) {
-      error = QStringLiteral("Could not preserve the previous output: %1").arg(output);
-      removeEntry(staging); return false;
-    }
-    if (!QDir().rename(staging, output)) {
-      if (exists) QDir().rename(backup, output);
-      error = QStringLiteral("Could not publish %1.").arg(output);
-      return false;
-    }
-    if (exists) removeEntry(backup);
-    return true;
-  };
-  auto publishZip = [&](const QString& source, const QString& rootName,
-                        const QString& output) -> bool {
-    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
-    const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
-    removeEntry(staging); removeEntry(backup);
-    if (!createPackageArchive(source, rootName, staging, error, {},
-                              [this]() { return cancellationRequested(); })) {
-      removeEntry(staging); return false;
-    }
-    const QString stagedHash = sha256File(staging, error);
-    if (stagedHash.isEmpty()) { removeEntry(staging); return false; }
-    const bool exists = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
-    if (exists && !request.overwriteOutput) {
-      error = QStringLiteral("The output already exists and overwrite was not approved: %1").arg(output);
-      removeEntry(staging); return false;
-    }
-    if (exists && !QFile::rename(output, backup)) {
-      error = QStringLiteral("Could not preserve the previous output: %1").arg(output);
-      removeEntry(staging); return false;
-    }
-    if (!QFile::rename(staging, output)) {
-      if (exists) QFile::rename(backup, output);
-      error = QStringLiteral("Could not publish %1.").arg(output);
-      return false;
-    }
-    if (exists) removeEntry(backup);
-    return sha256File(output, error) == stagedHash;
-  };
-
-  if (sourceExport) {
-    nextStage(QStringLiteral("Deliver Virtua ARM native source repository"));
-    const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
-    const bool ok = request.exportAsZip
-      ? publishZip(projectDir, QFileInfo(output).completeBaseName(), output)
-      : publishDirectory(projectDir, output);
-    if (!ok) {
-      if (cancellationRequested()) cancelledOut(); else fail(error);
-      return;
-    }
-    QDir(workspace).removeRecursively();
-    emit completed(output);
-    return;
-  }
-
-  nextStage(QStringLiteral("Build Virtua ARM native launcher"));
-  const QString toolchain = QDir(projectDir).filePath(
-    QStringLiteral("virtua/CMake/VirtuaArmToolchain.cmake"));
-  QStringList virtuaConfigureArguments{
-    QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
-    QStringLiteral("-G"), QStringLiteral("Ninja"),
-    QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
-    QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1").arg(toolchain)
-  };
-  virtuaConfigureArguments
-    << QStringLiteral("-DPOWERENGINE_ROOT=%1").arg(request.powerEngineRoot)
-    << QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot);
-  emit logLine(QStringLiteral("PowerEngine root: %1").arg(request.powerEngineRoot));
-  emit logLine(QStringLiteral("Virtua ARM LLVM root: %1").arg(request.llvmRoot));
-  if (!runCommand(cmake, virtuaConfigureArguments,
-                  workspace, QStringLiteral("cmake -S <source> -B <build> -G Ninja -DCMAKE_TOOLCHAIN_FILE=<VirtuaArmToolchain>"),
-                  10 * 60 * 1000) ||
-      !runCommand(cmake,
-                  { QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
-                    QStringLiteral("gba-runtime"), QStringLiteral("--parallel"),
-                    QString::number(std::max(1, QThread::idealThreadCount())) },
-                  workspace, QStringLiteral("cmake --build <build> --target gba-runtime"),
-                  4 * 60 * 60 * 1000)) {
-    if (cancellationRequested()) cancelledOut();
-    else fail(QStringLiteral("The gba-rust Virtua ARM native runtime could not be built."));
-    return;
-  }
-
-  nextStage(QStringLiteral("Verify Virtua ARM native package"));
-  const QString stageDir = QDir(buildDir).filePath(
-    QStringLiteral("steganos-package/gba-runtime/Release"));
-  const QString executable = QDir(stageDir).filePath(bundleName + QStringLiteral(".virtua"));
-  const QString packagedRom = QDir(stageDir).filePath(QStringLiteral("game.gba"));
-  QFile executableFile(executable);
-  if (!executableFile.open(QIODevice::ReadOnly)) {
-    fail(QStringLiteral("The Virtua ARM package did not contain its .virtua executable."));
-    return;
-  }
-  const QByteArray header = executableFile.read(56);
-  executableFile.close();
-  if (header.size() != 56 || qFromLittleEndian<quint32>(header.constData()) != 0x56495254u ||
-      qFromLittleEndian<quint32>(header.constData() + 4) != 3u) {
-    fail(QStringLiteral("The generated native launcher has an invalid Virtua v3 header."));
-    return;
-  }
-  const quint64 flags = qFromLittleEndian<quint64>(header.constData() + 48);
-  if (((flags >> 8u) & 0xffu) != 4u || (flags & (1u << 1u)) == 0u) {
-    fail(QStringLiteral("The native launcher is not tagged as cooperative ARM32 Virtua code."));
-    return;
-  }
-  if (sha256File(packagedRom, error) != romSha256) {
-    fail(error.isEmpty() ? QStringLiteral("The packaged native GBA ROM changed during the build.") : error);
-    return;
-  }
-  const QString executableHash = sha256File(executable, error);
-  const QDir aotOut(QDir(buildDir).filePath(QStringLiteral("gba-aot/out")));
-  const QStringList aotUnits = aotOut.entryList({ QStringLiteral("*.c") }, QDir::Files, QDir::Name);
-  if (executableHash.isEmpty() || aotUnits.isEmpty()) {
-    fail(executableHash.isEmpty() ? error
-                                  : QStringLiteral("The gba-rust AOT build emitted no C translation units."));
-    return;
-  }
-  const QJsonObject buildProof{
-    { QStringLiteral("schema"), 2 },
-    { QStringLiteral("format"), QStringLiteral("virtua-v3") },
-    { QStringLiteral("architecture"), QStringLiteral("arm32") },
-    { QStringLiteral("cooperative"), true },
-    { QStringLiteral("executable"), QFileInfo(executable).fileName() },
-    { QStringLiteral("executable_sha256"), executableHash },
-    { QStringLiteral("rom_sha256"), romSha256 },
-    { QStringLiteral("runtime"), QStringLiteral("gba-rust-aot+gba-to-mvii") },
-    { QStringLiteral("runtime_main_sha256"), runtimeSha256 },
-    { QStringLiteral("recompiler_emitter_sha256"), recompilerSha256 },
-    { QStringLiteral("aot_units"), aotUnits.size() },
-    { QStringLiteral("interpreter_fallback"), false },
-    { QStringLiteral("executed_during_verification"), false },
-  };
-  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_native_build.json")),
-                 buildProof, error) ||
-      !createProofArchive(proofDir,
-                          QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
-                          error) ||
-      !copyFileReplacing(QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
-                         QDir(stageDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")), error)) {
-    fail(error);
-    return;
-  }
-
-  nextStage(QStringLiteral("Deliver Virtua ARM native package"));
-  const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
-  const bool delivered = request.exportAsZip
-    ? publishZip(stageDir, {}, output)
-    : publishDirectory(stageDir, output);
-  if (!delivered) {
-    if (cancellationRequested()) cancelledOut(); else fail(error);
-    return;
-  }
-  emit logLine(QStringLiteral("Virtua ARM native GBA package created: %1").arg(output));
-  QDir(workspace).removeRecursively();
-  emit completed(output);
-}
-
 void PipelineWorker::runGba(const PipelineRequest& request) {
   constexpr auto kCanonicalGbaBiosSha256 = "fd2547724b505f487e6dcb29ec2ecff3af35a841a77ab2e85fd87350abd36570";
   constexpr auto kZeroGbaBiosSha256 = "4fe7b59af6de3b665b67788cc2f99892ab827efae3a467342b3bb4e3bc8e5bfe";
@@ -3990,7 +3673,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const bool localBuild = request.exportMode == ExportMode::Build && !remoteCiBuild;
   const bool signingRequested = localBuild && macosTarget &&
     !request.certificatePath.trimmed().isEmpty() && !request.certificatePassword.isEmpty();
-  const int totalStages = localBuild ? 7 : 4;
+  const int totalStages = localBuild ? 11 : 8;
   int stage = 0;
   QString workspace;
   QString error;
@@ -4007,13 +3690,22 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     emit cancelled();
   };
 
-  nextStage(QStringLiteral("Validate Rust GBA inputs"));
+  nextStage(QStringLiteral("Validate GBA inputs"));
   if (request.targetPlatform == TargetPlatform::All) {
     fail(QStringLiteral("The All platform selection must be expanded before the GBA pipeline starts."));
     return;
   }
+  if (request.targetPlatform == TargetPlatform::VirtuaArm) {
+    // The gbarecomp host layer calls SDL entry points that the bundled Virtua
+    // compatibility surface (extra/virtua/sdl) does not implement — renderer
+    // viewport/fill/line, blend modes, audio device status, controller sensors,
+    // and touch events. Emitting a desktop project for a Virtua request would
+    // deliver a package that cannot run on the target, so this stops instead.
+    fail(QStringLiteral("Virtua ARM GBA packages are not available yet: the bundled Virtua SDL surface does not cover the gbarecomp host layer. Select macOS, Windows, or Linux."));
+    return;
+  }
   if (localBuild && request.targetPlatform != hostTargetPlatform()) {
-    fail(QStringLiteral("Rust GBA packages build on their target operating system. Enable CI for %1 or export source.")
+    fail(QStringLiteral("GBA packages build on their target operating system. Enable CI for %1 or export source.")
            .arg(targetPlatformDisplayName(request.targetPlatform)));
     return;
   }
@@ -4023,9 +3715,16 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     return;
   }
   if (!game.warning.isEmpty()) emit logLine(QStringLiteral("Warning: %1").arg(game.warning));
+  if (request.skipBiosBoot) {
+    // gbarecomp recompiles and dispatches the BIOS; every game's first frames
+    // are real BIOS frames. There is no boot-skip path to honour here, so a
+    // request that asks for one is rejected rather than silently ignored.
+    fail(QStringLiteral("The GBA pipeline recompiles and dispatches the BIOS; boot skip is not available."));
+    return;
+  }
   if (request.biosPath.trimmed().isEmpty() ||
       QFileInfo(request.biosPath).size() != 16 * 1024) {
-    fail(QStringLiteral("A canonical 16,384-byte GBA BIOS is required for packaging, although execution is skipped through HLE by default."));
+    fail(QStringLiteral("A canonical 16,384-byte GBA BIOS is required: it is statically recompiled and dispatched, not stubbed or skipped."));
     return;
   }
   const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
@@ -4045,16 +3744,25 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     fail(QStringLiteral("Select a writable output directory."));
     return;
   }
-  const QString rustRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-rust"));
-  const QString gamepadRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("lib/recomp_gamepad"));
-  if (!QFileInfo(QDir(rustRoot).filePath(QStringLiteral("Cargo.toml"))).isFile() ||
-      !QFileInfo(QDir(rustRoot).filePath(QStringLiteral("Cargo.lock"))).isFile()) {
-    fail(QStringLiteral("The framework does not contain the Rust GBA workspace."));
+  const QString gbarecompRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gbarecomp"));
+  const QString biosRecompilerConfig =
+    QDir(gbarecompRoot).filePath(QStringLiteral("bios/gba_bios.toml"));
+  const QString ghidraScriptsPath = QDir(request.frameworkRoot).filePath(QStringLiteral("tools/ghidra"));
+  if (!QFileInfo(QDir(gbarecompRoot).filePath(QStringLiteral("CMakeLists.txt"))).isFile() ||
+      !QFileInfo(QDir(gbarecompRoot).filePath(QStringLiteral("tools/gba_recompile/main.cpp"))).isFile()) {
+    fail(QStringLiteral("The framework does not contain the gbarecomp static recompiler."));
     return;
   }
-  if (!QFileInfo(QDir(gamepadRoot).filePath(QStringLiteral("CMakeLists.txt"))).isFile()) {
-    fail(QStringLiteral("The reusable recomp_gamepad component is missing."));
+  if (!QFileInfo(biosRecompilerConfig).isFile()) {
+    fail(QStringLiteral("The curated gbarecomp BIOS recompilation config is missing; the BIOS cannot be stubbed."));
     return;
+  }
+  for (const auto& script : { QStringLiteral("SeedGbaEntry.java"),
+                              QStringLiteral("ExportGbaAnalysis.java") }) {
+    if (!QFileInfo(QDir(ghidraScriptsPath).filePath(script)).isFile()) {
+      fail(QStringLiteral("The Ghidra script %1 is missing from the framework.").arg(script));
+      return;
+    }
   }
   if (localBuild && macosTarget &&
       request.certificatePath.trimmed().isEmpty() != request.certificatePassword.isEmpty()) {
@@ -4065,14 +3773,18 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     fail(QStringLiteral("The selected PFX signing certificate is not readable."));
     return;
   }
+  const QString analyzeHeadless = ghidraAnalyzeHeadlessPath(request.ghidraHome);
+  if (analyzeHeadless.isEmpty()) {
+    fail(QStringLiteral("The selected Ghidra installation does not provide analyzeHeadless. GBA exports are seeded from Ghidra's analysis."));
+    return;
+  }
   const QString cmake = findExecutable(QStringLiteral("cmake"));
   const QString git = findExecutable(QStringLiteral("git"));
-  const QString cargo = localBuild ? findExecutable(QStringLiteral("cargo")) : QString();
-  const QString ninja = localBuild && hostTargetPlatform() != TargetPlatform::Windows
+  const QString ninja = hostTargetPlatform() != TargetPlatform::Windows
     ? findExecutable(QStringLiteral("ninja")) : QString();
-  if (cmake.isEmpty() || git.isEmpty() || (localBuild && cargo.isEmpty()) ||
-      (localBuild && hostTargetPlatform() != TargetPlatform::Windows && ninja.isEmpty())) {
-    fail(QStringLiteral("Rust GBA exports require CMake and Git; local builds also require Cargo and Ninja on non-Windows hosts."));
+  if (cmake.isEmpty() || git.isEmpty() ||
+      (hostTargetPlatform() != TargetPlatform::Windows && ninja.isEmpty())) {
+    fail(QStringLiteral("GBA exports require CMake, Git, and (on non-Windows hosts) Ninja to build the gbarecomp recompiler."));
     return;
   }
   const QString rcodesign = signingRequested ? findRcodesign() : QString();
@@ -4084,7 +3796,6 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const QString romSha1 = sha1File(request.romPath, error);
   const QString romSha256 = sha256File(request.romPath, error);
   const quint32 romCrc32 = crc32File(request.romPath, error);
-  const bool biosProvided = true;
   const QString biosSha1 = sha1File(request.biosPath, error);
   const QString biosSha256 = sha256File(request.biosPath, error);
   const quint32 biosCrc32 = crc32File(request.biosPath, error);
@@ -4105,10 +3816,11 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · entry %4")
     .arg(game.title, game.gameCode).arg(game.romSize)
     .arg(QStringLiteral("0x%1").arg(game.entryTarget, 8, 16, QLatin1Char('0'))));
-  emit logLine(QStringLiteral("GBA BIOS: packaged (SHA-256 %1), execution skipped by default via HLE").arg(biosSha256));
-  emit logLine(QStringLiteral("Runtime: Rust workspace · CMake-orchestrated Cargo/pack target"));
+  emit logLine(QStringLiteral("GBA BIOS: canonical (SHA-256 %1), recompiled and dispatched — never stubbed")
+                 .arg(biosSha256));
+  emit logLine(QStringLiteral("Runtime: gbarecomp static recompilation (ARMv4T, ARM+THUMB interworking)"));
 
-  nextStage(QStringLiteral("Prepare Rust GBA source workspace"));
+  nextStage(QStringLiteral("Prepare gbarecomp source workspace"));
   const QString preferredWorkspaceRoot =
     QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
       .filePath(QStringLiteral("org.psxrecomp.studio/workspaces"));
@@ -4118,7 +3830,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   for (const QString& root : { preferredWorkspaceRoot, fallbackWorkspaceRoot }) {
     if (!QDir().mkpath(root)) continue;
     auto candidate = std::make_unique<QTemporaryDir>(
-      QDir(root).filePath(QStringLiteral("psxrecomp-gba-rust-XXXXXX")));
+      QDir(root).filePath(QStringLiteral("psxrecomp-gbarecomp-XXXXXX")));
     candidate->setAutoRemove(false);
     if (candidate->isValid()) {
       temporary = std::move(candidate);
@@ -4135,39 +3847,63 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const QString proofDir = QDir(projectDir).filePath(QStringLiteral("proof"));
   const QString buildDir = QDir(workspace).filePath(QStringLiteral("build"));
   const QString stageDir = QDir(workspace).filePath(QStringLiteral("stage"));
-  for (const auto& path : { projectDir, inputsDir, proofDir, buildDir, stageDir }) {
+  const QString ghidraDir = QDir(workspace).filePath(QStringLiteral("ghidra"));
+  const QString generatedDir = QDir(projectDir).filePath(QStringLiteral("generated"));
+  const QString recompilerDir = QDir(projectDir).filePath(QStringLiteral("recompiler"));
+  const QString seedsDir = QDir(recompilerDir).filePath(QStringLiteral("seeds"));
+  const QString resourcesDir = QDir(projectDir).filePath(QStringLiteral("resources"));
+  const QString sourceDir = QDir(projectDir).filePath(QStringLiteral("src"));
+  for (const auto& path : { projectDir, inputsDir, proofDir, buildDir, stageDir,
+                            ghidraDir, generatedDir, recompilerDir, seedsDir,
+                            resourcesDir, sourceDir }) {
     if (!QDir().mkpath(path)) {
       fail(QStringLiteral("Could not create workspace directory %1.").arg(path));
       return;
     }
   }
-  if (!copySourceDirectory(rustRoot, QDir(projectDir).filePath(QStringLiteral("gba-rust")), error) ||
-      !copySourceDirectory(gamepadRoot, QDir(projectDir).filePath(QStringLiteral("recomp_gamepad")), error) ||
+  const QString projectGbarecompDir = QDir(projectDir).filePath(QStringLiteral("gbarecomp"));
+  if (!copySourceDirectory(gbarecompRoot, projectGbarecompDir, error) ||
       !copyFileReplacing(request.romPath, QDir(inputsDir).filePath(QStringLiteral("game.gba")), error) ||
       !copyFileReplacing(request.biosPath, QDir(inputsDir).filePath(QStringLiteral("gba_bios.bin")), error) ||
       !createPngIcon(iconSourcePath, QDir(projectDir).filePath(QStringLiteral("AppIcon.png")), error)) {
     fail(error);
     return;
   }
+  if (macosTarget &&
+      !createIcns(iconSourcePath, workspace,
+                  QDir(projectDir).filePath(QStringLiteral("AppIcon.icns")), error)) {
+    fail(error);
+    return;
+  }
   const QString bundleId = sanitizedBundleIdentifier(
     game.gameCode.isEmpty() ? QStringLiteral("gba") : game.gameCode, request.windowTitle);
-  Q_UNUSED(bundleId);
-  if (!writeText(QDir(projectDir).filePath(QStringLiteral("pack.toml")),
-                 generatedGbaPackToml(request, bundleName, romSha256, biosSha256), error) ||
+  if (!writeText(QDir(resourcesDir).filePath(QStringLiteral("game.toml")),
+                 generatedGbaGameToml(request, game, romSha1, romCrc32, biosSha1,
+                                      biosCrc32, /*biosHle=*/false), error) ||
+      !writeText(QDir(sourceDir).filePath(QStringLiteral("main.cpp")),
+                 generatedGbaMainCpp(bundleName, romSha1, romCrc32), error) ||
+      !writeText(QDir(recompilerDir).filePath(QStringLiteral("game.recomp.toml")),
+                 generatedGbaRecompilerToml(request, game, romSha1), error) ||
       !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
                  gameManifestForRequest(request), error) ||
       !writeText(QDir(projectDir).filePath(QStringLiteral(".gitignore")),
-                 QStringLiteral("/build*/\n/cargo-target/\n/pack-out/\n/gba-rust/target/\n.DS_Store\n"), error)) {
+                 QStringLiteral("/build*/\n.DS_Store\n"), error)) {
+    fail(error);
+    return;
+  }
+  if (macosTarget &&
+      !writeText(QDir(projectDir).filePath(QStringLiteral("Info.plist")),
+                 generatedGbaInfoPlist(bundleName, bundleId), error)) {
     fail(error);
     return;
   }
 
   const QJsonObject inputProof{
-    { QStringLiteral("schema"), 2 },
+    { QStringLiteral("schema"), 3 },
     { QStringLiteral("system"), QStringLiteral("gba") },
-    { QStringLiteral("runtime"), QStringLiteral("rust") },
+    { QStringLiteral("runtime"), QStringLiteral("gbarecomp") },
+    { QStringLiteral("execution"), QStringLiteral("static-recompilation") },
     { QStringLiteral("build_entry"), QStringLiteral("cmake --build --target gba-runtime") },
-    { QStringLiteral("packager"), QStringLiteral("gba-pack") },
     { QStringLiteral("title"), game.title },
     { QStringLiteral("game_code"), game.gameCode },
     { QStringLiteral("entry_word"), QStringLiteral("0x%1").arg(game.entryWord, 8, 16, QLatin1Char('0')) },
@@ -4176,7 +3912,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("rom_sha1"), romSha1 },
     { QStringLiteral("rom_sha256"), romSha256 },
     { QStringLiteral("rom_crc32"), QStringLiteral("%1").arg(romCrc32, 8, 16, QLatin1Char('0')) },
-    { QStringLiteral("bios_size"), biosProvided ? QString::number(16 * 1024) : QStringLiteral("0") },
+    { QStringLiteral("bios_size"), QString::number(16 * 1024) },
     { QStringLiteral("bios_sha1"), biosSha1 },
     { QStringLiteral("bios_sha256"), biosSha256 },
     { QStringLiteral("bios_crc32"), QStringLiteral("%1").arg(biosCrc32, 8, 16, QLatin1Char('0')) },
@@ -4185,7 +3921,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("scanlines_optional"), true },
     { QStringLiteral("scanlines_default"), false },
     { QStringLiteral("macos_gip_requested"), macosTarget && request.macosGipGamepad },
-    { QStringLiteral("bios_mode"), QStringLiteral("skipped_hle") },
+    { QStringLiteral("bios_mode"), QStringLiteral("recompiled_dispatched") },
     { QStringLiteral("package_contains_rom_or_bios"), true },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_inputs.json")), inputProof, error) ||
@@ -4194,17 +3930,650 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     return;
   }
 
-  nextStage(QStringLiteral("Finalize Rust GBA CMake repository"));
+  // ── Ghidra ─────────────────────────────────────────────────────────────
+  // Function discovery is seeded from a headless analysis rather than from a
+  // scan, so every seed the recompiler receives is evidence-backed.
+  nextStage(QStringLiteral("Analyze cartridge with Ghidra"));
+  const QString projectName = QStringLiteral("GBA_%1").arg(
+    game.gameCode.isEmpty() ? sanitizedFileStem(request.windowTitle)
+                            : sanitizedFileStem(game.gameCode));
+  const QString ghidraAnalysisPath = QDir(proofDir).filePath(QStringLiteral("ghidra_analysis.json"));
+  const QString romForAnalysis = QDir(inputsDir).filePath(QStringLiteral("game.gba"));
+  constexpr quint32 kGbaRomBase = 0x08000000u;
+  const quint32 romEndExclusive =
+    kGbaRomBase + static_cast<quint32>(game.romSize);
+  const QStringList ghidraArgs{
+    ghidraDir,
+    projectName,
+    QStringLiteral("-import"), romForAnalysis,
+    QStringLiteral("-overwrite"),
+    QStringLiteral("-processor"), QStringLiteral("ARM:LE:32:v4t"),
+    QStringLiteral("-loader"), QStringLiteral("BinaryLoader"),
+    QStringLiteral("-loader-baseAddr"), hex32(kGbaRomBase),
+    QStringLiteral("-loader-blockName"), QStringLiteral("ROM"),
+    QStringLiteral("-scriptPath"), ghidraScriptsPath,
+    QStringLiteral("-prescript"), QStringLiteral("SeedGbaEntry.java"),
+      hex32(kGbaRomBase), hex32(game.entryTarget),
+    QStringLiteral("-postscript"), QStringLiteral("ExportGbaAnalysis.java"),
+      ghidraAnalysisPath, hex32(game.entryTarget), hex32(kGbaRomBase),
+      hex32(romEndExclusive),
+    QStringLiteral("-analysisTimeoutPerFile"), QStringLiteral("5400"),
+    QStringLiteral("-max-cpu"), QString::number(std::max(1, QThread::idealThreadCount())),
+  };
+  QByteArray ghidraOutput;
+  if (!runCommand(analyzeHeadless, ghidraArgs, workspace,
+                  QStringLiteral("analyzeHeadless <workspace> %1 -import game.gba [ARMv4T analysis]")
+                    .arg(projectName),
+                  110 * 60 * 1000, &ghidraOutput)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("Ghidra headless analysis failed."));
+    return;
+  }
+  // A timed-out analysis still writes a manifest, and that manifest is a
+  // truncated function list. Trusting it would silently shrink the coverage
+  // oracle, so the timeout is fatal rather than a warning.
+  if (QString::fromUtf8(ghidraOutput).contains(QStringLiteral("Analysis timed out"))) {
+    fail(QStringLiteral("Ghidra's analysis timed out, so its function list is incomplete and cannot be used as the coverage oracle."));
+    return;
+  }
+  if (!QFileInfo(ghidraAnalysisPath).isFile()) {
+    fail(QStringLiteral("Ghidra did not produce its analysis manifest."));
+    return;
+  }
+  const auto ghidraDocument = readJson(ghidraAnalysisPath, error);
+  if (ghidraDocument.isNull()) {
+    fail(error);
+    return;
+  }
+  const auto ghidraObject = ghidraDocument.object();
+  QString observedEntry = ghidraObject.value(QStringLiteral("entry")).toString().toLower();
+  observedEntry.remove(QStringLiteral("0x"));
+  const QString expectedEntry =
+    QStringLiteral("%1").arg(game.entryTarget, 8, 16, QLatin1Char('0')).toLower();
+  const QString observedLanguage = ghidraObject.value(QStringLiteral("language")).toString();
+  const QString observedEntryFunction =
+    ghidraObject.value(QStringLiteral("entry_function")).toString();
+  bool romBlockMatches = false;
+  for (const auto& blockValue : ghidraObject.value(QStringLiteral("memory_blocks")).toArray()) {
+    const auto block = blockValue.toObject();
+    if (block.value(QStringLiteral("name")).toString() != QStringLiteral("ROM")) continue;
+    bool okStart = false;
+    const quint32 startAddress =
+      block.value(QStringLiteral("start")).toString().toUInt(&okStart, 16);
+    romBlockMatches = okStart && startAddress == kGbaRomBase &&
+                      block.value(QStringLiteral("initialized")).toBool();
+    break;
+  }
+  // Cross-check Ghidra's decoded entry word against the cartridge bytes so the
+  // analysis is tied to this exact image and not a stale project.
+  QString observedWord;
+  QString expectedWord;
+  bool entryWordMatches = false;
+  const auto entryInstructions = ghidraObject.value(QStringLiteral("entry_instructions")).toArray();
+  if (!entryInstructions.isEmpty() && game.entryTarget >= kGbaRomBase) {
+    observedWord = entryInstructions.first().toObject()
+                     .value(QStringLiteral("word_little_endian")).toString().toUpper();
+    QFile romFile(request.romPath);
+    if (romFile.open(QIODevice::ReadOnly) &&
+        romFile.seek(game.entryTarget - kGbaRomBase)) {
+      const QByteArray word = romFile.read(4);
+      if (word.size() == 4) {
+        expectedWord = hex32(qFromLittleEndian<quint32>(
+          reinterpret_cast<const uchar*>(word.constData())));
+        entryWordMatches = observedWord == expectedWord;
+      }
+    }
+  }
+  const int ghidraSchema = ghidraObject.value(QStringLiteral("schema")).toInt();
+  const int ghidraFunctionCount = ghidraObject.value(QStringLiteral("function_count")).toInt();
+  const int ghidraPointerOnlyCount =
+    ghidraObject.value(QStringLiteral("pointer_referenced_count")).toInt();
+  const int ghidraUnreferencedCount =
+    ghidraObject.value(QStringLiteral("unreferenced_count")).toInt();
+  const int truncatedSourceLists =
+    ghidraObject.value(QStringLiteral("truncated_source_lists")).toInt();
+  const int modeConflictCount = ghidraObject.value(QStringLiteral("mode_conflict_count")).toInt();
+  const double regionBytes = ghidraObject.value(QStringLiteral("region_bytes")).toDouble();
+  const double gradedBodyBytes = ghidraObject.value(QStringLiteral("graded_body_bytes")).toDouble();
+  const double ghidraCodeFraction = regionBytes > 0.0 ? gradedBodyBytes / regionBytes : 0.0;
+  const int referenceTypeTotal = [&] {
+    int total = 0;
+    const auto histogram =
+      ghidraObject.value(QStringLiteral("reference_type_histogram")).toObject();
+    for (const QString& key : histogram.keys()) total += histogram.value(key).toInt();
+    return total;
+  }();
+  const bool ghidraVerified =
+    ghidraSchema == 4 &&
+    observedEntry == expectedEntry &&
+    observedLanguage == QStringLiteral("ARM:LE:32:v4t") &&
+    observedEntryFunction == QStringLiteral("entry") &&
+    romBlockMatches && entryWordMatches && ghidraFunctionCount > 0;
+  const QJsonObject ghidraVerification{
+    { QStringLiteral("schema"), 2 },
+    { QStringLiteral("status"), ghidraVerified ? QStringLiteral("CLEAN") : QStringLiteral("CONFLICT") },
+    { QStringLiteral("manifest_schema"), ghidraSchema },
+    { QStringLiteral("expected_entry"), hex32(game.entryTarget) },
+    { QStringLiteral("observed_entry"), ghidraObject.value(QStringLiteral("entry")) },
+    { QStringLiteral("entry_function"), observedEntryFunction },
+    { QStringLiteral("language"), observedLanguage },
+    { QStringLiteral("rom_block_matches_cartridge"), romBlockMatches },
+    { QStringLiteral("expected_entry_word"), expectedWord },
+    { QStringLiteral("observed_entry_word"), observedWord },
+    { QStringLiteral("entry_word_matches_cartridge"), entryWordMatches },
+    { QStringLiteral("function_count"), ghidraFunctionCount },
+    { QStringLiteral("pointer_referenced_count"), ghidraPointerOnlyCount },
+    { QStringLiteral("unreferenced_count"), ghidraUnreferencedCount },
+    { QStringLiteral("truncated_source_lists"), truncatedSourceLists },
+    { QStringLiteral("region_bytes"), regionBytes },
+    { QStringLiteral("function_body_bytes"), gradedBodyBytes },
+    { QStringLiteral("function_body_fraction"), ghidraCodeFraction },
+    // Recorded because it is what shows the function list is mostly decoded
+    // data: on a 16 MB cartridge the COMPUTED_CALL bucket runs to six figures
+    // while COMPUTED_JUMP — Ghidra's real switch-table recovery — stays in the
+    // dozens. Seed admission ignores these classes and decodes the cited
+    // instruction itself; the histogram is here so the ratio stays visible.
+    { QStringLiteral("reference_type_histogram"),
+      ghidraObject.value(QStringLiteral("reference_type_histogram")) },
+    { QStringLiteral("reference_count"), referenceTypeTotal },
+    { QStringLiteral("function_list_role"),
+      QStringLiteral("seed source, not a coverage oracle: a raw cartridge has no "
+                     "section table, so Ghidra's function list includes data it "
+                     "decoded as code") },
+    { QStringLiteral("mode_conflict_count"), modeConflictCount },
+    { QStringLiteral("mode_conflicts"), ghidraObject.value(QStringLiteral("mode_conflicts")) },
+    { QStringLiteral("verification_source"),
+      QStringLiteral("Ghidra headless post-analysis manifest and raw cartridge bytes") },
+  };
+  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("ghidra_verification.json")),
+                 ghidraVerification, error)) {
+    fail(error);
+    return;
+  }
+  if (!ghidraVerified) {
+    fail(QStringLiteral("Ghidra's analysis does not match the selected cartridge; the build stopped without guessing."));
+    return;
+  }
+  // Every candidate Ghidra offers, strongest evidence first. The pointer-only
+  // tier is kept because a function-pointer table is how a GBA title reaches
+  // most of its code, and the seed rule below tests each candidate's evidence
+  // against gbarecomp's own translated extent rather than trusting the tier.
+  QJsonArray ghidraCandidates =
+    ghidraObject.value(QStringLiteral("functions")).toArray();
+  for (const auto& value :
+       ghidraObject.value(QStringLiteral("pointer_referenced_functions")).toArray()) {
+    ghidraCandidates.append(value);
+  }
+  emit logLine(QStringLiteral("Ghidra verified entry %1 and its raw instruction word.")
+                 .arg(hex32(game.entryTarget)));
+  emit logLine(QStringLiteral("Ghidra calls %1% of the cartridge code: %2 flow-referenced functions, %3 reachable only through a pointer word, %4 unreferenced. A cartridge has no section table, so this list is a seed source, not a coverage target.")
+                 .arg(ghidraCodeFraction * 100.0, 0, 'f', 1)
+                 .arg(ghidraFunctionCount).arg(ghidraPointerOnlyCount)
+                 .arg(ghidraUnreferencedCount));
+  if (truncatedSourceLists > 0) {
+    emit logLine(QStringLiteral("%1 function entries have more than %2 recorded references of one kind; the surplus is counted but not listed, so a seed that depends only on those is missed and self-heals loudly at runtime.")
+                   .arg(truncatedSourceLists)
+                   .arg(ghidraObject.value(QStringLiteral("max_recorded_sources")).toInt()));
+  }
+  if (modeConflictCount > 0) {
+    // Neither the TMode context register nor the entry alignment is
+    // trustworthy for these, so they are reported and left unseeded rather
+    // than guessed into ARM or THUMB.
+    emit logLine(QStringLiteral("%1 function entries have an ARM/THUMB mode that contradicts their alignment. They are recorded in ghidra_verification.json and deliberately not seeded:")
+                   .arg(modeConflictCount));
+    for (const auto& conflictValue : ghidraObject.value(QStringLiteral("mode_conflicts")).toArray()) {
+      const auto conflict = conflictValue.toObject();
+      emit logLine(QStringLiteral("  %1 %2 (recorded %3)")
+                     .arg(conflict.value(QStringLiteral("entry")).toString(),
+                          escapedComment(conflict.value(QStringLiteral("name")).toString()),
+                          conflict.value(QStringLiteral("tmode")).toString()));
+    }
+  }
+
+  // ── Recompiler ─────────────────────────────────────────────────────────
+  nextStage(QStringLiteral("Build the gbarecomp recompiler"));
+  const QString cacheRoot = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
+                              .filePath(QStringLiteral("org.psxrecomp.studio"));
+  const QString recompilerBuild = QDir(cacheRoot).filePath(
+    hostTargetPlatform() == TargetPlatform::Windows
+      ? QStringLiteral("gbarecomp-build-vs2022-release")
+      : QStringLiteral("gbarecomp-build-ninja-release"));
+  QDir().mkpath(recompilerBuild);
+  QStringList recompilerConfigure{
+    QStringLiteral("-S"), gbarecompRoot, QStringLiteral("-B"), recompilerBuild
+  };
+  QStringList recompilerBuildArgs{
+    QStringLiteral("--build"), recompilerBuild,
+    QStringLiteral("--target"), QStringLiteral("gba_recompile"),
+    QStringLiteral("--parallel"), QString::number(std::max(1, QThread::idealThreadCount()))
+  };
+  if (hostTargetPlatform() == TargetPlatform::Windows) {
+    recompilerConfigure << QStringLiteral("-G") << QStringLiteral("Visual Studio 17 2022")
+                        << QStringLiteral("-A") << QStringLiteral("x64");
+    recompilerBuildArgs << QStringLiteral("--config") << QStringLiteral("Release");
+  } else {
+    recompilerConfigure << QStringLiteral("-G") << QStringLiteral("Ninja")
+                        << QStringLiteral("-DCMAKE_BUILD_TYPE=Release");
+  }
+  if (!runCommand(cmake, recompilerConfigure, request.frameworkRoot,
+                  QStringLiteral("cmake -S extra/gbarecomp -B <tool-cache>"),
+                  10 * 60 * 1000) ||
+      !runCommand(cmake, recompilerBuildArgs, request.frameworkRoot,
+                  QStringLiteral("cmake --build <tool-cache> --target gba_recompile"),
+                  45 * 60 * 1000)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The gbarecomp static recompiler could not be built."));
+    return;
+  }
+  const QString executableSuffix = hostTargetPlatform() == TargetPlatform::Windows
+    ? QStringLiteral(".exe") : QString();
+  const QString recompileTool = QDir(hostTargetPlatform() == TargetPlatform::Windows
+      ? QDir(recompilerBuild).filePath(QStringLiteral("Release")) : recompilerBuild)
+    .filePath(QStringLiteral("gba_recompile") + executableSuffix);
+  if (!QFileInfo(recompileTool).isExecutable()) {
+    fail(QStringLiteral("The gbarecomp build completed without producing gba_recompile."));
+    return;
+  }
+
+  // ── BIOS ───────────────────────────────────────────────────────────────
+  // gbarecomp links src/runtime/generated_bios/bios_recompiled.cpp when it
+  // exists and a placeholder dispatch stub when it does not. The BIOS is never
+  // stubbed here: it is recompiled from the canonical image and dispatched.
+  nextStage(QStringLiteral("Recompile the GBA BIOS"));
+  const QString biosGeneratedDir = QDir(projectGbarecompDir)
+    .filePath(QStringLiteral("src/runtime/generated_bios"));
+  if (!QDir().mkpath(biosGeneratedDir)) {
+    fail(QStringLiteral("Could not create the recompiled BIOS output directory."));
+    return;
+  }
+  if (!runCommand(recompileTool,
+                  { QStringLiteral("--bios"), QDir(inputsDir).filePath(QStringLiteral("gba_bios.bin")),
+                    QStringLiteral("--config"), biosRecompilerConfig,
+                    QStringLiteral("--out"), biosGeneratedDir },
+                  projectDir,
+                  QStringLiteral("gba_recompile --bios gba_bios.bin --config bios/gba_bios.toml --out <generated_bios>"),
+                  45 * 60 * 1000)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The GBA BIOS could not be recompiled."));
+    return;
+  }
+  for (const auto& produced : { QStringLiteral("bios_recompiled.cpp"),
+                                QStringLiteral("bios_dispatch_table.cpp") }) {
+    if (!QFileInfo(QDir(biosGeneratedDir).filePath(produced)).isFile()) {
+      fail(QStringLiteral("The BIOS recompilation did not produce %1; gbarecomp would fall back to its placeholder dispatch stub.")
+             .arg(produced));
+      return;
+    }
+  }
+  QHash<quint32, quint8> biosModesByAddress;
+  const int biosDispatchRows = readGbaDispatchEntries(
+    QDir(biosGeneratedDir).filePath(QStringLiteral("bios_dispatch_table.cpp")),
+    QStringLiteral("kBiosDispatchTableLen"), biosModesByAddress, error);
+  if (biosDispatchRows <= 0) {
+    fail(error.isEmpty()
+      ? QStringLiteral("The recompiled BIOS dispatch table is empty.") : error);
+    return;
+  }
+  emit logLine(QStringLiteral("Recompiled BIOS: %1 dispatch entries over %2 addresses, linked into gbarecomp_runtime.")
+                 .arg(biosDispatchRows).arg(biosModesByAddress.size()));
+
+  // ── Cartridge ──────────────────────────────────────────────────────────
+  // Pass 1 runs on the entry seed alone so the recompiler's own recursive
+  // discovery is exercised. Every later pass hands it the Ghidra functions
+  // whose evidence lands inside the code the previous pass proved reachable,
+  // which grows the reachable set and exposes more evidence, so the passes are
+  // iterated to a fixed point: the build converges when a pass admits nothing
+  // new, not when Ghidra's list is exhausted.
+  nextStage(QStringLiteral("Statically recompile the cartridge"));
+  QByteArray romBytes;
+  {
+    QFile romFile(romForAnalysis);
+    if (!romFile.open(QIODevice::ReadOnly)) {
+      fail(QStringLiteral("Could not reopen the cartridge to check pointer words: %1")
+             .arg(romFile.errorString()));
+      return;
+    }
+    romBytes = romFile.readAll();
+    if (romBytes.isEmpty()) {
+      fail(QStringLiteral("The cartridge image is empty."));
+      return;
+    }
+  }
+  QVector<GbaSeedCandidate> candidates;
+  candidates.reserve(ghidraCandidates.size());
+  for (const auto& candidateValue : ghidraCandidates) {
+    const auto function = candidateValue.toObject();
+    GbaSeedCandidate candidate;
+    bool ok = false;
+    candidate.entry = function.value(QStringLiteral("entry")).toString().toUInt(&ok, 16);
+    if (!ok) {
+      fail(QStringLiteral("Ghidra produced an invalid function address."));
+      return;
+    }
+    candidate.thumb =
+      function.value(QStringLiteral("mode")).toString() == QStringLiteral("thumb");
+    candidate.name = function.value(QStringLiteral("name")).toString();
+    candidate.directSources = readGbaSourceList(function, QStringLiteral("direct_sources"));
+    candidate.computedSources = readGbaSourceList(function, QStringLiteral("computed_sources"));
+    candidate.pointerSources = readGbaSourceList(function, QStringLiteral("pointer_sources"));
+    candidates.append(candidate);
+  }
+  // Only an address Ghidra cites can ever be asked about, and a bl.lo is only
+  // admissible when its bl.hi two bytes earlier was decoded as well, so both
+  // are what the shard scan needs to retain out of a corpus that reaches
+  // hundreds of megabytes once the cartridge is well covered.
+  QSet<quint32> citedSources;
+  for (const auto& candidate : candidates) {
+    for (const auto* list : { &candidate.directSources, &candidate.computedSources,
+                              &candidate.pointerSources }) {
+      for (const quint32 source : *list) {
+        citedSources.insert(source);
+        citedSources.insert(source - 2);
+      }
+    }
+  }
+  const QString seedsPath = QDir(seedsDir).filePath(QStringLiteral("ghidra_funcs.tsv"));
+  const QString recompilerConfigPath =
+    QDir(recompilerDir).filePath(QStringLiteral("game.recomp.toml"));
+  const QString dispatchTablePath =
+    QDir(generatedDir).filePath(QStringLiteral("dispatch_table.cpp"));
+  QString seedText =
+    QStringLiteral("# Evidence-backed ARM/THUMB function entries for %1.\n"
+                   "# Format: 0xADDRESS<TAB>arm|thumb<TAB>name\n")
+      .arg(game.gameCode.isEmpty() ? request.windowTitle : game.gameCode);
+  seedText += QStringLiteral("0x%1\tarm\tentry\n")
+                .arg(game.entryTarget, 8, 16, QLatin1Char('0'));
+  if (!writeText(seedsPath, seedText, error)) {
+    fail(error);
+    return;
+  }
+  // Keyed by (address, instruction set): interworking makes one address
+  // legitimately reachable in both, and each needs its own seed row.
+  QSet<quint64> seeded{ static_cast<quint64>(game.entryTarget) << 1 };
+  QJsonArray iterationProof;
+  QJsonArray modeConflictsObserved;
+  QJsonArray interworkingSamples;
+  int dispatchRows = 0;
+  int dispatchAddresses = 0;
+  int translatedSpanCount = 0;
+  quint32 translatedBytes = 0;
+  int admittedTotal = 0;
+  bool converged = false;
+  constexpr int kMaxGbaPasses = 8;
+  for (int iteration = 1; iteration <= kMaxGbaPasses; ++iteration) {
+    if (!runCommand(recompileTool,
+                    { QStringLiteral("--rom"), romForAnalysis,
+                      QStringLiteral("--config"), recompilerConfigPath,
+                      QStringLiteral("--symbols"), seedsPath,
+                      QStringLiteral("--rom-base"), hex32(kGbaRomBase),
+                      QStringLiteral("--out"), generatedDir },
+                    projectDir,
+                    QStringLiteral("gba_recompile --rom game.gba --config game.recomp.toml --symbols seeds/ghidra_funcs.tsv (pass %1)")
+                      .arg(iteration),
+                    90 * 60 * 1000)) {
+      if (cancellationRequested()) cancelledOut();
+      else fail(QStringLiteral("Static recompilation of the cartridge failed on pass %1.").arg(iteration));
+      return;
+    }
+    QHash<quint32, quint8> modesByAddress;
+    dispatchRows = readGbaDispatchEntries(
+      dispatchTablePath, QStringLiteral("kDispatchTableLen"), modesByAddress, error);
+    if (dispatchRows <= 0) {
+      fail(error.isEmpty()
+        ? QStringLiteral("The recompiled cartridge dispatch table is empty.") : error);
+      return;
+    }
+    dispatchAddresses = modesByAddress.size();
+    // What gbarecomp proved reachable this pass, and what it decoded at each
+    // address Ghidra cites. Every seed admitted below has to be backed by both.
+    QList<GbaTranslatedSpan> spans;
+    GbaInstructionMap instructions;
+    if (!readGbaTranslation(generatedDir, citedSources, spans, instructions, error)) {
+      fail(error);
+      return;
+    }
+    translatedSpanCount = spans.size();
+    translatedBytes = gbaTranslatedBytes(spans);
+
+    QList<QPair<GbaSeedCandidate, QString>> admitted;  // candidate, rule
+    QJsonArray admissionSamples;
+    QJsonArray rejectionSamples;
+    QHash<QString, int> admittedByRule;
+    int contradicted = 0;
+    int interworkingAdmissions = 0;
+    constexpr int kMaxRecordedSamples = 64;
+    for (const auto& candidate : candidates) {
+      const quint8 candidateMode = candidate.thumb ? kGbaModeThumb : kGbaModeArm;
+      const auto translated = modesByAddress.constFind(candidate.entry);
+      if (translated != modesByAddress.constEnd()) {
+        if ((translated.value() & candidateMode) != 0) continue;  // already covered
+        // Both tools translated this address, in different instruction sets.
+        // This is recorded rather than fatal: Ghidra loses these on a raw
+        // cartridge — it has been observed calling four bytes in the middle of
+        // a THUMB run an ARM function — and gbarecomp reached this address by
+        // following real control flow, so its mode is the better-evidenced one.
+        if (modeConflictsObserved.size() < kMaxRecordedSamples) {
+          modeConflictsObserved.append(QJsonObject{
+            { QStringLiteral("entry"), hex32(candidate.entry) },
+            { QStringLiteral("name"), candidate.name },
+            { QStringLiteral("ghidra_mode"),
+              candidate.thumb ? QStringLiteral("thumb") : QStringLiteral("arm") },
+            { QStringLiteral("gbarecomp_mode"), describeGbaModes(translated.value()) },
+            { QStringLiteral("iteration"), iteration },
+          });
+        }
+      }
+      const quint64 key =
+        (static_cast<quint64>(candidate.entry) << 1) | (candidate.thumb ? 1u : 0u);
+      if (seeded.contains(key)) continue;
+      QString rule;
+      QString reason;
+      quint32 evidence = 0;
+      bool modeCrossed = false;
+      if (!admitGbaSeed(candidate, spans, instructions, romBytes, kGbaRomBase,
+                        rule, evidence, modeCrossed, reason)) {
+        if (!reason.isEmpty()) {
+          ++contradicted;
+          if (rejectionSamples.size() < kMaxRecordedSamples) {
+            rejectionSamples.append(QJsonObject{
+              { QStringLiteral("entry"), hex32(candidate.entry) },
+              { QStringLiteral("name"), candidate.name },
+              { QStringLiteral("mode"),
+                candidate.thumb ? QStringLiteral("thumb") : QStringLiteral("arm") },
+              { QStringLiteral("rejected_because"), reason },
+              { QStringLiteral("iteration"), iteration },
+            });
+          }
+        }
+        continue;
+      }
+      admitted.append({ candidate, rule });
+      ++admittedByRule[rule];
+      if (modeCrossed) {
+        // A BX that changes instruction set. Real and expected — it is how a
+        // THUMB-compiled title enters an ARM veneer — but it is also the first
+        // thing to go wrong if a rule ever starts admitting decoded data, so
+        // each one is named rather than merely counted.
+        ++interworkingAdmissions;
+        if (interworkingSamples.size() < kMaxRecordedSamples) {
+          interworkingSamples.append(QJsonObject{
+            { QStringLiteral("entry"), hex32(candidate.entry) },
+            { QStringLiteral("entered_as"),
+              candidate.thumb ? QStringLiteral("thumb") : QStringLiteral("arm") },
+            { QStringLiteral("branch_site"), hex32(evidence) },
+            { QStringLiteral("iteration"), iteration },
+          });
+        }
+      }
+      if (admissionSamples.size() < kMaxRecordedSamples) {
+        admissionSamples.append(QJsonObject{
+          { QStringLiteral("entry"), hex32(candidate.entry) },
+          { QStringLiteral("name"), candidate.name },
+          { QStringLiteral("mode"),
+            candidate.thumb ? QStringLiteral("thumb") : QStringLiteral("arm") },
+          { QStringLiteral("rule"), rule },
+          { QStringLiteral("evidence_address"), hex32(evidence) },
+          { QStringLiteral("instruction"), instructions.value(evidence) },
+          { QStringLiteral("iteration"), iteration },
+        });
+      }
+    }
+    iterationProof.append(QJsonObject{
+      { QStringLiteral("iteration"), iteration },
+      { QStringLiteral("dispatch_entry_count"), dispatchRows },
+      { QStringLiteral("dispatch_address_count"), dispatchAddresses },
+      { QStringLiteral("translated_span_count"), translatedSpanCount },
+      { QStringLiteral("translated_bytes"), static_cast<double>(translatedBytes) },
+      { QStringLiteral("admitted_seed_count"), admitted.size() },
+      { QStringLiteral("admitted_by_direct_branch"),
+        admittedByRule.value(QStringLiteral("direct-branch")) },
+      { QStringLiteral("admitted_by_register_indirect"),
+        admittedByRule.value(QStringLiteral("register-indirect")) },
+      { QStringLiteral("admitted_by_pointer_word"),
+        admittedByRule.value(QStringLiteral("pointer-word")) },
+      { QStringLiteral("interworking_admission_count"), interworkingAdmissions },
+      { QStringLiteral("contradicted_candidate_count"), contradicted },
+      { QStringLiteral("admission_samples"), admissionSamples },
+      { QStringLiteral("rejection_samples"), rejectionSamples },
+      { QStringLiteral("max_recorded_samples"), kMaxRecordedSamples },
+    });
+    emit logLine(QStringLiteral("Pass %1: %2 dispatch entries over %3 addresses, %4 bytes translated in %5 extents; %6 new Ghidra seeds admitted (%7 direct branch, %8 register-indirect, %9 pointer word), %10 rejected on decoded evidence.")
+                   .arg(iteration).arg(dispatchRows).arg(dispatchAddresses)
+                   .arg(translatedBytes).arg(translatedSpanCount).arg(admitted.size())
+                   .arg(admittedByRule.value(QStringLiteral("direct-branch")))
+                   .arg(admittedByRule.value(QStringLiteral("register-indirect")))
+                   .arg(admittedByRule.value(QStringLiteral("pointer-word")))
+                   .arg(contradicted));
+    if (admitted.isEmpty()) {
+      // Fixed point: this pass found no address that Ghidra can prove is code
+      // and gbarecomp has not already translated. Anything still missing is
+      // reached only through a computed target neither tool resolved; the
+      // runtime bridges those through the reference interpreter, counts them,
+      // and reports them in its coverage banner.
+      converged = true;
+      break;
+    }
+    QFile seedFile(seedsPath);
+    if (!seedFile.open(QIODevice::Append | QIODevice::Text)) {
+      fail(QStringLiteral("Could not extend the Ghidra seed manifest."));
+      return;
+    }
+    seedFile.write(QStringLiteral("# pass %1: %2 entries admitted on evidence inside translated code\n")
+                     .arg(iteration).arg(admitted.size()).toUtf8());
+    for (const auto& entry : admitted) {
+      const GbaSeedCandidate& candidate = entry.first;
+      seedFile.write(QStringLiteral("0x%1\t%2\t%3\n")
+                       .arg(candidate.entry, 8, 16, QLatin1Char('0'))
+                       .arg(candidate.thumb ? QStringLiteral("thumb") : QStringLiteral("arm"),
+                            escapedComment(candidate.name))
+                       .toUtf8());
+      seeded.insert((static_cast<quint64>(candidate.entry) << 1) |
+                    (candidate.thumb ? 1u : 0u));
+    }
+    seedFile.close();
+    admittedTotal += admitted.size();
+  }
+  if (!converged) {
+    fail(QStringLiteral("Seed admission did not reach a fixed point in %1 recompilation passes; the last pass was still finding new evidence, so the translation is incomplete in a way the build cannot characterise.")
+           .arg(kMaxGbaPasses));
+    return;
+  }
+  const QJsonObject coverageProof{
+    { QStringLiteral("schema"), 3 },
+    { QStringLiteral("status"), QStringLiteral("CONVERGED") },
+    { QStringLiteral("criterion"),
+      QStringLiteral("fixed point: a pass admitted no Ghidra function reachable "
+                     "by a control transfer gbarecomp itself decoded inside "
+                     "code it had already translated") },
+    { QStringLiteral("why_not_full_ghidra_coverage"),
+      QStringLiteral("a raw cartridge has no section table, so Ghidra "
+                     "disassembles compressed art and sample data as code and "
+                     "its function list is a seed source, not a coverage "
+                     "target") },
+    { QStringLiteral("why_ghidra_reference_class_is_not_trusted"),
+      QStringLiteral("Ghidra's reference classes come from that same decoding. "
+                     "It renders a THUMB BL second halfword with no first "
+                     "halfword in front of it as a call through LR and "
+                     "propagates a destination into it, which manufactures a "
+                     "COMPUTED_CALL out of data. Every rule below therefore "
+                     "asks gbarecomp what the cited address contains and "
+                     "ignores how Ghidra classified the reference.") },
+    { QStringLiteral("seed_rules"), QJsonArray{
+        QStringLiteral("direct-branch: gbarecomp decoded a B/Bcc or a complete "
+                       "BL pair at the cited address and its resolved "
+                       "destination is this entry; the site's instruction set "
+                       "must match, because ARMv4T has no BLX and a direct "
+                       "branch therefore cannot switch mode"),
+        QStringLiteral("register-indirect: gbarecomp decoded a BX or other PC "
+                       "write at the cited address, so control provably leaves "
+                       "there and it could not resolve where; no mode "
+                       "constraint applies, because a BX carries the "
+                       "destination instruction set in bit 0"),
+        QStringLiteral("pointer-word: a data reference from a word inside a "
+                       "translated extent whose stored value is exactly entry|1 for "
+                       "THUMB or entry for ARM, since bit 0 of a BX target selects "
+                       "the instruction set"),
+      } },
+    { QStringLiteral("rejected_evidence"), QJsonArray{
+        QStringLiteral("a cited address that is not an instruction boundary in "
+                       "gbarecomp's translation, however far inside a "
+                       "translated extent it falls"),
+        QStringLiteral("an orphan bl.lo — a BL second halfword whose first "
+                       "halfword was never decoded — because a branch whose "
+                       "target is unresolved is not evidence about where "
+                       "control goes"),
+        QStringLiteral("a direct branch whose resolved destination is some "
+                       "address other than the candidate entry"),
+      } },
+    { QStringLiteral("interworking_admissions"), interworkingSamples },
+    { QStringLiteral("ghidra_candidate_count"), candidates.size() },
+    { QStringLiteral("admitted_seed_count"), admittedTotal },
+    { QStringLiteral("dispatch_entry_count"), dispatchRows },
+    { QStringLiteral("dispatch_address_count"), dispatchAddresses },
+    { QStringLiteral("translated_span_count"), translatedSpanCount },
+    { QStringLiteral("translated_bytes"), static_cast<double>(translatedBytes) },
+    { QStringLiteral("cartridge_bytes"), static_cast<double>(romBytes.size()) },
+    { QStringLiteral("bios_dispatch_entry_count"), biosDispatchRows },
+    { QStringLiteral("unseeded_mode_conflicts"), modeConflictCount },
+    { QStringLiteral("gbarecomp_mode_conflicts"), modeConflictsObserved },
+    { QStringLiteral("residual_gap_handling"),
+      QStringLiteral("a dispatch miss at runtime bridges through gbarecomp's "
+                     "reference interpreter, is counted in the coverage banner, "
+                     "and is emitted as a reviewable game.toml proposal — it is "
+                     "never silently absorbed") },
+    { QStringLiteral("iterations"), iterationProof },
+  };
+  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("ghidra_coverage_proof.json")),
+                 coverageProof, error)) {
+    fail(error);
+    return;
+  }
+  emit logLine(QStringLiteral("Seed admission converged: %1 of Ghidra's %2 candidates admitted on evidence inside translated code. Dispatch table holds %3 entries over %4 addresses, translating %5 of the cartridge's %6 bytes.")
+                 .arg(admittedTotal).arg(candidates.size()).arg(dispatchRows)
+                 .arg(dispatchAddresses).arg(translatedBytes).arg(romBytes.size()));
+  if (!modeConflictsObserved.isEmpty()) {
+    emit logLine(QStringLiteral("%1 address(es) were translated by both tools in different instruction sets. gbarecomp reached them by following real control flow, so its decoding stands; each one is recorded in ghidra_coverage_proof.json.")
+                   .arg(modeConflictsObserved.size()));
+  }
+
+  nextStage(QStringLiteral("Finalize gbarecomp CMake repository"));
   const QString readme = QStringLiteral(
-    "# %1 — Rust GBARecomp Studio source export\n\n"
-    "Generated by PSXRecomp Studio for **%2**. CMake is the CI entrypoint and "
-    "orchestrates the locked Cargo workspace and gba-pack assembly. The selected "
-    "ROM and canonical BIOS are private package resources. BIOS execution is "
-    "skipped by default; native translation is completed during export and "
-    "packaged beside the runtime.\n\n"
+    "# %1 — gbarecomp Studio source export\n\n"
+    "Generated by PSXRecomp Studio for **%2**. The cartridge and the GBA BIOS "
+    "were statically recompiled to C++ during export by `gba_recompile`, seeded "
+    "from a verified headless Ghidra analysis. This project compiles that "
+    "translation; it never recompiles at build time and never needs the ROM to "
+    "build.\n\n"
+    "- `generated/` — the translated cartridge (`recompiled_*.cpp`, "
+    "`dispatch_table.cpp`).\n"
+    "- `gbarecomp/src/runtime/generated_bios/` — the recompiled BIOS, linked "
+    "into `gbarecomp_runtime`.\n"
+    "- `recompiler/` — the `gba_recompile` configuration and the Ghidra seed "
+    "table it was driven with.\n"
+    "- `proof/` — Ghidra verification and the static-coverage proof.\n\n"
     "## Build\n\n```sh\ncmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n"
-    "cmake --build build --target gba-runtime --parallel\n``\n\n"
-    "The CI package is emitted under "
+    "cmake --build build --target gba-runtime --parallel\n```\n\n"
+    "The package is emitted under "
     "`build/steganos-package/gba-runtime/<configuration>/`.\n")
       .arg(request.windowTitle, targetPlatformDisplayName(request.targetPlatform));
   if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
@@ -4227,20 +4596,20 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
       !runCommand(git, { QStringLiteral("add"), QStringLiteral("-A") }, projectDir,
                   QStringLiteral("git add -A"), 2 * 60 * 60 * 1000) ||
       !runCommand(git, { QStringLiteral("commit"), QStringLiteral("-m"),
-                         QStringLiteral("Generate %1 %2 Rust GBA source")
+                         QStringLiteral("Generate %1 %2 gbarecomp source")
                            .arg(request.windowTitle,
                                 targetPlatformDisplayName(request.targetPlatform)) },
-                  projectDir, QStringLiteral("git commit -m <generated Rust GBA source>"),
+                  projectDir, QStringLiteral("git commit -m <generated gbarecomp source>"),
                   2 * 60 * 60 * 1000) ||
       !runCommand(git, { QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
                   projectDir, QStringLiteral("git rev-parse HEAD"), 30000,
                   &commitOutput)) {
     if (cancellationRequested()) cancelledOut();
-    else fail(QStringLiteral("The generated Rust GBA source repository could not be committed."));
+    else fail(QStringLiteral("The generated gbarecomp source repository could not be committed."));
     return;
   }
   const QString sourceCommit = QString::fromUtf8(commitOutput).trimmed().section('\n', -1);
-  emit logLine(QStringLiteral("Generated Rust GBA source commit: %1").arg(sourceCommit));
+  emit logLine(QStringLiteral("Generated gbarecomp source commit: %1").arg(sourceCommit));
 
   auto removeEntry = [](const QString& path) {
     const QFileInfo info(path);
@@ -4302,7 +4671,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   };
 
   if (sourceExport) {
-    nextStage(QStringLiteral("Deliver Rust GBA source repository"));
+    nextStage(QStringLiteral("Deliver gbarecomp source repository"));
     const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
     const bool ok = request.exportAsZip
       ? publishZip(projectDir, QFileInfo(output).completeBaseName(), output)
@@ -4317,7 +4686,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   }
 
   if (remoteCiBuild) {
-    nextStage(QStringLiteral("Stage Rust GBA source for CI"));
+    nextStage(QStringLiteral("Stage gbarecomp source for CI"));
     const QString ciRoot =
       QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
         .filePath(QStringLiteral("org.psxrecomp.studio/psxrecomp-ci-sources"));
@@ -4326,14 +4695,14 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
       return;
     }
     const QString ciRepository = QDir(ciRoot).filePath(
-      QStringLiteral("%1-gba-rust-%2-%3")
+      QStringLiteral("%1-gbarecomp-%2-%3")
         .arg(sanitizedFileStem(request.windowTitle),
              targetPlatformKey(request.targetPlatform),
              QUuid::createUuid().toString(QUuid::WithoutBraces)));
     if (!QDir().rename(projectDir, ciRepository) &&
         (!copyDirectoryTree(projectDir, ciRepository, error) ||
          !QDir(projectDir).removeRecursively())) {
-      fail(error.isEmpty() ? QStringLiteral("Could not stage the Rust GBA source repository for CI.") : error);
+      fail(error.isEmpty() ? QStringLiteral("Could not stage the gbarecomp source repository for CI.") : error);
       return;
     }
     QDir(workspace).removeRecursively();
@@ -4341,14 +4710,8 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     return;
   }
 
-  nextStage(QStringLiteral("Build Rust GBA package through CMake"));
-  QString cargoCache = QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
-    .filePath(QStringLiteral("dependencies/gba-rust-cargo-target"));
-  if (!QDir().mkpath(cargoCache))
-    cargoCache = QDir(workspace).filePath(QStringLiteral("cargo-target"));
-  QStringList configure{ QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
-                         QStringLiteral("-DGBA_CARGO_TARGET_DIR=%1").arg(cargoCache),
-                         QStringLiteral("-DGBA_CLEAN_CARGO_TARGET=OFF") };
+  nextStage(QStringLiteral("Build gbarecomp package through CMake"));
+  QStringList configure{ QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir };
   if (hostTargetPlatform() == TargetPlatform::Windows) {
     configure << QStringLiteral("-G") << QStringLiteral("Visual Studio 17 2022")
               << QStringLiteral("-A") << QStringLiteral("x64");
@@ -4362,12 +4725,12 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   if (hostTargetPlatform() == TargetPlatform::Windows)
     build << QStringLiteral("--config") << QStringLiteral("Release");
   if (!runCommand(cmake, configure, workspace,
-                  QStringLiteral("cmake -S <Rust GBA project> -B <build>"), 10 * 60 * 1000) ||
+                  QStringLiteral("cmake -S <gbarecomp project> -B <build>"), 10 * 60 * 1000) ||
       !runCommand(cmake, build, workspace,
                   QStringLiteral("cmake --build <build> --target gba-runtime"),
                   4 * 60 * 60 * 1000)) {
     if (cancellationRequested()) cancelledOut();
-    else fail(QStringLiteral("The Rust %1 GBA package could not be built and staged.")
+    else fail(QStringLiteral("The %1 gbarecomp package could not be built and staged.")
                 .arg(targetPlatformDisplayName(request.targetPlatform)));
     return;
   }
@@ -4375,7 +4738,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     QStringLiteral("steganos-package/gba-runtime/Release"));
   QDir(stageDir).removeRecursively();
   if (!copyDirectoryTree(builtPackage, stageDir, error)) {
-    fail(error.isEmpty() ? QStringLiteral("The built Rust GBA package could not be staged.") : error);
+    fail(error.isEmpty() ? QStringLiteral("The built gbarecomp package could not be staged.") : error);
     return;
   }
 
@@ -4384,22 +4747,17 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const QString mainExecutable = macosTarget
     ? QDir(stagedApp).filePath(QStringLiteral("Contents/MacOS/") + bundleName)
     : QDir(stageDir).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()));
-  const QString runtimeData = macosTarget
-    ? QDir(stagedApp).filePath(QStringLiteral("Contents/MacOS")) : stageDir;
-  const QString packManifest = QDir(runtimeData).filePath(QStringLiteral("recomp.pack.toml"));
-  const QString packagedGameDb = QDir(runtimeData).filePath(QStringLiteral("gamedb.sqlite"));
-  const QString translation = QDir(runtimeData).filePath(
-    QStringLiteral("translation.") + (windowsTarget ? QStringLiteral("dll")
-      : macosTarget ? QStringLiteral("dylib") : QStringLiteral("so")));
-  if (!QFileInfo(mainExecutable).isFile() || !QFileInfo(packManifest).isFile() ||
-      !QFileInfo(packagedGameDb).isFile() || !QFileInfo(translation).isFile()) {
-    fail(QStringLiteral("The Rust GBA package is missing its executable, prebuilt translation, gamedb, or recomp.pack.toml."));
-    return;
-  }
+  // game.toml resolves [rom].path and [bios].path against its own directory, so
+  // the runtime reads them from exactly these locations.
   const QString packagedResources = macosTarget
     ? QDir(stagedApp).filePath(QStringLiteral("Contents/Resources")) : stageDir;
-  const QString packagedRom = QDir(packagedResources).filePath(bundleName + QStringLiteral(".gba"));
-  const QString packagedBios = QDir(packagedResources).filePath(QStringLiteral("gba_bios.bin"));
+  const QString packagedConfig = QDir(packagedResources).filePath(QStringLiteral("game.toml"));
+  const QString packagedRom = QDir(packagedResources).filePath(QStringLiteral("game/game.gba"));
+  const QString packagedBios = QDir(packagedResources).filePath(QStringLiteral("bios/gba_bios.bin"));
+  if (!QFileInfo(mainExecutable).isFile() || !QFileInfo(packagedConfig).isFile()) {
+    fail(QStringLiteral("The gbarecomp package is missing its executable or game.toml."));
+    return;
+  }
   if (sha256File(packagedRom, error) != romSha256 ||
       sha256File(packagedBios, error) != biosSha256) {
     fail(error.isEmpty()
@@ -4408,42 +4766,74 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     return;
   }
 
-  nextStage(QStringLiteral("Verify Rust GBA package"));
+  nextStage(QStringLiteral("Verify gbarecomp package"));
   if (macosTarget) {
     const QString inspection = createMacosInspectionAlias(
       mainExecutable, QDir(workspace).filePath(QStringLiteral("macos-inspection")), error);
     if (inspection.isEmpty()) { fail(error); return; }
     QByteArray deps;
     if (!runCommand(QStringLiteral("/usr/bin/otool"), { QStringLiteral("-L"), inspection },
-                    workspace, QStringLiteral("otool -L <Rust GBA executable>"), 30000, &deps)) {
-      fail(QStringLiteral("The Rust GBA executable dependencies could not be inspected."));
+                    workspace, QStringLiteral("otool -L <gbarecomp executable>"), 30000, &deps)) {
+      fail(QStringLiteral("The gbarecomp executable dependencies could not be inspected."));
       return;
     }
     if (QString::fromUtf8(deps).contains(QStringLiteral("libusb"), Qt::CaseInsensitive)) {
-      fail(QStringLiteral("The Rust GBA app links libusb dynamically; the shared GIP backend must be static."));
+      fail(QStringLiteral("The gbarecomp app links libusb dynamically; the shared GIP backend must be static."));
       return;
     }
     if (request.macosGipGamepad) {
       QByteArray symbols;
       if (!runCommand(QStringLiteral("/usr/bin/nm"),
                       { QStringLiteral("-gU"), inspection }, workspace,
-                      QStringLiteral("nm -gU <Rust GBA executable>"), 30000, &symbols) ||
+                      QStringLiteral("nm -gU <gbarecomp executable>"), 30000, &symbols) ||
           !nmOutputHasMacosGipBackend(symbols)) {
-        fail(QStringLiteral("The Rust GBA executable does not contain the shared macOS GIP backend."));
+        fail(QStringLiteral("The gbarecomp executable does not contain the shared macOS GIP backend."));
         return;
       }
     }
   }
+  // The recompiled cartridge is compiled into this executable, so the dispatch
+  // table's own symbol is the packaged proof that the translation was linked
+  // rather than dropped by the linker.
+  {
+    QByteArray symbols;
+    const QString nm = hostTargetPlatform() == TargetPlatform::Windows
+      ? findExecutable(QStringLiteral("dumpbin")) : findExecutable(QStringLiteral("nm"));
+    if (nm.isEmpty()) {
+      fail(QStringLiteral("A symbol reader (nm, or dumpbin on Windows) is required to verify that the recompiled cartridge was linked."));
+      return;
+    }
+    const QStringList symbolArgs = hostTargetPlatform() == TargetPlatform::Windows
+      ? QStringList{ QStringLiteral("/SYMBOLS"), mainExecutable }
+      : QStringList{ QStringLiteral("-a"), mainExecutable };
+    if (!runCommand(nm, symbolArgs, workspace,
+                    QStringLiteral("%1 <gbarecomp executable>").arg(QFileInfo(nm).fileName()),
+                    5 * 60 * 1000, &symbols)) {
+      fail(QStringLiteral("The gbarecomp executable symbols could not be read."));
+      return;
+    }
+    if (!QString::fromUtf8(symbols).contains(QStringLiteral("kDispatchTable"))) {
+      fail(QStringLiteral("The packaged executable does not contain the recompiled cartridge dispatch table."));
+      return;
+    }
+  }
+  emit logLine(QStringLiteral("Verified: the packaged executable carries the recompiled cartridge dispatch table."));
 
-  nextStage(signingRequested ? QStringLiteral("Sign Rust GBA app")
-                             : QStringLiteral("Seal Rust GBA package"));
+  nextStage(signingRequested ? QStringLiteral("Sign gbarecomp app")
+                             : QStringLiteral("Seal gbarecomp package"));
   const QString preSignExecutableHash = sha256File(mainExecutable, error);
   const QJsonObject buildProof{
-    { QStringLiteral("schema"), 2 },
+    { QStringLiteral("schema"), 3 },
     { QStringLiteral("platform"), targetPlatformDisplayName(request.targetPlatform) },
-    { QStringLiteral("runtime"), QStringLiteral("rust") },
+    { QStringLiteral("runtime"), QStringLiteral("gbarecomp") },
+    { QStringLiteral("execution"), QStringLiteral("static-recompilation") },
     { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
-    { QStringLiteral("translation"), QFileInfo(translation).fileName() },
+    { QStringLiteral("cartridge_dispatch_entries"), dispatchRows },
+    { QStringLiteral("cartridge_dispatch_addresses"), dispatchAddresses },
+    { QStringLiteral("bios_dispatch_entries"), biosDispatchRows },
+    { QStringLiteral("ghidra_candidate_count"), candidates.size() },
+    { QStringLiteral("ghidra_seeds_admitted"), admittedTotal },
+    { QStringLiteral("translated_cartridge_bytes"), static_cast<double>(translatedBytes) },
     { QStringLiteral("pre_sign_executable_sha256"), preSignExecutableHash },
     { QStringLiteral("macos_gip_compiled"), macosTarget && request.macosGipGamepad },
     { QStringLiteral("scanlines_optional"), true },
@@ -4458,7 +4848,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
       !createProofArchive(proofDir, QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")), error) ||
       !copyFileReplacing(QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
                          QDir(stageDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")), error)) {
-    fail(error.isEmpty() ? QStringLiteral("The final Rust GBA proof archive could not be embedded.") : error);
+    fail(error.isEmpty() ? QStringLiteral("The final gbarecomp proof archive could not be embedded.") : error);
     return;
   }
   if (macosTarget) {
@@ -4486,26 +4876,26 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
           { QStringLiteral("sign"), QStringLiteral("--p12-file"), request.certificatePath,
             QStringLiteral("--p12-password-file"), passwordPath,
             QStringLiteral("--code-signature-flags"), QStringLiteral("main:runtime"), stagedApp },
-          workspace, QStringLiteral("rcodesign sign --p12-file <certificate> <Rust GBA app>"),
+          workspace, QStringLiteral("rcodesign sign --p12-file <certificate> <gbarecomp app>"),
           10 * 60 * 1000)) {
         QFile::remove(passwordPath);
-        fail(QStringLiteral("The Rust GBA app could not be signed with the selected PFX."));
+        fail(QStringLiteral("The gbarecomp app could not be signed with the selected PFX."));
         return;
       }
       QFile::remove(passwordPath);
     } else if (!runCommand(QStringLiteral("/usr/bin/codesign"),
                            { QStringLiteral("--force"), QStringLiteral("--deep"),
                              QStringLiteral("--sign"), QStringLiteral("-"), stagedApp },
-                           workspace, QStringLiteral("codesign --force --deep --sign - <Rust GBA app>"),
+                           workspace, QStringLiteral("codesign --force --deep --sign - <gbarecomp app>"),
                            5 * 60 * 1000)) {
-      fail(QStringLiteral("The Rust GBA app could not be ad-hoc signed."));
+      fail(QStringLiteral("The gbarecomp app could not be ad-hoc signed."));
       return;
     }
     if (!runCommand(QStringLiteral("/usr/bin/codesign"),
                     { QStringLiteral("--verify"), QStringLiteral("--deep"),
                       QStringLiteral("--strict"), stagedApp }, workspace,
-                    QStringLiteral("codesign --verify --deep --strict <Rust GBA app>"), 60000)) {
-      fail(QStringLiteral("The staged Rust GBA app failed code-signature verification."));
+                    QStringLiteral("codesign --verify --deep --strict <gbarecomp app>"), 60000)) {
+      fail(QStringLiteral("The staged gbarecomp app failed code-signature verification."));
       return;
     }
   }
@@ -4514,10 +4904,10 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     fail(error);
     return;
   }
-  emit logLine(QStringLiteral("Verified Rust GBA executable SHA-256: %1")
+  emit logLine(QStringLiteral("Verified gbarecomp executable SHA-256: %1")
                  .arg(sealedExecutableHash));
 
-  nextStage(QStringLiteral("Deliver Rust GBA package"));
+  nextStage(QStringLiteral("Deliver gbarecomp package"));
   const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
   bool delivered = false;
   if (request.exportAsZip) {
@@ -4529,7 +4919,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   }
   if (!delivered) {
     if (cancellationRequested()) cancelledOut();
-    else fail(error.isEmpty() ? QStringLiteral("The Rust GBA package could not be delivered.") : error);
+    else fail(error.isEmpty() ? QStringLiteral("The gbarecomp package could not be delivered.") : error);
     return;
   }
   if (!request.exportAsZip) {
@@ -4537,11 +4927,11 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
       ? QDir(output).filePath(QStringLiteral("Contents/MacOS/") + bundleName)
       : QDir(output).filePath(bundleName + (windowsTarget ? QStringLiteral(".exe") : QString()));
     if (sha256File(deliveredExecutable, error) != sealedExecutableHash) {
-      fail(error.isEmpty() ? QStringLiteral("The delivered Rust GBA executable changed during publication.") : error);
+      fail(error.isEmpty() ? QStringLiteral("The delivered gbarecomp executable changed during publication.") : error);
       return;
     }
   }
-  emit logLine(QStringLiteral("Rust GBA package created: %1").arg(output));
+  emit logLine(QStringLiteral("gbarecomp package created: %1").arg(output));
   QDir(workspace).removeRecursively();
   emit completed(output);
 }

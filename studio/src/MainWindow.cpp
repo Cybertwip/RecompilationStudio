@@ -237,13 +237,6 @@ MainWindow::MainWindow(QWidget* parent)
   inputLayout->addWidget(platformRow);
   platformRow->setVisible(true);
 
-  nativeExecution_ = new QCheckBox(QStringLiteral("Native"), inputCard_);
-  nativeExecution_->setObjectName(QStringLiteral("nativeExecutionCheckBox"));
-  nativeExecution_->setToolTip(
-    QStringLiteral("Virtua ARM only: use gba-rust to recompile the cartridge ahead of time and link the generated ARM code into the MVII .virtua application."));
-  nativeExecution_->setVisible(false);
-  inputLayout->addWidget(nativeExecution_);
-
   useCi_ = new QCheckBox(QStringLiteral("Use CI"), inputCard_);
   useCi_->setObjectName(QStringLiteral("useCiCheckBox"));
   useCi_->setToolTip(
@@ -524,7 +517,6 @@ MainWindow::MainWindow(QWidget* parent)
   connect(biosPatchEnabled_, &QCheckBox::toggled, this, &MainWindow::updateBiosPatchControls);
   connect(skipBiosBoot_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
   connect(macosGipGamepad_, &QCheckBox::toggled, this, &MainWindow::updateBuildButton);
-  connect(nativeExecution_, &QCheckBox::toggled, this, &MainWindow::updatePlatformControls);
   connect(exportAsZip_, &QCheckBox::toggled, this, &MainWindow::updatePlatformControls);
   connect(exportModeCombo_, &QComboBox::currentIndexChanged,
           this, &MainWindow::updateExportMode);
@@ -840,8 +832,6 @@ void MainWindow::loadSettings() {
   skipBiosBoot_->setChecked(settings.value(QStringLiteral("runtime/skip_bios_boot"), false).toBool());
   macosGipGamepad_->setChecked(
     settings.value(QStringLiteral("runtime/macos_gip_gamepad"), true).toBool());
-  nativeExecution_->setChecked(
-    settings.value(QStringLiteral("runtime/gba_virtua_native"), false).toBool());
   exportAsZip_->setChecked(settings.value(QStringLiteral("export/as_zip"), true).toBool());
   const QString exportMode = settings.value(
     QStringLiteral("export/mode"), exportModeKey(ExportMode::Build)).toString();
@@ -909,7 +899,7 @@ void MainWindow::saveSettings() const {
   settings.setValue(QStringLiteral("runtime/skip_bios_boot"), skipBiosBoot_->isChecked());
   settings.remove(QStringLiteral("runtime/pad_mode"));
   settings.setValue(QStringLiteral("runtime/macos_gip_gamepad"), macosGipGamepad_->isChecked());
-  settings.setValue(QStringLiteral("runtime/gba_virtua_native"), nativeExecution_->isChecked());
+  settings.remove(QStringLiteral("runtime/gba_virtua_native"));
   settings.setValue(QStringLiteral("export/as_zip"), exportAsZip_->isChecked());
   settings.setValue(QStringLiteral("export/mode"), exportModeCombo_->currentData().toString());
   settings.setValue(QStringLiteral("export/use_ci"), useCi_->isChecked());
@@ -1295,13 +1285,13 @@ void MainWindow::updateSystemControls() {
   headerTitle_->setText(gba ? QStringLiteral("Build a native Game Boy Advance app")
                             : QStringLiteral("Build a native PlayStation app"));
   headerSubtitle_->setText(gba
-    ? QStringLiteral("One workflow for self-contained ARM/THUMB recompilation, native compilation, and platform packaging — no Ghidra step.")
+    ? QStringLiteral("One workflow for Ghidra-seeded ARM/THUMB static recompilation, native compilation, and platform packaging.")
     : QStringLiteral("One workflow for disc analysis, evidence-backed source generation, native compilation, and platform packaging."));
   if (discLabel_) discLabel_->setText(gba ? QStringLiteral("GBA ROM") : QStringLiteral("Disc BIN/CUE"));
   discEdit_->setPlaceholderText(gba ? QStringLiteral("One .gba cartridge image")
                                     : QStringLiteral("One .cue and all referenced .bin files"));
-  if (biosLabel_) biosLabel_->setText(gba ? QStringLiteral("GBA BIOS (required for package)") : QStringLiteral("PlayStation BIOS"));
-  biosEdit_->setPlaceholderText(gba ? QStringLiteral("Canonical 16 KiB dump; packaged as a resource, HLE boot remains default")
+  if (biosLabel_) biosLabel_->setText(gba ? QStringLiteral("GBA BIOS (required)") : QStringLiteral("PlayStation BIOS"));
+  biosEdit_->setPlaceholderText(gba ? QStringLiteral("Canonical 16 KiB dump; statically recompiled and dispatched")
                                     : QStringLiteral("Canonical SCPH1001.BIN only"));
   batchCheck_->setToolTip(gba
     ? QStringLiteral("Scan a directory recursively and queue one export for every .gba image.")
@@ -1315,7 +1305,8 @@ void MainWindow::updateSystemControls() {
   titleEdit_->setPlaceholderText(gba ? QStringLiteral("Example: Final Fantasy VI Advance Recompiled")
                                      : QStringLiteral("Example: Evil Zone Recompiled"));
 
-  ghidraEdit_->parentWidget()->setVisible(!gba);
+  // Both systems now statically recompile from Ghidra-seeded discovery.
+  ghidraEdit_->parentWidget()->setVisible(true);
   brandingCard_->setVisible(!gba);
   skipBiosBoot_->setVisible(!gba);
   padPolicyLabel_->setVisible(!gba);
@@ -1473,9 +1464,6 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
   request.skipBiosBoot = request.system == SystemKind::PlayStation &&
                          skipBiosBoot_->isChecked();
   request.macosGipGamepad = macosGipGamepad_->isChecked();
-  request.nativeExecution = request.system == SystemKind::GameBoyAdvance &&
-                            request.targetPlatform == TargetPlatform::VirtuaArm &&
-                            nativeExecution_->isChecked();
   request.exportAsZip = exportAsZip_->isChecked();
   request.overwriteOutput = overwrite;
   return request;
@@ -1913,7 +1901,6 @@ void MainWindow::setBusy(bool busy) {
   platformCombo_->setEnabled(!busy);
   skipBiosBoot_->setEnabled(!busy);
   macosGipGamepad_->setEnabled(!busy);
-  nativeExecution_->setEnabled(!busy);
   exportAsZip_->setEnabled(!busy);
   exportModeCombo_->setEnabled(!busy);
   useCi_->setEnabled(!busy &&
@@ -1928,6 +1915,24 @@ void MainWindow::setBusy(bool busy) {
 }
 
 void MainWindow::updatePlatformControls() {
+  // A GBA package has no Virtua ARM form yet, so the entry is greyed out rather
+  // than left selectable and failing once the pipeline has already started.
+  {
+    const int virtuaIndex =
+      platformCombo_->findData(targetPlatformKey(TargetPlatform::VirtuaArm));
+    if (virtuaIndex >= 0) {
+      const bool selectable = currentSystem_ != SystemKind::GameBoyAdvance;
+      platformCombo_->setItemData(
+        virtuaIndex,
+        selectable ? QVariant(Qt::ItemIsSelectable | Qt::ItemIsEnabled) : QVariant(0),
+        Qt::UserRole - 1);
+      if (!selectable && platformCombo_->currentIndex() == virtuaIndex) {
+        const QSignalBlocker blocker(platformCombo_);
+        platformCombo_->setCurrentIndex(
+          platformCombo_->findData(targetPlatformKey(hostTargetPlatform())));
+      }
+    }
+  }
   const auto selectedPlatform =
     targetPlatformFromKey(platformCombo_->currentData().toString());
   const ExportMode exportMode =
@@ -1935,9 +1940,6 @@ void MainWindow::updatePlatformControls() {
   const bool buildMode = exportMode == ExportMode::Build;
   const bool includesMacos = selectedPlatform == TargetPlatform::MacOS ||
                              selectedPlatform == TargetPlatform::All;
-  const bool nativeAvailable = currentSystem_ == SystemKind::GameBoyAdvance &&
-                               selectedPlatform == TargetPlatform::VirtuaArm;
-  const bool nativeSelected = nativeAvailable && nativeExecution_->isChecked();
   const bool busy = cancelButton_ && cancelButton_->isEnabled();
   const bool signingRequested = buildMode && includesMacos &&
                                 signingEnabled_->isChecked();
@@ -1959,9 +1961,7 @@ void MainWindow::updatePlatformControls() {
   powerEngineEdit_->parentWidget()->setEnabled(needsVirtuaRoots && !busy);
   llvmEdit_->parentWidget()->setVisible(needsVirtuaRoots);
   llvmEdit_->parentWidget()->setEnabled(needsVirtuaRoots && !busy);
-  nativeExecution_->setVisible(nativeAvailable);
-  nativeExecution_->setEnabled(nativeAvailable && !busy);
-  biosEdit_->parentWidget()->setVisible(!nativeSelected);
+  biosEdit_->parentWidget()->setVisible(true);
   useCi_->setEnabled(buildMode && selectedPlatform != TargetPlatform::VirtuaArm && !busy);
   if (selectedPlatform == TargetPlatform::VirtuaArm && useCi_->isChecked())
     useCi_->setChecked(false);
@@ -1996,9 +1996,13 @@ void MainWindow::updatePlatformControls() {
       ? QStringLiteral("Destination for the Windows ZIP")
       : QStringLiteral("Destination for the Windows app folder"));
   } else if (selectedPlatform == TargetPlatform::VirtuaArm) {
-    signingNote_->setText(nativeSelected
-      ? QStringLiteral("Native runs gba-rust AOT generation and links the translated ARMv4T program into a cooperative ARMv7 .virtua executable with no interpreter fallback.")
-      : QStringLiteral("Enable Native to build the gba-rust AOT Virtua ARM package."));
+    signingNote_->setText(currentSystem_ == SystemKind::GameBoyAdvance
+      ? QStringLiteral(
+          "Game Boy Advance titles cannot target Virtua ARM yet: the bundled Virtua SDL "
+          "surface does not cover the gbarecomp host layer.")
+      : QStringLiteral(
+          "Virtua ARM builds link the recompiled PlayStation program into a cooperative "
+          "ARMv7 .virtua executable."));
     outputEdit_->setPlaceholderText(zip
       ? QStringLiteral("Destination for the Virtua ARM ZIP")
       : QStringLiteral("Destination for the Virtua ARM package folder"));
@@ -2040,28 +2044,20 @@ void MainWindow::updateBuildButton() {
   const bool localPlatformReady = !buildMode || useCi_->isChecked() ||
     std::all_of(selectedTargets.cbegin(), selectedTargets.cend(),
                 [this](TargetPlatform platform) {
-                  if (currentSystem_ == SystemKind::GameBoyAdvance) {
-                    if (platform == TargetPlatform::VirtuaArm)
-                      return nativeExecution_->isChecked() && targetPlatformSupportedOnHost(platform);
+                  if (currentSystem_ == SystemKind::GameBoyAdvance &&
+                      platform != TargetPlatform::VirtuaArm) {
                     return platform == hostTargetPlatform();
                   }
                   return targetPlatformSupportedOnHost(platform);
                 });
-  const bool analysisReady = currentSystem_ == SystemKind::GameBoyAdvance ||
-                             !ghidraEdit_->text().isEmpty();
-  const bool nativeGba = currentSystem_ == SystemKind::GameBoyAdvance &&
-                         selectedPlatform == TargetPlatform::VirtuaArm &&
-                         nativeExecution_->isChecked();
-  const bool biosReady = nativeGba || !biosEdit_->text().isEmpty();
-  const bool virtuaGbaModeReady = currentSystem_ != SystemKind::GameBoyAdvance ||
-                                  selectedPlatform != TargetPlatform::VirtuaArm ||
-                                  nativeExecution_->isChecked();
+  const bool analysisReady = !ghidraEdit_->text().isEmpty();
+  const bool biosReady = !biosEdit_->text().isEmpty();
   const bool needsVirtuaRoots = selectedPlatform == TargetPlatform::VirtuaArm ||
                                 selectedPlatform == TargetPlatform::All;
   const bool virtuaRootsReady = !needsVirtuaRoots ||
     (!powerEngineEdit_->text().trimmed().isEmpty() &&
      !llvmEdit_->text().trimmed().isEmpty());
-  const bool ready = gameReady && biosReady && virtuaGbaModeReady && virtuaRootsReady &&
+  const bool ready = gameReady && biosReady && virtuaRootsReady &&
                      !outputEdit_->text().isEmpty() && analysisReady &&
                      signingReady && brandingReady && ciReady && localPlatformReady;
   buildButton_->setText(QStringLiteral("Export"));

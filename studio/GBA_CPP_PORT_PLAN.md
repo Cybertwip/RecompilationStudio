@@ -2,6 +2,13 @@
 
 Date: 2026-07-22
 
+> **SUPERSEDED 2026-07-28.** Studio's GBA runtime is `extra/gbarecomp`, driven by
+> Ghidra-seeded static recompilation through `gba_recompile`. `extra/gba-rust` is
+> no longer a behavioral reference, `extra/gba++` was never adopted, and
+> constraint 4 below ("Studio GBA builds do not invoke Ghidra") is reversed: GBA
+> function discovery is now Ghidra-seeded exactly like the PlayStation flow. See
+> `studio/README.md` → "Game Boy Advance flow". This file is kept for the record.
+
 ## Objective
 
 Port the self-contained `extra/gba-rust` GBA recompilation stack into

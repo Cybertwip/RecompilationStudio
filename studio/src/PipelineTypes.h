@@ -179,7 +179,6 @@ struct PipelineRequest {
   bool biosRemoveStockPsGlyph{ true };
   bool skipBiosBoot{ false };
   bool macosGipGamepad{ true };
-  bool nativeExecution{ false };
   bool exportAsZip{ true };
   bool useCi{ false };
   QString ciBuilderId;
@@ -217,7 +216,6 @@ struct PipelineRequest {
       { QStringLiteral("bios_remove_stock_ps_glyph"), biosRemoveStockPsGlyph },
       { QStringLiteral("skip_bios_boot"), skipBiosBoot },
       { QStringLiteral("macos_gip_gamepad"), macosGipGamepad },
-      { QStringLiteral("native"), nativeExecution },
       { QStringLiteral("export_as_zip"), exportAsZip },
       { QStringLiteral("use_ci"), useCi },
       { QStringLiteral("ci_builder_id"), ciBuilderId },

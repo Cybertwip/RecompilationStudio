@@ -1,8 +1,0 @@
-[package]
-name = "input-config"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Shared input bindings: device choice and button mappings"
-
-[dependencies]

@@ -403,26 +403,116 @@ QString generatedGbaPackToml(const PipelineRequest& request,
 
 
 QString generatedGbaNativeProjectCMake(const QString& bundleName) {
-  // CXX and ASM are both required: gba-to-mvii is the C++ interpreter core and
-  // Dash contributes crt.s. The old project declared "C ASM" because all it
-  // built was a 119-line launcher stub.
   return QStringLiteral(R"CMAKE(cmake_minimum_required(VERSION 3.20)
 project(GeneratedGbaVirtuaNative C CXX ASM)
+
+# Build the host-side gba-rust recompiler, emit bounded C translation units,
+# then compile those units directly into the ARMv7 Virtua executable. The
+# emitted runtime uses a strict RtApi: a missing/unsupported native block is a
+# visible coverage defect and never falls back to the ARM7TDMI interpreter.
+find_program(GBA_CARGO NAMES cargo
+  HINTS "$ENV{CARGO_HOME}/bin" "$ENV{HOME}/.cargo/bin" REQUIRED)
+set(_GBA_RUST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/gba-rust")
+set(_GBA_CARGO_TARGET "${CMAKE_BINARY_DIR}/gba-rust-target")
+set(_GBA_AOT_WORK "${CMAKE_BINARY_DIR}/gba-aot")
+set(_GBA_AOT_OUT "${_GBA_AOT_WORK}/out")
+option(GBA_MVII_AOT_PROFILE_RAM
+  "Profile the cartridge at build time to capture RAM-resident ARM/Thumb code" ON)
+# The strict runtime has no interpreter, so native coverage is bounded by
+# how far this profile run gets: whatever the profile never reaches has no
+# native block and stops the game on the device. The recompiler's own
+# default stops shortly after audio engages, which is enough to prove a
+# cartridge boots and nowhere near enough to play one, so package builds
+# explore a full session instead. Drop a recorded input script at
+# package_inputs/profile_input.txt (recorded with `recomp play`
+# RECOMP_RECORD_INPUT) to steer that session through the game rather than
+# through the built-in demo taps.
+set(GBA_MVII_AOT_PROFILE_FRAMES "3600" CACHE STRING
+  "Game frames to explore when profiling RAM-resident code")
+set(GBA_MVII_AOT_PROFILE_INPUT
+  "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/profile_input.txt"
+  CACHE FILEPATH "Recorded input script that drives the profile run")
+file(MAKE_DIRECTORY "${_GBA_AOT_WORK}")
+if(CMAKE_HOST_WIN32)
+  set(_GBA_HOST_EXE ".exe")
+else()
+  set(_GBA_HOST_EXE "")
+endif()
+
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E env
+    "CARGO_TARGET_DIR=${_GBA_CARGO_TARGET}"
+    "RECOMP_DISABLE_GIP=1"
+    "${GBA_CARGO}" build
+      --manifest-path "${_GBA_RUST_ROOT}/Cargo.toml"
+      --release --locked --package recomp
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  RESULT_VARIABLE _GBA_RECOMP_BUILD_RC)
+if(NOT _GBA_RECOMP_BUILD_RC EQUAL 0)
+  message(FATAL_ERROR "Could not build the host gba-rust recompiler")
+endif()
+set(_GBA_RECOMP "${_GBA_CARGO_TARGET}/release/recomp${_GBA_HOST_EXE}")
+if(NOT EXISTS "${_GBA_RECOMP}")
+  message(FATAL_ERROR "gba-rust recompiler was not produced: ${_GBA_RECOMP}")
+endif()
+
+file(REMOVE_RECURSE "${_GBA_AOT_OUT}")
+set(_GBA_RECOMP_ARGS build
+  "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba"
+  --gamedb "${_GBA_RUST_ROOT}/gamedb.sqlite")
+if(GBA_MVII_AOT_PROFILE_RAM)
+  list(APPEND _GBA_RECOMP_ARGS --ram
+       --profile-frames "${GBA_MVII_AOT_PROFILE_FRAMES}")
+  if(EXISTS "${GBA_MVII_AOT_PROFILE_INPUT}")
+    list(APPEND _GBA_RECOMP_ARGS --input "${GBA_MVII_AOT_PROFILE_INPUT}")
+    message(STATUS "gba-rust AOT: profiling ${GBA_MVII_AOT_PROFILE_FRAMES} frames"
+                   " of ${GBA_MVII_AOT_PROFILE_INPUT}")
+  else()
+    message(STATUS "gba-rust AOT: profiling ${GBA_MVII_AOT_PROFILE_FRAMES} frames"
+                   " of demo input (no package_inputs/profile_input.txt)")
+  endif()
+endif()
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E env
+    "RECOMP_EMIT_ONLY=1"
+    "RECOMP_KEEP_C=1"
+    "RECOMP_DISABLE_CHAIN_GROUPS=1"
+    "RECOMP_EXHAUSTIVE=1"
+    "${_GBA_RECOMP}" ${_GBA_RECOMP_ARGS}
+  WORKING_DIRECTORY "${_GBA_AOT_WORK}"
+  RESULT_VARIABLE _GBA_AOT_RC)
+if(NOT _GBA_AOT_RC EQUAL 0)
+  message(FATAL_ERROR "gba-rust could not emit the ARMv4T native translation")
+endif()
+file(GLOB _GBA_NATIVE_C CONFIGURE_DEPENDS "${_GBA_AOT_OUT}/*.c")
+list(LENGTH _GBA_NATIVE_C _GBA_NATIVE_UNIT_COUNT)
+if(_GBA_NATIVE_UNIT_COUNT EQUAL 0)
+  message(FATAL_ERROR "gba-rust emitted no native C translation units")
+endif()
+message(STATUS "gba-rust AOT: ${_GBA_NATIVE_UNIT_COUNT} generated C units")
+
 set(GBA_MVII_OUTPUT_NAME %1)
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/gba-to-mvii" "${CMAKE_BINARY_DIR}/gba-to-mvii")
+set(GBA_MVII_NATIVE_SOURCES ${_GBA_NATIVE_C})
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/gba-to-mvii"
+                 "${CMAKE_BINARY_DIR}/gba-to-mvii")
+
 set(_GBA_STAGE "${CMAKE_BINARY_DIR}/steganos-package/gba-runtime/$<CONFIG>")
 set(_GBA_STAMP "${CMAKE_BINARY_DIR}/gba-virtua-package.stamp")
 add_custom_command(OUTPUT "${_GBA_STAMP}"
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_GBA_STAGE}"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${_GBA_STAGE}"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${GBA_TO_MVII_VIRTUA_FILE}" "${_GBA_STAGE}/%2.virtua"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png" "${_GBA_STAGE}/AppIcon.png"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba" "${_GBA_STAGE}/game.gba"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json" "${_GBA_STAGE}/game.manifest.json"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip" "${_GBA_STAGE}/PSXRecomp-Proof.zip"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${GBA_TO_MVII_VIRTUA_FILE}" "${_GBA_STAGE}/%2.virtua"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png" "${_GBA_STAGE}/AppIcon.png"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba" "${_GBA_STAGE}/game.gba"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json" "${_GBA_STAGE}/game.manifest.json"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_CURRENT_SOURCE_DIR}/PSXRecomp-Proof.zip" "${_GBA_STAGE}/PSXRecomp-Proof.zip"
   COMMAND ${CMAKE_COMMAND} -E touch "${_GBA_STAMP}"
-  DEPENDS gba-to-mvii
-          "${GBA_TO_MVII_VIRTUA_FILE}"
+  DEPENDS gba-to-mvii "${GBA_TO_MVII_VIRTUA_FILE}" ${_GBA_NATIVE_C}
           "${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png"
           "${CMAKE_CURRENT_SOURCE_DIR}/package_inputs/game.gba"
           "${CMAKE_CURRENT_SOURCE_DIR}/game.manifest.json"

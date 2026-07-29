@@ -250,11 +250,15 @@ int main(int argc, char** argv) {
   const QString gbaNativeCmake = psxstudio::generatedGbaNativeProjectCMake(
     QStringLiteral("Studio Test Advance"));
   check(!gbaNativeCmake.contains(QStringLiteral("set(VIRTUA_ROOT")) &&
+          gbaNativeCmake.contains(QStringLiteral("RECOMP_EMIT_ONLY=1")) &&
+          gbaNativeCmake.contains(QStringLiteral("RECOMP_DISABLE_CHAIN_GROUPS=1")) &&
+          gbaNativeCmake.contains(QStringLiteral("GBA_MVII_NATIVE_SOURCES")) &&
+          gbaNativeCmake.contains(QStringLiteral("${_GBA_RUST_ROOT}/gamedb.sqlite")) &&
           gbaNativeCmake.contains(QStringLiteral("add_subdirectory(")) &&
           gbaNativeCmake.contains(QStringLiteral("AppIcon.png")) &&
           gbaNativeCmake.contains(QStringLiteral("Studio Test Advance.virtua")) &&
           gbaNativeCmake.contains(QStringLiteral("add_custom_target(gba-runtime")),
-        QStringLiteral("generated native GBA CMake consumes external PowerEngine bindings"));
+        QStringLiteral("generated native GBA CMake emits and links gba-rust AOT code"));
   const QString gbaProject = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-project"));
   const QString gbaBuild = QDir(temp.path()).filePath(QStringLiteral("generated-gba-rust-build"));
   check(psxstudio::writeText(QDir(gbaProject).filePath(QStringLiteral("CMakeLists.txt")),

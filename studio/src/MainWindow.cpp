@@ -240,7 +240,7 @@ MainWindow::MainWindow(QWidget* parent)
   nativeExecution_ = new QCheckBox(QStringLiteral("Native"), inputCard_);
   nativeExecution_->setObjectName(QStringLiteral("nativeExecutionCheckBox"));
   nativeExecution_->setToolTip(
-    QStringLiteral("Virtua ARM only: emit a tiny syscall launcher that submits the packaged ARM ROM directly to MVII native execution instead of translating it."));
+    QStringLiteral("Virtua ARM only: use gba-rust to recompile the cartridge ahead of time and link the generated ARM code into the MVII .virtua application."));
   nativeExecution_->setVisible(false);
   inputLayout->addWidget(nativeExecution_);
 
@@ -1997,8 +1997,8 @@ void MainWindow::updatePlatformControls() {
       : QStringLiteral("Destination for the Windows app folder"));
   } else if (selectedPlatform == TargetPlatform::VirtuaArm) {
     signingNote_->setText(nativeSelected
-      ? QStringLiteral("Native emits a cooperative ARM .virtua launcher that opens game.gba and submits it through the versioned MVII native bridge ABI.")
-      : QStringLiteral("Enable Native to emit the MVII runtime bridge. GBA ROM recompilation is intentionally not used for Virtua ARM."));
+      ? QStringLiteral("Native runs gba-rust AOT generation and links the translated ARMv4T program into a cooperative ARMv7 .virtua executable with no interpreter fallback.")
+      : QStringLiteral("Enable Native to build the gba-rust AOT Virtua ARM package."));
     outputEdit_->setPlaceholderText(zip
       ? QStringLiteral("Destination for the Virtua ARM ZIP")
       : QStringLiteral("Destination for the Virtua ARM package folder"));

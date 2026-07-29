@@ -66,7 +66,13 @@ using gbamvii::logf;
 // worst-case slice overrun of about a tenth of a slice. See the note on
 // yield_now(): whether the slice is actually spent stays the kernel's decision,
 // and this only changes how often it is asked.
+#if defined(GBA_MVII_NATIVE_AOT)
+// One generated block per dispatch (the Studio emitter disables cross-block
+// goto chaining), so this is a real cooperative bound rather than a hint.
+constexpr uint32_t kBlocksPerYield = 256;
+#else
 constexpr uint32_t kStepsPerYield = 2048;
+#endif
 
 // Consecutive yields with no frame in sight before the loop stops trusting the
 // frame boundary to poll input. See the note at the use site.
@@ -77,8 +83,14 @@ constexpr uint32_t kStepsPerYield = 2048;
 // while the emulator is making progress. The max() keeps it at one slice
 // minimum if kStepsPerYield ever grows past the whole budget.
 constexpr uint32_t kStallPollInstructions = 262144;
+#if defined(GBA_MVII_NATIVE_AOT)
+// Roughly 8-16 guest instructions per generated block in normal cartridge
+// code, so 128 dispatch slices remains comfortably beyond two GBA frames.
+constexpr uint32_t kStallPollSlices = 128;
+#else
 constexpr uint32_t kStallPollSlices =
     kStallPollInstructions / kStepsPerYield > 1 ? kStallPollInstructions / kStepsPerYield : 1;
+#endif
 
 // The GBA's real refresh: 16777216 / (308 * 228 * 4) = 59.727 Hz.
 constexpr uint64_t kFrameUs = 16743;
@@ -777,10 +789,20 @@ int Runtime::run() {
     audio_.open(rate, 2);   // the core mixes interleaved stereo
     gba_mvii_set_keys(machine_, input_.keyinput());
 
-    logf("gba: running (%ux%u, audio %u Hz %s)\n",
+    logf("gba: running (%ux%u, audio %u Hz %s%s)\n",
          static_cast<unsigned>(gba_mvii_screen_width()),
          static_cast<unsigned>(gba_mvii_screen_height()),
-         static_cast<unsigned>(rate), audio_.enabled() ? "stereo" : "off");
+         static_cast<unsigned>(rate), audio_.enabled() ? "stereo" : "off",
+#if defined(GBA_MVII_NATIVE_AOT)
+         " · gba-rust AOT native"
+#else
+         " · interpreter"
+#endif
+    );
+#if defined(GBA_MVII_NATIVE_AOT)
+    logf("gba: linked %u native blocks; interpreter fallback disabled\n",
+         static_cast<unsigned>(gba_mvii_native_block_count()));
+#endif
 
     log_host_calibration();
     const uint32_t profiler_clock_ns = gba_mvii_prof_calibrate();
@@ -798,7 +820,20 @@ int Runtime::run() {
     while (running_) {
         // Bounded work, then a turn for everything else. run_steps returns as
         // soon as the PPU finishes a frame, so this never overshoots one.
+#if defined(GBA_MVII_NATIVE_AOT)
+        const uint32_t run_status = gba_mvii_run_native_blocks(machine_, kBlocksPerYield);
+        if (run_status == 2u) {
+            const uint32_t miss = gba_mvii_native_miss_key();
+            note("NATIVE COVERAGE MISS AT %08X (%s)",
+                 static_cast<unsigned>(miss & ~1u),
+                 (miss & 1u) ? "THUMB" : "ARM");
+            running_ = false;
+            break;
+        }
+        const uint32_t frame_ready = run_status;
+#else
         const uint32_t frame_ready = gba_mvii_run_steps(machine_, kStepsPerYield);
+#endif
         ++slices_;
         if ((frames_ & 63u) == 0u) {
             const uint64_t y0 = gbamvii::now_us();

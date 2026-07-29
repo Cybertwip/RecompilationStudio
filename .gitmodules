@@ -7,3 +7,6 @@
 [submodule "extra/vita2hos"]
 	path = extra/vita2hos
 	url = git@github.com:xerpi/vita2hos.git
+[submodule "extra/gbarecomp"]
+	path = extra/gbarecomp
+	url = git@github.com:mstan/gbarecomp.git

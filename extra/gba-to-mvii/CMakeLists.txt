@@ -71,6 +71,14 @@ endif()
 if(NOT DEFINED GBA_MVII_STAGE_DIR)
     set(GBA_MVII_STAGE_DIR "")
 endif()
+if(NOT DEFINED GBA_MVII_NATIVE_SOURCES)
+    set(GBA_MVII_NATIVE_SOURCES "")
+endif()
+if(GBA_MVII_NATIVE_SOURCES)
+    set(GBA_MVII_NATIVE_AOT ON)
+else()
+    set(GBA_MVII_NATIVE_AOT OFF)
+endif()
 
 include("${VIRTUA_POWERENGINE_VIRTUA_ROOT}/CMake/GoTooling.cmake")
 
@@ -103,6 +111,11 @@ file(GLOB_RECURSE _gba_rust_sources CONFIGURE_DEPENDS
     "${GBA_MVII_RUST}/*.rs"
     "${GBA_MVII_RUST}/*.toml")
 
+set(_gba_cargo_feature_args)
+if(GBA_MVII_NATIVE_AOT)
+    list(APPEND _gba_cargo_feature_args --features native-aot)
+endif()
+
 add_custom_command(
     OUTPUT "${GBA_MVII_RUST_LIB}"
     # --locked and --offline together: the workspace has no external
@@ -113,6 +126,7 @@ add_custom_command(
         --locked
         --offline
         --package gba-mvii
+        ${_gba_cargo_feature_args}
         --target "${VIRTUA_ARM_TARGET_TRIPLE}"
         --target-dir "${_gba_cargo_dir}"
     # From rust/, so cargo picks up rust/.cargo/config.toml — which carries the
@@ -136,6 +150,7 @@ add_custom_target(gba-to-mvii-core DEPENDS "${GBA_MVII_RUST_LIB}")
 set(_mvii_sources
     "${GBA_MVII_SRC}/mvii/main.cpp"
     "${GBA_MVII_SRC}/mvii/mvii_platform.cpp"
+    ${GBA_MVII_NATIVE_SOURCES}
     # Not part of R-Dash's own source list, but libc++/llvm-libc in the sysroot
     # is linked against it: errno, the stdio cookies, clock_gettime, usleep,
     # sched_yield, getenv. Every Virtua C++ app has to compile this in.
@@ -210,6 +225,16 @@ target_compile_definitions(gba-to-mvii-elf PRIVATE
     _LIBCPP_HAS_NO_THREADS
     _LIBCPP_DISABLE_AVAILABILITY
     _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE)
+if(GBA_MVII_NATIVE_AOT)
+    target_compile_definitions(gba-to-mvii-elf PRIVATE GBA_MVII_NATIVE_AOT=1)
+    # gba-rust deliberately shards very large translations and uses modest
+    # optimization: full -O3 on hundreds of megabytes of generated C turns
+    # packaging into an hours-long, memory-heavy compiler benchmark. The hot
+    # operations are already explicit C; -O1 preserves the native speedup while
+    # keeping per-unit compilation bounded.
+    set_source_files_properties(${GBA_MVII_NATIVE_SOURCES}
+        PROPERTIES COMPILE_OPTIONS "-O1")
+endif()
 
 target_compile_options(gba-to-mvii-elf PRIVATE
     "--target=${VIRTUA_ARM_TARGET_TRIPLE}"

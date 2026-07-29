@@ -963,7 +963,7 @@ void PipelineWorker::run(PipelineRequest request) {
       if (request.nativeExecution) {
         runGbaNative(request);
       } else {
-        emit failed(QStringLiteral("Virtua ARM GBA exports require the Native option; ARM ROM recompilation is intentionally not part of this target."), {});
+        emit failed(QStringLiteral("Virtua ARM GBA exports require Native so gba-rust can emit and link the ARMv4T AOT translation."), {});
       }
     } else {
       runGba(request);
@@ -3641,13 +3641,17 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   const QString virtuaSupportRoot =
     QDir(request.frameworkRoot).filePath(QStringLiteral("extra/virtua"));
   const QString runtimeRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-to-mvii"));
+  const QString gbaRustRoot = QDir(request.frameworkRoot).filePath(QStringLiteral("extra/gba-rust"));
   if (!QFileInfo(QDir(virtuaSupportRoot).filePath(
         QStringLiteral("CMake/VirtuaArmToolchain.cmake"))).isFile() ||
       !QFileInfo(QDir(virtuaSupportRoot).filePath(
         QStringLiteral("CMake/VirtuaPowerEngine.cmake"))).isFile() ||
       !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("CMakeLists.txt"))).isFile() ||
-      !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("src/mvii/main.cpp"))).isFile()) {
-    fail(QStringLiteral("The framework does not contain the Virtua integration and gba-to-mvii runtime."));
+      !QFileInfo(QDir(runtimeRoot).filePath(QStringLiteral("src/mvii/main.cpp"))).isFile() ||
+      !QFileInfo(QDir(gbaRustRoot).filePath(QStringLiteral("Cargo.toml"))).isFile() ||
+      !QFileInfo(QDir(gbaRustRoot).filePath(QStringLiteral("crates/recomp-core/src/emit.rs"))).isFile() ||
+      !QFileInfo(QDir(gbaRustRoot).filePath(QStringLiteral("gamedb.sqlite"))).isFile()) {
+    fail(QStringLiteral("The framework does not contain gba-rust, gba-to-mvii, and the Virtua integration."));
     return;
   }
   if (!isPowerEngineRoot(request.powerEngineRoot)) {
@@ -3662,22 +3666,26 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
   const QString git = findExecutable(QStringLiteral("git"));
   const QString ninja = localBuild ? findExecutable(QStringLiteral("ninja")) : QString();
   const QString go = localBuild ? findExecutable(QStringLiteral("go")) : QString();
-  if (cmake.isEmpty() || git.isEmpty() || (localBuild && (ninja.isEmpty() || go.isEmpty()))) {
-    fail(QStringLiteral("Virtua ARM native exports require CMake and Git; local builds also require Ninja and Go."));
+  const QString cargo = localBuild ? findExecutable(QStringLiteral("cargo")) : QString();
+  if (cmake.isEmpty() || git.isEmpty() ||
+      (localBuild && (ninja.isEmpty() || go.isEmpty() || cargo.isEmpty()))) {
+    fail(QStringLiteral("Virtua ARM native exports require CMake and Git; local builds also require Ninja, Go, and Cargo."));
     return;
   }
 
   const QString romSha256 = sha256File(request.romPath, error);
   const QString runtimeSha256 = sha256File(
     QDir(runtimeRoot).filePath(QStringLiteral("src/mvii/main.cpp")), error);
-  if (romSha256.isEmpty() || runtimeSha256.isEmpty()) {
+  const QString recompilerSha256 = sha256File(
+    QDir(gbaRustRoot).filePath(QStringLiteral("crates/recomp-core/src/emit.rs")), error);
+  if (romSha256.isEmpty() || runtimeSha256.isEmpty() || recompilerSha256.isEmpty()) {
     fail(error.isEmpty() ? QStringLiteral("The native GBA inputs could not be hashed.") : error);
     return;
   }
   emit logLine(QStringLiteral("GBA ROM: %1 · %2 · %3 bytes · cartridge entry 0x08000000")
     .arg(game.title, game.gameCode).arg(game.romSize));
-  emit logLine(QStringLiteral("gba-to-mvii runtime: ARM7TDMI interpreter + standalone BIOS HLE · main.cpp SHA-256 %1")
-    .arg(runtimeSha256));
+  emit logLine(QStringLiteral("gba-rust native AOT + gba-to-mvii hardware runtime · emitter SHA-256 %1 · runtime SHA-256 %2")
+    .arg(recompilerSha256, runtimeSha256));
 
   nextStage(QStringLiteral("Create Virtua ARM native source repository"));
   const QString root = QDir::tempPath();
@@ -3697,6 +3705,8 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
                            QDir(projectDir).filePath(QStringLiteral("virtua")), error) ||
       !copySourceDirectory(runtimeRoot,
                            QDir(projectDir).filePath(QStringLiteral("gba-to-mvii")), error) ||
+      !copySourceDirectory(gbaRustRoot,
+                           QDir(projectDir).filePath(QStringLiteral("gba-rust")), error) ||
       !copyFileReplacing(request.romPath,
                          QDir(inputsDir).filePath(QStringLiteral("game.gba")), error) ||
       !createPngIcon(iconSourcePath,
@@ -3707,15 +3717,17 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
 
   QJsonObject manifest = gameManifestForRequest(request);
   manifest.insert(QStringLiteral("system"), QStringLiteral("gba"));
-  manifest.insert(QStringLiteral("execution"), QStringLiteral("native-arm"));
+  manifest.insert(QStringLiteral("execution"), QStringLiteral("gba-rust-aot-arm"));
   manifest.insert(QStringLiteral("rom"), QStringLiteral("game.gba"));
   const QJsonObject inputProof{
     { QStringLiteral("schema"), 2 },
     { QStringLiteral("system"), QStringLiteral("gba") },
-    { QStringLiteral("execution"), QStringLiteral("native-arm") },
-    { QStringLiteral("guest_kind"), QStringLiteral("MVII_GBA_INTERPRETER_ARM7TDMI") },
-    { QStringLiteral("runtime"), QStringLiteral("gba-to-mvii") },
+    { QStringLiteral("execution"), QStringLiteral("gba-rust-aot-arm") },
+    { QStringLiteral("guest_kind"), QStringLiteral("GBA_RUST_AOT_ARMV4T") },
+    { QStringLiteral("runtime"), QStringLiteral("gba-rust-aot+gba-to-mvii") },
+    { QStringLiteral("interpreter_fallback"), false },
     { QStringLiteral("runtime_main_sha256"), runtimeSha256 },
+    { QStringLiteral("recompiler_emitter_sha256"), recompilerSha256 },
     { QStringLiteral("name"), request.windowTitle },
     { QStringLiteral("icon"), QStringLiteral("AppIcon.png") },
     { QStringLiteral("custom_icon"), !request.iconPath.trimmed().isEmpty() },
@@ -3725,13 +3737,13 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     { QStringLiteral("entry"), QStringLiteral("0x08000000") },
   };
   const QString readme = QStringLiteral(
-    "# %1 — GBA for MVII / Virtua ARM\n\n"
-    "This source export builds a cooperative ARM `.virtua` executable containing "
-    "the `gba-to-mvii` runtime: an ARM7TDMI interpreter, the GBA device model "
-    "(PPU, APU, DMA, timers, IRQ, save chip), and a standalone BIOS HLE, driven "
-    "against MVII's `/dev/fb0`, `/dev/input0` and `/dev/dac0`. No BIOS image is "
-    "required and no ROM code is translated ahead of time — `game.gba` is "
-    "interpreted as it runs.\n\n"
+    "# %1 — Native GBA for MVII / Virtua ARM\n\n"
+    "This source export uses `gba-rust` to analyze the selected ARMv4T cartridge "
+    "ahead of time, emit bounded C translation units, and compile those units "
+    "directly into the cooperative ARMv7 `.virtua` executable. `gba-to-mvii` "
+    "provides only the GBA hardware model and MVII device glue. The device build "
+    "has no ARM7TDMI interpreter fallback: an uncovered or unsupported guest PC "
+    "is reported as a native coverage defect.\n\n"
     "## Build\n\n"
     "The generated source does not vendor PowerEngine. Pass the canonical "
     "PowerEngine checkout and its LLVM/compiler bundle explicitly. Dash, the "
@@ -3886,9 +3898,9 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
                     QStringLiteral("gba-runtime"), QStringLiteral("--parallel"),
                     QString::number(std::max(1, QThread::idealThreadCount())) },
                   workspace, QStringLiteral("cmake --build <build> --target gba-runtime"),
-                  20 * 60 * 1000)) {
+                  4 * 60 * 60 * 1000)) {
     if (cancellationRequested()) cancelledOut();
-    else fail(QStringLiteral("The Virtua ARM native launcher could not be built."));
+    else fail(QStringLiteral("The gba-rust Virtua ARM native runtime could not be built."));
     return;
   }
 
@@ -3919,7 +3931,13 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     return;
   }
   const QString executableHash = sha256File(executable, error);
-  if (executableHash.isEmpty()) { fail(error); return; }
+  const QDir aotOut(QDir(buildDir).filePath(QStringLiteral("gba-aot/out")));
+  const QStringList aotUnits = aotOut.entryList({ QStringLiteral("*.c") }, QDir::Files, QDir::Name);
+  if (executableHash.isEmpty() || aotUnits.isEmpty()) {
+    fail(executableHash.isEmpty() ? error
+                                  : QStringLiteral("The gba-rust AOT build emitted no C translation units."));
+    return;
+  }
   const QJsonObject buildProof{
     { QStringLiteral("schema"), 2 },
     { QStringLiteral("format"), QStringLiteral("virtua-v3") },
@@ -3928,8 +3946,11 @@ void PipelineWorker::runGbaNative(const PipelineRequest& request) {
     { QStringLiteral("executable"), QFileInfo(executable).fileName() },
     { QStringLiteral("executable_sha256"), executableHash },
     { QStringLiteral("rom_sha256"), romSha256 },
-    { QStringLiteral("runtime"), QStringLiteral("gba-to-mvii") },
+    { QStringLiteral("runtime"), QStringLiteral("gba-rust-aot+gba-to-mvii") },
     { QStringLiteral("runtime_main_sha256"), runtimeSha256 },
+    { QStringLiteral("recompiler_emitter_sha256"), recompilerSha256 },
+    { QStringLiteral("aot_units"), aotUnits.size() },
+    { QStringLiteral("interpreter_fallback"), false },
     { QStringLiteral("executed_during_verification"), false },
   };
   if (!writeJson(QDir(proofDir).filePath(QStringLiteral("gba_native_build.json")),

@@ -74,6 +74,16 @@ void gba_mvii_set_keys(GbaMvii* machine, uint16_t keyinput);
 // Run at most `steps` instructions, stopping early when a frame completes.
 // Returns 1 if a completed frame is waiting to be presented.
 uint32_t gba_mvii_run_steps(GbaMvii* machine, uint32_t steps);
+
+#ifdef GBA_MVII_NATIVE_AOT
+// Strict static gba-rust AOT path: 0 bounded progress, 1 frame ready,
+// 2 native coverage miss. No normal guest instruction is interpreted.
+uint32_t gba_mvii_run_native_blocks(GbaMvii* machine, uint32_t blocks);
+uint32_t gba_mvii_native_block_count(void);
+// Guest address with bit 0 = Thumb for the last coverage miss.
+uint32_t gba_mvii_native_miss_key(void);
+#endif
+
 // Acknowledge that frame, after presenting it.
 void gba_mvii_frame_consume(GbaMvii* machine);
 

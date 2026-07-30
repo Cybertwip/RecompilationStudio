@@ -154,37 +154,7 @@ int vwine_elf_load(const void* data, size_t size, const char* name,
             (const Vwine_Elf32_Dyn*)(out->load_bias + (uintptr_t)ph[i].p_vaddr);
         break;
     }
-    out->syment = sizeof(Vwine_Elf32_Sym);
-    if (out->dynamic) {
-        for (const Vwine_Elf32_Dyn* d = out->dynamic; d->d_tag != VWINE_DT_NULL; ++d) {
-            switch (d->d_tag) {
-            case VWINE_DT_SYMTAB:
-                out->symtab = (const Vwine_Elf32_Sym*)(out->load_bias + d->d_un.d_ptr);
-                break;
-            case VWINE_DT_STRTAB:
-                out->strtab = (const char*)(out->load_bias + d->d_un.d_ptr);
-                break;
-            case VWINE_DT_STRSZ:   out->strtab_size = d->d_un.d_val; break;
-            case VWINE_DT_SYMENT:  out->syment = d->d_un.d_val; break;
-            case VWINE_DT_INIT:    out->init_func = out->load_bias + d->d_un.d_ptr; break;
-            case VWINE_DT_FINI:    out->fini_func = out->load_bias + d->d_un.d_ptr; break;
-            case VWINE_DT_INIT_ARRAY:
-                out->init_array = out->load_bias + d->d_un.d_ptr;
-                break;
-            case VWINE_DT_FINI_ARRAY:
-                out->fini_array = out->load_bias + d->d_un.d_ptr;
-                break;
-            case VWINE_DT_INIT_ARRAYSZ:
-                out->init_array_count = d->d_un.d_val / sizeof(uint32_t);
-                break;
-            case VWINE_DT_FINI_ARRAYSZ:
-                out->fini_array_count = d->d_un.d_val / sizeof(uint32_t);
-                break;
-            default: break;
-            }
-        }
-        if (out->syment == 0) out->syment = sizeof(Vwine_Elf32_Sym);
-    }
+    vwine_image_scan_dynamic(out);
 
     out->entry = out->load_bias + (uintptr_t)eh->e_entry;
 
@@ -192,6 +162,43 @@ int vwine_elf_load(const void* data, size_t size, const char* name,
                name ? name : "image", out->mapping.base, span,
                (unsigned long)out->load_bias, (void*)out->entry);
     return 0;
+}
+
+void vwine_image_scan_dynamic(vwine_image* image)
+{
+    if (!image) return;
+
+    image->syment = sizeof(Vwine_Elf32_Sym);
+    if (!image->dynamic) return;
+
+    for (const Vwine_Elf32_Dyn* d = image->dynamic; d->d_tag != VWINE_DT_NULL; ++d) {
+        switch (d->d_tag) {
+        case VWINE_DT_SYMTAB:
+            image->symtab = (const Vwine_Elf32_Sym*)(image->load_bias + d->d_un.d_ptr);
+            break;
+        case VWINE_DT_STRTAB:
+            image->strtab = (const char*)(image->load_bias + d->d_un.d_ptr);
+            break;
+        case VWINE_DT_STRSZ:   image->strtab_size = d->d_un.d_val; break;
+        case VWINE_DT_SYMENT:  image->syment = d->d_un.d_val; break;
+        case VWINE_DT_INIT:    image->init_func = image->load_bias + d->d_un.d_ptr; break;
+        case VWINE_DT_FINI:    image->fini_func = image->load_bias + d->d_un.d_ptr; break;
+        case VWINE_DT_INIT_ARRAY:
+            image->init_array = image->load_bias + d->d_un.d_ptr;
+            break;
+        case VWINE_DT_FINI_ARRAY:
+            image->fini_array = image->load_bias + d->d_un.d_ptr;
+            break;
+        case VWINE_DT_INIT_ARRAYSZ:
+            image->init_array_count = d->d_un.d_val / sizeof(uint32_t);
+            break;
+        case VWINE_DT_FINI_ARRAYSZ:
+            image->fini_array_count = d->d_un.d_val / sizeof(uint32_t);
+            break;
+        default: break;
+        }
+    }
+    if (image->syment == 0) image->syment = sizeof(Vwine_Elf32_Sym);
 }
 
 // ── relocation ─────────────────────────────────────────────────────────────

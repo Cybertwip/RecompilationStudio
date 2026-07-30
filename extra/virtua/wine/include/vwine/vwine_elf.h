@@ -197,6 +197,18 @@ const char* vwine_elf_kind_text(vwine_elf_kind kind);
 int vwine_elf_load(const void* data, size_t size, const char* name,
                    vwine_image* out);
 
+// Read `image->dynamic` and fill in the tables it names: symtab, strtab, the
+// init/fini functions and arrays. `dynamic` and `load_bias` must already be set;
+// everything this touches is overwritten.
+//
+// vwine_elf_load calls it for you. It is public for the loader that does NOT go
+// through vwine_elf_load: a Horizon NRO/NSO is not an ELF file and has no
+// program headers, so its front-end places the segments itself and then points
+// `dynamic` at the MOD0 header's .dynamic. The DT_* walk after that is
+// identical, and identical code in two places is the bug where one copy gets
+// fixed.
+void vwine_image_scan_dynamic(vwine_image* image);
+
 // Apply DT_REL and DT_JMPREL.
 //
 // Symbol-bearing relocations resolve through `registry`; every miss is recorded

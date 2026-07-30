@@ -1366,12 +1366,14 @@ add_subdirectory(framework/extra/%2 "${CMAKE_BINARY_DIR}/%2")
 
 # The guest's data, staged as `data/` beside the runtime.
 #
-# `executable` above is only the module that is branched to. For a Switch
-# submission package that is the ExeFS `main`, and it is a small fraction of the
-# title: the rest of the ExeFS (`rtld`, which relocates it, `sdk` and the
+# `executable` above is only the module that is branched to, and on both systems
+# it is a small fraction of the title. For a Switch package it is the ExeFS
+# `main`; the rest of the ExeFS (`rtld`, which relocates it, `sdk` and the
 # subsdks, which its imports resolve against, and `main.npdm`) and the RomFS
-# image, which is the game's own data, are here. A package staged without them
-# is a loader with nothing behind it.
+# image are here. For a Vita title it is `eboot.bin`; the decrypted `sce_module`
+# libraries and the asset archives are here. A package staged without them is a
+# loader with nothing behind it, so Studio re-hashes every one of these files in
+# the built package and fails the export if any is missing.
 #
 # The file list is globbed at configure time and the copy hangs off a stamp, so
 # a rebuild that changed nothing does not re-copy a RomFS image that is hundreds
@@ -1433,23 +1435,41 @@ QString generatedGuestAppReadme(const PipelineRequest& request,
   // Where the staged image came from. A package was opened during the export
   // and one entry taken out of it, and the README says which entry rather than
   // presenting the result as the file that was selected.
+  // What `data/` holds differs by system, and saying only the Switch case read
+  // as though a Vita export shipped its module alone.
+  const QString dataProvenance = vita
+    ? QStringLiteral(
+        "the whole title, decrypted. A Vita application's files sit behind PFS, "
+        "keyed by a klicensee that belongs to that one title and ships with its "
+        "licence; the export resolved that licence, checked it against the "
+        "title's own `files.db` header, and wrote the decrypted tree here — "
+        "`eboot.bin`, the `sce_module` suprx libraries the module's imports "
+        "resolve against, `sce_sys/`, and the asset archives, which are most of "
+        "what the game is.")
+    : QStringLiteral(
+        "`exefs/` — the whole ExeFS, because `main` alone is the module that is "
+        "branched to and not the program: `rtld` relocates it, `sdk` and the "
+        "subsdks are what its imports resolve against, and `main.npdm` is the "
+        "process manifest — and `romfs.bin`, the RomFS image, decrypted and "
+        "otherwise verbatim. The RomFS is not unpacked into a directory tree: "
+        "its names are UTF-8 and case-sensitive, the exporting host's "
+        "filesystem is not, and the image is what a `romfs:` mount reads "
+        "anyway.");
   const QString imageProvenance = app.requiresExtraction
     ? QStringLiteral(
         "- `package_inputs/executable` — the guest image: the `%1` entry of the "
         "%2 that was selected, taken out of it at export time. "
-        "`package_inputs/container/` holds what that package carried alongside "
-        "it, so the extraction can be checked against its source rather than "
-        "taken on trust.\n"
-        "- `package_inputs/data/` — the rest of what came out of that package, "
-        "staged as `data/` beside the runtime. For a Switch submission package "
-        "that is `exefs/` — the whole ExeFS, because `main` alone is the module "
-        "that is branched to and not the program: `rtld` relocates it, `sdk` and "
-        "the subsdks are what its imports resolve against, and `main.npdm` is "
-        "the process manifest — and `romfs.bin`, the RomFS image, decrypted and "
-        "otherwise verbatim. It is not unpacked into a directory tree: RomFS "
-        "names are UTF-8 and case-sensitive, the exporting host's filesystem is "
-        "not, and the image is what a `romfs:` mount reads anyway.")
-        .arg(app.executableName, app.containerName)
+        "`package_inputs/container/` holds the metadata that package carried "
+        "alongside it — tickets, the PFS databases, the content manifest — so "
+        "the extraction can be checked against its source rather than taken on "
+        "trust. The container itself is not copied; it would double the size of "
+        "the export, and `proof/` records its SHA-256 instead.\n"
+        "- `package_inputs/data/` — the rest of what came out of that "
+        "container, staged as `data/` beside the runtime: %3\n"
+        "  Every file here is hashed at export time and re-hashed in the built "
+        "package; a build that does not carry them all is a failure, not a "
+        "smaller package.")
+        .arg(app.executableName, app.containerName, dataProvenance)
     : QStringLiteral(
         "- `package_inputs/executable` — the guest image, exactly as selected: "
         "a %1 of %2 bytes.")

@@ -23,11 +23,19 @@ namespace psxstudio {
 //
 // The distribution containers are opened here rather than refused. A PSN
 // package (`.pkg`) and a Switch submission package (`.nsp`) are archives, and
-// Studio reads them: see VitaPkg.h and SwitchNsp.h for what each layer needs.
-// Where a layer genuinely cannot be opened — a Vita package whose executable is
-// inside the PFS layer, an NSP with no key file — the refusal names that layer
-// and what it wanted, having read everything above it, instead of dismissing
-// the whole file as "encrypted".
+// Studio reads them: see VitaPkg.h, VitaPfs.h and SwitchNsp.h for what each
+// layer needs. Where a layer genuinely cannot be opened — a Vita title with no
+// licence, an NSP with no key file — the refusal names that layer and what it
+// wanted, having read everything above it, instead of dismissing the whole file
+// as "encrypted".
+//
+// A Vita title's second layer, PFS, is keyed per title: its licence is the only
+// thing that opens it, and Studio takes that licence from the title's own
+// `sce_sys/package/work.bin`, from a `.rif` or zRIF beside the container, or
+// from PSXRECOMP_VITA_LICENSE / PSXRECOMP_VITA_ZRIF — and checks it against the
+// title before using it. So both shapes a Vita title arrives in are accepted:
+// the `.pkg` it was distributed as, and the unpacked directory it was dumped
+// to (`<TITLEID>/` with param.sfo, eboot.bin and sce_pfs/ inside).
 //
 // The identification is done here, at export time, rather than left to the
 // device. Both front-ends already refuse a container they cannot open, but they
@@ -42,6 +50,7 @@ enum class GuestContainer {
   VitaSelf,  // SCE\0 wrapper, unencrypted, version 3 header type 1
   VitaVpk,   // ZIP carrying eboot.bin
   VitaPkg,   // PSN package: opened here; its PFS layer needs a licence
+  VitaAppDir,  // an unpacked title directory — param.sfo, eboot.bin, sce_pfs/
   // Horizon.
   HorizonNro,
   HorizonNso,

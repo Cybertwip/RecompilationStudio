@@ -72,6 +72,13 @@ bool inspectVitaTitleDirectory(const QString& directory,
 /* Reads a 0x200-byte SceNpDrmLicense: work.bin, or a .rif. */
 bool readVitaLicenseFile(const QString& path, VitaLicense& license, QString& error);
 
+/* The same, from bytes — for a licence that is inside a container rather than
+ * on disk. `source` is what the licence will name itself as. */
+bool readVitaLicenseBlob(const QByteArray& blob,
+                         const QString& source,
+                         VitaLicense& license,
+                         QString& error);
+
 /* Decodes a zRIF string (base64 of a deflated SceNpDrmLicense). */
 bool readVitaZrifLicense(const QString& zrif, VitaLicense& license, QString& error);
 
@@ -87,6 +94,13 @@ bool findVitaLicense(const VitaTitleDirectory& info, VitaLicense& license, QStri
 bool verifyVitaLicense(const QString& titleDirectory,
                        const VitaLicense& license,
                        QString& error);
+
+/* The same check against a files.db header read from somewhere other than a
+ * directory — the first 0x400 bytes of `sce_pfs/files.db` as they come out of a
+ * PKG, so a package's licence can be settled before 30 MB is extracted. */
+bool verifyVitaLicenseHeader(const QByteArray& filesDbHeader,
+                             const VitaLicense& license,
+                             QString& error);
 
 /* Mounts the PFS layer and writes the decrypted title into `destination`,
  * recreating its directory layout. `log` receives psvpfsparser's own account of

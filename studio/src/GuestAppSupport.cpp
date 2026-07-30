@@ -2,6 +2,7 @@
 
 #include "PipelineSupport.h"
 #include "SwitchNsp.h"
+#include "VitaPfs.h"
 #include "VitaPkg.h"
 
 #include "quazip.h"
@@ -10,6 +11,7 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcessEnvironment>
 #include <QSet>
 
 #include <algorithm>
@@ -86,6 +88,7 @@ QString containerDisplayName(GuestContainer container) {
     case GuestContainer::VitaSelf:    return QStringLiteral("SELF");
     case GuestContainer::VitaVpk:     return QStringLiteral("VPK");
     case GuestContainer::VitaPkg:     return QStringLiteral("PKG");
+    case GuestContainer::VitaAppDir:  return QStringLiteral("unpacked title");
     case GuestContainer::HorizonNro:  return QStringLiteral("NRO0");
     case GuestContainer::HorizonNso:  return QStringLiteral("NSO0");
     case GuestContainer::HorizonNsp:  return QStringLiteral("PFS0 (NSP)");
@@ -160,6 +163,359 @@ bool classifyVitaModule(const QByteArray& head, GuestAppDescription& description
   return false;
 }
 
+// ── the per-title licence ──────────────────────────────────────────────────
+//
+// A Vita title's PFS layer is keyed by a 16-byte klicensee that belongs to that
+// one title and ships only with its licence. It cannot be derived from the
+// title, so the whole of what Studio can do is look where a licence is kept and
+// check each one it finds against the title itself. That check — recomputing
+// the HMAC-SHA1 files.db signs its own header with — is what makes the search
+// order a matter of speed rather than of correctness: a licence for another
+// title fails the header and is passed over, and one that passes the header is
+// the licence for this title.
+
+struct VitaLicenseSearch {
+  QList<VitaLicense> candidates;
+  QStringList tried;  // the places swept, in order — what to report on a miss
+  QStringList seen;   // absolute paths already read, so each file is read once
+};
+
+/* `tried` is what the refusal quotes, so it names places rather than files: a
+ * list of the files that happened to exist is exactly the wrong thing to print
+ * when the complaint is that none did. */
+void noteVitaSearchLocation(VitaLicenseSearch& search, const QString& where) {
+  if (!search.tried.contains(where)) search.tried.append(where);
+}
+
+void appendVitaLicenseFile(const QString& path, VitaLicenseSearch& search) {
+  const QFileInfo info(path);
+  if (!info.isFile()) return;
+  const QString absolute = info.absoluteFilePath();
+  if (search.seen.contains(absolute)) return;
+  search.seen.append(absolute);
+
+  VitaLicense license;
+  QString error;
+  const QString suffix = info.suffix().toLower();
+  if (suffix == QStringLiteral("zrif") || suffix == QStringLiteral("txt")) {
+    // A licence passed around as text: base64 of a deflated SceNpDrmLicense.
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return;
+    const QString text = QString::fromLatin1(file.read(64 * 1024)).trimmed();
+    if (readVitaZrifLicense(text, license, error)) {
+      license.source = absolute;
+      search.candidates.append(license);
+    }
+    return;
+  }
+  if (readVitaLicenseFile(path, license, error)) search.candidates.append(license);
+}
+
+/* The named forms first, then anything else in the directory that is shaped
+ * like a licence. Bounded to one directory: this is a look-beside, not a scan. */
+void sweepVitaLicenseDirectory(const QDir& directory,
+                               const QString& baseName,
+                               const QString& titleId,
+                               VitaLicenseSearch& search) {
+  if (!directory.exists()) return;
+  noteVitaSearchLocation(
+    search,
+    QStringLiteral("%1 (work.bin, license.rif, %2*.rif, *.zrif)")
+      .arg(directory.absolutePath(),
+           titleId.isEmpty() ? QString()
+                             : QStringLiteral("%1.rif, %1.zrif, ").arg(titleId)));
+  QStringList named;
+  if (!baseName.isEmpty()) {
+    named << baseName + QStringLiteral(".rif")
+          << baseName + QStringLiteral(".zrif")
+          << baseName + QStringLiteral(".work.bin");
+  }
+  if (!titleId.isEmpty()) {
+    named << titleId + QStringLiteral(".rif")
+          << titleId + QStringLiteral(".zrif")
+          << titleId + QStringLiteral(".bin");
+  }
+  named << QStringLiteral("work.bin") << QStringLiteral("license.rif");
+  for (const QString& name : named)
+    appendVitaLicenseFile(directory.filePath(name), search);
+
+  const QStringList rest =
+    directory.entryList({ QStringLiteral("*.rif"), QStringLiteral("*.zrif") },
+                        QDir::Files, QDir::Name);
+  for (const QString& name : rest)
+    appendVitaLicenseFile(directory.filePath(name), search);
+}
+
+/* A title dumped beside the package it came from. `<TITLEID>/sce_sys/package/
+ * work.bin` is the fixed shape of that, so it is looked for by name at one and
+ * two levels down rather than found by walking the tree. */
+void sweepVitaDumpedTitles(const QDir& directory,
+                           const QString& titleId,
+                           VitaLicenseSearch& search) {
+  if (titleId.isEmpty() || !directory.exists()) return;
+  const QString relative =
+    titleId + QStringLiteral("/sce_sys/package/work.bin");
+  noteVitaSearchLocation(search, QStringLiteral("%1/[*/]%2")
+                                   .arg(directory.absolutePath(), relative));
+  appendVitaLicenseFile(directory.filePath(relative), search);
+  const QStringList children =
+    directory.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+  for (const QString& child : children)
+    appendVitaLicenseFile(directory.filePath(child + QLatin1Char('/') + relative), search);
+}
+
+/* `containerPath` is the .pkg or the title directory that was selected;
+ * `titleDirectory` is set only when the title is already unpacked. */
+VitaLicenseSearch findVitaLicenseCandidates(const QString& containerPath,
+                                            const QString& titleId,
+                                            const QString& titleDirectory) {
+  VitaLicenseSearch search;
+  const QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+
+  const QString zrif =
+    environment.value(QStringLiteral("PSXRECOMP_VITA_ZRIF")).trimmed();
+  if (!zrif.isEmpty()) {
+    noteVitaSearchLocation(search, QStringLiteral("PSXRECOMP_VITA_ZRIF"));
+    VitaLicense license;
+    QString error;
+    if (readVitaZrifLicense(zrif, license, error)) search.candidates.append(license);
+  }
+  const QString fromEnvironment =
+    environment.value(QStringLiteral("PSXRECOMP_VITA_LICENSE")).trimmed();
+  if (!fromEnvironment.isEmpty()) {
+    if (QFileInfo(fromEnvironment).isDir()) {
+      sweepVitaLicenseDirectory(QDir(fromEnvironment), QString(), titleId, search);
+      sweepVitaDumpedTitles(QDir(fromEnvironment), titleId, search);
+    } else {
+      noteVitaSearchLocation(search, QStringLiteral("PSXRECOMP_VITA_LICENSE=%1")
+                                       .arg(fromEnvironment));
+      appendVitaLicenseFile(fromEnvironment, search);
+    }
+  }
+
+  // The title's own licence, when it was dumped with one. This is the form in
+  // branding/vita/standard/PCSE00317 and it is the one that belongs to the
+  // title by construction, so it is tried before anything found by looking
+  // around.
+  if (!titleDirectory.isEmpty()) {
+    const QDir title(titleDirectory);
+    noteVitaSearchLocation(
+      search, QStringLiteral("%1/sce_sys/package/ (work.bin, temp.bin)")
+                .arg(QDir(titleDirectory).absolutePath()));
+    appendVitaLicenseFile(title.filePath(QStringLiteral("sce_sys/package/work.bin")), search);
+    appendVitaLicenseFile(title.filePath(QStringLiteral("sce_sys/package/temp.bin")), search);
+    sweepVitaLicenseDirectory(title, QString(), titleId, search);
+  }
+
+  const QFileInfo container(containerPath);
+  const QDir beside = container.absoluteDir();
+  sweepVitaLicenseDirectory(beside, container.completeBaseName(), titleId, search);
+  sweepVitaDumpedTitles(beside, titleId, search);
+  QDir above = beside;
+  if (above.cdUp()) {
+    sweepVitaLicenseDirectory(above, container.completeBaseName(), titleId, search);
+    sweepVitaDumpedTitles(above, titleId, search);
+  }
+  return search;
+}
+
+/* Takes the candidate that opens this title. Everything rejected is said, with
+ * the reason, because "no licence" and "three licences, none of them this
+ * title's" are different problems for whoever is looking at the export. */
+bool chooseVitaLicense(const VitaLicenseSearch& search,
+                       const QString& titleId,
+                       const QByteArray& filesDbHeader,
+                       VitaLicense& license,
+                       QStringList& notes,
+                       QString& refusal) {
+  for (const VitaLicense& candidate : search.candidates) {
+    QString error;
+    if (verifyVitaLicenseHeader(filesDbHeader, candidate, error)) {
+      license = candidate;
+      notes.append(
+        QStringLiteral("Licence: %1 — content id %2, %3. It signs this title's "
+                       "files.db header, so it is this title's licence.")
+          .arg(candidate.source,
+               candidate.contentId.isEmpty() ? QStringLiteral("(none stated)")
+                                             : candidate.contentId,
+               candidate.fakeAccount ? QStringLiteral("NoNpDrm (no account)")
+                                     : QStringLiteral("account %1")
+                                         .arg(candidate.accountId, 16, 16, QLatin1Char('0'))));
+      return true;
+    }
+    notes.append(QStringLiteral("Licence %1 (content id %2) rejected: %3")
+                   .arg(candidate.source,
+                        candidate.contentId.isEmpty() ? QStringLiteral("(none stated)")
+                                                      : candidate.contentId,
+                        error));
+  }
+
+  const QString looked = search.tried.isEmpty()
+    ? QStringLiteral("(nowhere — no candidate paths existed)")
+    : search.tried.join(QStringLiteral("; "));
+  const QString subject = titleId.isEmpty()
+    ? QStringLiteral("this title")
+    : QStringLiteral("%1").arg(titleId);
+  refusal = search.candidates.isEmpty()
+    ? QStringLiteral(
+        "%1's files are inside its PFS layer, and that layer is keyed by a "
+        "klicensee that belongs to that one title — a licence for the same game "
+        "in another region does not open it. The key is not in the container "
+        "and cannot be derived from it: it ships with the title's licence. "
+        "Studio looked in: %2. Supply the licence as a .rif or a work.bin "
+        "beside the file, as a zRIF in PSXRECOMP_VITA_ZRIF, or point "
+        "PSXRECOMP_VITA_LICENSE at it.").arg(subject, looked)
+    : QStringLiteral(
+        "%1 licence(s) were found but none of them opens %2 — each one derives "
+        "a different signature for that title's files.db header, which is what "
+        "a licence for a different title does. The rejected content ids are in "
+        "the notes above; a licence has to match the title id exactly. Studio "
+        "looked in: %3.")
+        .arg(search.candidates.size()).arg(subject, looked);
+  return false;
+}
+
+/* The licence that opens `filesDbHeader`, resolved from scratch. Identification
+ * and staging both call this rather than passing a key between them: a key held
+ * in a description would go stale, and re-deriving it costs one HMAC. */
+bool vitaLicenseForTitle(const QString& containerPath,
+                         const QString& titleId,
+                         const QString& titleDirectory,
+                         const QByteArray& filesDbHeader,
+                         VitaLicense& license,
+                         QStringList& notes,
+                         QString& error) {
+  const VitaLicenseSearch search =
+    findVitaLicenseCandidates(containerPath, titleId, titleDirectory);
+  return chooseVitaLicense(search, titleId, filesDbHeader, license, notes, error);
+}
+
+/* Copies a tree, recording every file written relative to `to`. */
+bool copyTree(const QString& from, const QString& to,
+              QStringList& written, QString& error) {
+  const QDir source(from);
+  QDirIterator iterator(from, QDir::Files | QDir::NoDotAndDotDot,
+                        QDirIterator::Subdirectories);
+  while (iterator.hasNext()) {
+    const QString absolute = iterator.next();
+    const QString relative = source.relativeFilePath(absolute);
+    const QString destination = QDir(to).filePath(relative);
+    if (!QDir().mkpath(QFileInfo(destination).absolutePath())) {
+      error = QStringLiteral("Could not create %1.")
+                .arg(QFileInfo(destination).absolutePath());
+      return false;
+    }
+    if (!copyFileReplacing(absolute, destination, error)) return false;
+    written.append(relative);
+  }
+  written.sort();
+  return true;
+}
+
+/* The files a title carries that its own files.db does not cover — the PFS
+ * metadata and the licence. They are not part of what runs, so they are kept
+ * beside the export rather than in it, the same way an NSP's ticket is. */
+bool copyVitaMetadata(const QString& from, const QString& to,
+                      QStringList& written, QString& error) {
+  const QDir source(from);
+  const QStringList directories = { QStringLiteral("sce_pfs"),
+                                    QStringLiteral("sce_sys/package") };
+  for (const QString& relative : directories) {
+    const QDir directory(source.filePath(relative));
+    if (!directory.exists()) continue;
+    const QStringList names = directory.entryList(QDir::Files, QDir::Name);
+    for (const QString& name : names) {
+      const QString destination =
+        QDir(to).filePath(relative + QLatin1Char('/') + name);
+      if (!QDir().mkpath(QFileInfo(destination).absolutePath())) {
+        error = QStringLiteral("Could not create %1.")
+                  .arg(QFileInfo(destination).absolutePath());
+        return false;
+      }
+      if (!copyFileReplacing(directory.filePath(name), destination, error)) return false;
+      written.append(relative + QLatin1Char('/') + name);
+    }
+  }
+  return true;
+}
+
+/* Reads a title directory as a guest application: what it is, whether its files
+ * are behind the PFS layer, and — when they are — which licence opens it. */
+void inspectVitaDirectory(const QString& directory, GuestAppDescription& description) {
+  description.container = GuestContainer::VitaAppDir;
+  description.arch = GuestArch::Arm32;
+
+  VitaTitleDirectory title;
+  QString titleError;
+  if (!inspectVitaTitleDirectory(directory, title, titleError)) {
+    description.refusal = titleError;
+    return;
+  }
+  description.contents = title.files;
+  description.containerTitle = title.title;
+  description.containerTitleId = title.titleId;
+  description.notes.append(
+    QStringLiteral("Unpacked title at %1: %2 file(s), %3 bytes.")
+      .arg(title.path).arg(title.files.size()).arg(title.totalBytes));
+  if (!title.title.isEmpty() || !title.titleId.isEmpty()) {
+    description.notes.append(
+      QStringLiteral("param.sfo: %1 (%2)%3%4")
+        .arg(title.title.isEmpty() ? QStringLiteral("untitled") : title.title)
+        .arg(title.titleId.isEmpty() ? QStringLiteral("no title id") : title.titleId)
+        .arg(title.category.isEmpty() ? QString()
+                                      : QStringLiteral(", category %1").arg(title.category))
+        .arg(title.appVersion.isEmpty() ? QString()
+                                        : QStringLiteral(", version %1").arg(title.appVersion)));
+  }
+  description.notes.append(title.notes);
+  description.requiresExtraction = true;
+  description.executableName = title.executableName;
+
+  // A title with no sce_pfs was decrypted before it got here; its eboot.bin is
+  // a module and is classified as one.
+  if (!title.havePfs) {
+    QFile eboot(QDir(title.path).filePath(title.executableName));
+    if (!eboot.open(QIODevice::ReadOnly)) {
+      description.refusal = QStringLiteral("%1 could not be read.").arg(title.executableName);
+      return;
+    }
+    const QByteArray head = eboot.read(0x1000);
+    GuestAppDescription probe;
+    probe.system = SystemKind::Vita;
+    if (!classifyVitaModule(head, probe)) {
+      description.refusal = QStringLiteral(
+        "This directory has no sce_pfs, so its files are not PFS-encrypted — "
+        "but its %1 is neither an ARM ELF nor a SELF (it begins %2).")
+          .arg(title.executableName,
+               QString::fromLatin1(head.left(4).toHex(' ')));
+      return;
+    }
+    description.arch = probe.arch;
+    description.refusal = probe.refusal;
+    description.notes.append(
+      QStringLiteral("No sce_pfs: this title is already decrypted, and its %1 is a %2.")
+        .arg(title.executableName, containerDisplayName(probe.container)));
+    return;
+  }
+
+  QFile filesDb(QDir(title.path).filePath(QStringLiteral("sce_pfs/files.db")));
+  if (!filesDb.open(QIODevice::ReadOnly)) {
+    description.refusal = QStringLiteral(
+      "sce_pfs/files.db could not be read, so the PFS layer cannot be opened.");
+    return;
+  }
+  const QByteArray header = filesDb.read(0x400);
+  VitaLicense license;
+  if (!vitaLicenseForTitle(title.path, title.titleId, title.path, header, license,
+                           description.notes, description.refusal)) {
+    return;
+  }
+  description.notes.append(
+    QStringLiteral("PFS: files.db and %1 are present; the export will decrypt the "
+                   "title with this licence.")
+      .arg(title.haveUnicv ? QStringLiteral("unicv.db") : QStringLiteral("icv.db")));
+}
+
 /* Opens the PSN package: the item table, param.sfo, and the package's own
  * record of what it keeps inside the PFS layer. The executable is then either
  * reachable — in which case its head is classified exactly as a directly
@@ -221,16 +577,72 @@ void inspectVitaPackage(const QString& path, GuestAppDescription& description) {
   }
 
   if (package.executableIsPfsProtected) {
-    description.refusal = QStringLiteral(
-      "The package itself opened — %1 items, decrypted with the package key that "
-      "is fixed in the format — but its %2 is inside the second layer, PFS. The "
-      "package says so itself: sce_pfs/pflist lists that file without the `nenc` "
-      "mark, which is how a package records what it stores PFS-encrypted. The PFS "
-      "key comes from the licence (the zRIF / work.bin) issued to a console, and "
-      "this package does not contain one — sce_sys/package holds a placeholder. "
-      "No tool can read that module without the licence, so supply a VPK, a .velf "
-      "or an unencrypted eboot.bin.")
-        .arg(package.items.size()).arg(package.executableName);
+    // The second layer. Its key is the title's licence, and the package's own
+    // files.db — read here, 0x400 bytes of it — is what says whether a given
+    // licence is that title's.
+    const auto entry =
+      std::find_if(package.items.cbegin(), package.items.cend(),
+                   [](const VitaPkgItem& item) {
+                     return item.name == QStringLiteral("sce_pfs/files.db");
+                   });
+    if (entry == package.items.cend()) {
+      description.refusal = QStringLiteral(
+        "The package's %1 is inside the PFS layer — sce_pfs/pflist lists it "
+        "without the `nenc` mark — but the package carries no sce_pfs/files.db, "
+        "which is the file that layer is described and keyed by. This package "
+        "cannot be opened by anything.").arg(package.executableName);
+      return;
+    }
+    QByteArray filesDbHeader;
+    QString headerError;
+    if (!readVitaPkgItem(path, package, *entry, 0x400, filesDbHeader, headerError)) {
+      description.refusal =
+        QStringLiteral("The package's sce_pfs/files.db could not be read: %1")
+          .arg(headerError);
+      return;
+    }
+
+    // A licence the package itself carries, before looking around it. Usually a
+    // placeholder — which readVitaLicenseBlob refuses by name — but a package
+    // repacked with its licence has the real one here.
+    VitaLicenseSearch search =
+      findVitaLicenseCandidates(path, package.titleId, QString());
+    for (const QString& name : { QStringLiteral("sce_sys/package/work.bin"),
+                                 QStringLiteral("sce_sys/package/temp.bin") }) {
+      const auto held =
+        std::find_if(package.items.cbegin(), package.items.cend(),
+                     [&name](const VitaPkgItem& item) { return item.name == name; });
+      if (held == package.items.cend()) continue;
+      noteVitaSearchLocation(search,
+                             QStringLiteral("%1 (inside the package)").arg(name));
+      QByteArray blob;
+      QString itemError;
+      if (!readVitaPkgItem(path, package, *held, 0x200, blob, itemError)) continue;
+      VitaLicense license;
+      if (readVitaLicenseBlob(blob, QStringLiteral("%1 (inside the package)").arg(name),
+                              license, itemError)) {
+        search.candidates.prepend(license);
+      }
+    }
+
+    VitaLicense license;
+    if (!chooseVitaLicense(search, package.titleId, filesDbHeader, license,
+                           description.notes, description.refusal)) {
+      description.refusal = QStringLiteral(
+        "The package itself opened — %1 items, decrypted with the package key "
+        "that is fixed in the format — but its %2 is inside the second layer, "
+        "PFS. %3")
+          .arg(package.items.size())
+          .arg(package.executableName, description.refusal);
+      return;
+    }
+    description.notes.append(
+      QStringLiteral("PFS: the export will extract the package and decrypt its "
+                     "%1 file(s) with this licence.")
+        .arg(package.pfsProtectedFiles.size()));
+    description.requiresExtraction = true;
+    description.executableName = package.executableName;
+    description.arch = GuestArch::Arm32;
     return;
   }
 
@@ -271,15 +683,39 @@ void inspectVitaPackage(const QString& path, GuestAppDescription& description) {
   description.executableName = package.executableName;
 }
 
+/* The directory a title was dumped to, when what was selected is a file inside
+ * one. `<TITLEID>/eboot.bin` is a module, but the *title* is the directory: its
+ * data.vfs and its sce_module suprx files are what the game reads at runtime,
+ * and its sce_pfs/ is what the whole tree is encrypted under. Selecting the
+ * eboot and getting only the eboot is the same mistake the Switch export
+ * made. */
+QString vitaTitleDirectoryOf(const QString& path) {
+  const QFileInfo info(path);
+  const QDir directory = info.isDir() ? QDir(path) : info.absoluteDir();
+  if (!QFileInfo(directory.filePath(QStringLiteral("sce_sys/param.sfo"))).isFile())
+    return QString();
+  if (!QFileInfo(directory.filePath(QStringLiteral("eboot.bin"))).isFile())
+    return QString();
+  return directory.absolutePath();
+}
+
 void inspectVita(const QByteArray& head, const QString& path,
                  GuestAppDescription& description) {
-  if (classifyVitaModule(head, description)) return;
-
   if (head.size() >= 4 && head.startsWith(QByteArrayLiteral("\x7f" "PKG"))) {
     description.container = GuestContainer::VitaPkg;
     inspectVitaPackage(path, description);
     return;
   }
+
+  // Before the module check: a title directory holds a module, but the module
+  // alone is not the title.
+  const QString titleDirectory = vitaTitleDirectoryOf(path);
+  if (!titleDirectory.isEmpty()) {
+    inspectVitaDirectory(titleDirectory, description);
+    return;
+  }
+
+  if (classifyVitaModule(head, description)) return;
 
   if (head.size() >= 4 && head.startsWith(QByteArrayLiteral("PK\x03\x04"))) {
     description.container = GuestContainer::VitaVpk;
@@ -308,8 +744,9 @@ void inspectVita(const QByteArray& head, const QString& path,
   }
 
   description.refusal = QStringLiteral(
-    "This file is not an ARM ELF, a SELF or a VPK, which are the three "
-    "containers vita2mvii opens.");
+    "This file is not an ARM ELF, a SELF, a VPK or a PKG, and the directory it "
+    "is in is not an unpacked title (no sce_sys/param.sfo beside an eboot.bin) "
+    "— which are the forms a Vita application arrives in.");
 }
 
 /* The architecture of an NSO0 module, read from the first instruction of its
@@ -526,6 +963,21 @@ bool inspectGuestApp(SystemKind system,
               .arg(systemKindDisplayName(system));
     return false;
   }
+  // A Vita title can be a directory rather than a file — the shape it is dumped
+  // to. It is identified from its contents, so there is no header to read.
+  if (system == SystemKind::Vita && QFileInfo(path).isDir()) {
+    inspectVitaDirectory(QDir(path).absolutePath(), description);
+    description.containerName = containerDisplayName(description.container);
+    description.suggestedTitle = description.containerTitle.isEmpty()
+                                   ? QDir(path).dirName()
+                                   : description.containerTitle;
+    for (const QString& relative : description.contents) {
+      description.size +=
+        QFileInfo(QDir(path).filePath(relative)).size();
+    }
+    return true;
+  }
+
   QFile file(path);
   if (!file.open(QIODevice::ReadOnly)) {
     error = QStringLiteral("Could not read the %1 application: %2")
@@ -600,43 +1052,132 @@ bool stageGuestApp(const GuestAppDescription& description,
     return false;
   }
 
-  if (description.container == GuestContainer::VitaPkg) {
-    VitaPkgInfo package;
-    if (!readVitaPkg(sourcePath, package, error)) return false;
-    if (package.executableName != description.executableName) {
-      error = QStringLiteral(
-        "The package now names its executable `%1`, but it was identified as "
-        "`%2`. Re-select the file.")
-          .arg(package.executableName, description.executableName);
-      return false;
+  // A Vita title, whichever of its two shapes it arrived in. Both end the same
+  // way: the whole title under `data/`, decrypted if it was PFS-encrypted, with
+  // its eboot.bin also copied to `executable` — which is what vita2mvii is
+  // handed as argv[1]. Staging the module alone left the game without its
+  // data.vfs and its sce_module/*.suprx, which is most of what it is.
+  if (description.container == GuestContainer::VitaPkg ||
+      description.container == GuestContainer::VitaAppDir) {
+    const QString data = QDir(destinationDirectory).filePath(QStringLiteral("data"));
+    QString title;   // the unpacked title tree, wherever it ends up
+    QString scratch; // set when the package had to be unpacked to reach it
+
+    // The scratch is tens of megabytes and every failure below returns early,
+    // so its removal is tied to leaving this block rather than written out at
+    // each exit.
+    struct ScratchGuard {
+      const QString& path;
+      ~ScratchGuard() { if (!path.isEmpty()) QDir(path).removeRecursively(); }
+    } scratchGuard{ scratch };
+
+    if (description.container == GuestContainer::VitaPkg) {
+      VitaPkgInfo package;
+      if (!readVitaPkg(sourcePath, package, error)) return false;
+      if (package.executableName != description.executableName) {
+        error = QStringLiteral(
+          "The package now names its executable `%1`, but it was identified as "
+          "`%2`. Re-select the file.")
+            .arg(package.executableName, description.executableName);
+        return false;
+      }
+      // The whole package. The PFS-encrypted files come out as ciphertext,
+      // which is what the package holds; decrypting them is the next step.
+      scratch = QDir(destinationDirectory).filePath(QStringLiteral("package_source"));
+      QDir(scratch).removeRecursively();
+      QStringList extracted;
+      if (!extractVitaPkg(sourcePath, package, scratch,
+                          [](const VitaPkgItem& item) { return !item.isDirectory(); },
+                          extracted, error)) {
+        return false;
+      }
+      log.append(QStringLiteral("PKG: %1 item(s) extracted, %2 bytes")
+                   .arg(extracted.size()).arg(package.dataSize));
+      title = scratch;
+    } else {
+      title = QFileInfo(sourcePath).isDir() ? QDir(sourcePath).absolutePath()
+                                            : QFileInfo(sourcePath).absolutePath();
     }
-    QStringList extracted;
-    const QString wantedModule = description.executableName;
-    if (!extractVitaPkg(sourcePath, package, container,
-                        [&wantedModule](const VitaPkgItem& item) {
-                          if (item.isDirectory()) return false;
-                          if (item.name == wantedModule) return true;
-                          // Everything else the package carries, up to a limit:
-                          // the metadata is what makes the extraction checkable
-                          // against its source, while data.vfs is gigabytes of
-                          // asset archive the front-end never reads.
-                          return item.size <= 4u * 1024u * 1024u;
-                        },
-                        extracted, error)) {
-      return false;
-    }
-    for (const QString& relative : extracted)
+
+    // The PFS metadata and the licence: kept beside the export so the
+    // decryption can be checked against its source rather than taken on trust.
+    QStringList metadata;
+    if (!copyVitaMetadata(title, container, metadata, error)) return false;
+    for (const QString& relative : metadata)
       log.append(QStringLiteral("container/%1").arg(relative));
 
-    const QString module = QDir(container).filePath(description.executableName);
-    if (!QFile::exists(module)) {
-      error = QStringLiteral("%1 was not written by the package extraction.")
-                .arg(description.executableName);
+    const bool encrypted =
+      QFileInfo(QDir(title).filePath(QStringLiteral("sce_pfs/files.db"))).isFile();
+    if (encrypted) {
+      QFile filesDb(QDir(title).filePath(QStringLiteral("sce_pfs/files.db")));
+      if (!filesDb.open(QIODevice::ReadOnly)) {
+        error = QStringLiteral("%1 could not be read.").arg(filesDb.fileName());
+        return false;
+      }
+      const QByteArray header = filesDb.read(0x400);
+      filesDb.close();
+
+      VitaLicense license;
+      QStringList notes;
+      if (!vitaLicenseForTitle(sourcePath, description.containerTitleId,
+                               description.container == GuestContainer::VitaAppDir
+                                 ? title : QString(),
+                               header, license, notes, error)) {
+        return false;
+      }
+      log.append(notes);
+
+      QStringList pfsLog;
+      if (!decryptVitaTitle(title, license, data, pfsLog, error)) return false;
+      // psvpfsparser's own account: what it verified and what it wrote. Kept
+      // because it is the proof the hash tree checked out, not decoration.
+      log.append(pfsLog);
+    } else {
+      QStringList copied;
+      if (!copyTree(title, data, copied, error)) return false;
+      for (const QString& relative : copied)
+        log.append(QStringLiteral("data/%1").arg(relative));
+    }
+
+    const QString module = QDir(data).filePath(description.executableName);
+    QFile staged(module);
+    if (!staged.open(QIODevice::ReadOnly)) {
+      error = QStringLiteral(
+        "%1 is not in the staged title. The title's own files.db decides what "
+        "is written, and it did not name it.").arg(description.executableName);
       return false;
     }
+    const QByteArray moduleHead = staged.read(64);
+    staged.close();
+
+    // Identification could not read this module when it was still behind PFS,
+    // so the ELF/SELF check happens here instead — on the bytes that were
+    // actually written, not on the assumption that a Vita title decrypts to a
+    // Vita module. A wrong-but-verifying licence is not possible, but a
+    // truncated or mis-assembled decryption is, and it shows up right here.
+    GuestAppDescription probe;
+    if (!classifyVitaModule(moduleHead, probe)) {
+      error = QStringLiteral(
+        "The decrypted %1 is neither an ARM ELF nor a SELF (it begins %2). "
+        "The PFS layer opened, so this is the title's own contents rather than "
+        "a key problem.")
+          .arg(description.executableName,
+               QString::fromLatin1(moduleHead.left(4).toHex(' ')));
+      return false;
+    }
+    if (!probe.refusal.isEmpty()) {
+      error = QStringLiteral("The decrypted %1: %2")
+                .arg(description.executableName, probe.refusal);
+      return false;
+    }
+    log.append(QStringLiteral("data/%1 is a %2, %3")
+                 .arg(description.executableName,
+                      containerDisplayName(probe.container),
+                      guestArchName(probe.arch)));
+
     if (!copyFileReplacing(module, executable, error)) return false;
-    log.append(QStringLiteral("executable <- %1 (out of the PKG)")
-                 .arg(description.executableName));
+    log.append(QStringLiteral("executable <- data/%1 (%2 bytes)")
+                 .arg(description.executableName).arg(QFileInfo(module).size()));
     stagedExecutable = executable;
     return true;
   }
@@ -711,8 +1252,12 @@ bool stageGuestApp(const GuestAppDescription& description,
 
 QString guestAppFileFilter(SystemKind system) {
   if (system == SystemKind::Vita) {
+    // `eboot.bin` is listed in its own right: selecting the eboot inside an
+    // unpacked title selects the title, which is the shape a dumped game is in.
     return QStringLiteral(
-      "Vita applications (*.self *.velf *.elf *.bin *.vpk *.pkg);;All files (*)");
+      "Vita applications (*.self *.velf *.elf *.bin *.vpk *.pkg eboot.bin);;"
+      "Unpacked title (eboot.bin);;"
+      "All files (*)");
   }
   return QStringLiteral("Horizon applications (*.nro *.nso *.nsp);;All files (*)");
 }

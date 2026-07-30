@@ -338,11 +338,20 @@ bool readVitaLicenseFile(const QString& path, VitaLicense& license, QString& err
     error = QStringLiteral("%1 could not be opened.").arg(path);
     return false;
   }
-  const QByteArray blob = file.read(SceNpDrmLicenseSize);
+  return readVitaLicenseBlob(file.read(SceNpDrmLicenseSize), path, license, error);
+}
+
+bool readVitaLicenseBlob(const QByteArray& blob,
+                         const QString& source,
+                         VitaLicense& license,
+                         QString& error) {
+  license = VitaLicense{};
+  error.clear();
+
   if (blob.size() != static_cast<qsizetype>(SceNpDrmLicenseSize)) {
     error = QStringLiteral(
       "%1 is %2 bytes; a SceNpDrmLicense is %3.")
-        .arg(path).arg(blob.size()).arg(SceNpDrmLicenseSize);
+        .arg(source).arg(blob.size()).arg(SceNpDrmLicenseSize);
     return false;
   }
 
@@ -357,14 +366,14 @@ bool readVitaLicenseFile(const QString& path, VitaLicense& license, QString& err
     error = QStringLiteral(
       "%1 is a licence placeholder, not a licence: it carries no account and "
       "no key. A dumped title's real licence is sce_sys/package/work.bin, a "
-      ".rif, or a zRIF string.").arg(path);
+      ".rif, or a zRIF string.").arg(source);
     return false;
   }
 
-  licenseFromRif(rif, path, license);
+  licenseFromRif(rif, source, license);
   if (license.klicensee.count('\0') == license.klicensee.size()) {
     error = QStringLiteral("%1 carries an all-zero key, which is not a licence.")
-              .arg(path);
+              .arg(source);
     license = VitaLicense{};
     return false;
   }
@@ -433,10 +442,6 @@ bool verifyVitaLicense(const QString& titleDirectory,
                        const VitaLicense& license,
                        QString& error) {
   error.clear();
-  if (!license.isValid()) {
-    error = QStringLiteral("No licence was supplied.");
-    return false;
-  }
 
   const QString filesDbPath =
     QDir(titleDirectory).filePath(QStringLiteral("sce_pfs/files.db"));
@@ -445,17 +450,36 @@ bool verifyVitaLicense(const QString& titleDirectory,
     error = QStringLiteral("%1 could not be opened.").arg(filesDbPath);
     return false;
   }
-  QByteArray head = filesDb.read(sizeof(sce_ng_pfs_header_t));
+  const QByteArray head = filesDb.read(sizeof(sce_ng_pfs_header_t));
   if (head.size() != static_cast<qsizetype>(sizeof(sce_ng_pfs_header_t))) {
     error = QStringLiteral("%1 is too short to be a files.db.").arg(filesDbPath);
+    return false;
+  }
+  return verifyVitaLicenseHeader(head, license, error);
+}
+
+bool verifyVitaLicenseHeader(const QByteArray& filesDbHeader,
+                             const VitaLicense& license,
+                             QString& error) {
+  error.clear();
+  if (!license.isValid()) {
+    error = QStringLiteral("No licence was supplied.");
+    return false;
+  }
+  const QByteArray head = filesDbHeader;
+  if (head.size() < static_cast<qsizetype>(sizeof(sce_ng_pfs_header_t))) {
+    error = QStringLiteral(
+      "The files.db header is %1 bytes; it is %2.")
+        .arg(head.size()).arg(sizeof(sce_ng_pfs_header_t));
     return false;
   }
 
   sce_ng_pfs_header_t header{};
   std::memcpy(&header, head.constData(), sizeof(header));
   if (std::memcmp(header.magic, MAGIC_WORD, 8) != 0) {
-    error = QStringLiteral("%1 is not a files.db: its magic is not %2.")
-              .arg(filesDbPath, QStringLiteral(MAGIC_WORD));
+    error = QStringLiteral("This is not a files.db: its magic is %1, not %2.")
+              .arg(QString::fromLatin1(head.left(8).toHex(' ')),
+                   QStringLiteral(MAGIC_WORD));
     return false;
   }
 

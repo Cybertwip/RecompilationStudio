@@ -5405,17 +5405,28 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
   // Two hashes when the image comes out of a package, and they are different
   // things: this one identifies the file that was selected, and the one taken
   // after staging identifies the module that will actually be loaded.
-  const QString containerSha256 = sha256File(request.romPath, error);
-  if (containerSha256.isEmpty()) {
-    fail(error.isEmpty() ? QStringLiteral("The selected file could not be hashed.") : error);
-    return;
+  // A directory has no hash of its own; what identifies an unpacked title is
+  // the staged tree, and that is hashed file by file after staging.
+  const bool containerIsDirectory = QFileInfo(request.romPath).isDir();
+  QString containerSha256;
+  if (!containerIsDirectory) {
+    containerSha256 = sha256File(request.romPath, error);
+    if (containerSha256.isEmpty()) {
+      fail(error.isEmpty() ? QStringLiteral("The selected file could not be hashed.") : error);
+      return;
+    }
   }
   QString imageSha256;
   emit logLine(QStringLiteral("%1 application: %2 · %3 · %4 bytes")
                  .arg(systemName, app.containerName, guestArchName(app.arch))
                  .arg(app.size));
-  emit logLine(QStringLiteral("SHA-256 (%1): %2")
-                 .arg(QFileInfo(request.romPath).fileName(), containerSha256));
+  if (containerIsDirectory) {
+    emit logLine(QStringLiteral("%1 is a directory: each staged file is hashed below.")
+                   .arg(QDir(request.romPath).dirName()));
+  } else {
+    emit logLine(QStringLiteral("SHA-256 (%1): %2")
+                   .arg(QFileInfo(request.romPath).fileName(), containerSha256));
+  }
   emit logLine(QStringLiteral("Execution: direct — the guest is ARMv7 and so is the device, so its instructions are not translated. %1 supplies the guest's operating system.")
                  .arg(frontEnd));
   if (app.arch == GuestArch::Unknown) {
@@ -5558,6 +5569,9 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
     { QStringLiteral("container_title"), app.containerTitle },
     { QStringLiteral("container_title_id"), app.containerTitleId },
     { QStringLiteral("container_bytes"), static_cast<double>(app.size) },
+    // Empty for an unpacked title: a directory has no hash, and what identifies
+    // it is the per-file list under `data` below.
+    { QStringLiteral("container_is_directory"), containerIsDirectory },
     { QStringLiteral("container_sha256"), containerSha256 },
     { QStringLiteral("container_contents"), containerContents },
     { QStringLiteral("container_notes"), containerNotes },
@@ -5572,7 +5586,8 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
     { QStringLiteral("image_sha256"), imageSha256 },
     { QStringLiteral("image_staged_as"), QStringLiteral("executable") },
     // And the rest of what came out of the container: the whole ExeFS and the
-    // RomFS image for a Switch package. `executable` is one entry of this.
+    // RomFS image for a Switch package, the whole decrypted title tree for a
+    // Vita one. `executable` is one entry of this.
     { QStringLiteral("data_staged_as"), QStringLiteral("data/") },
     { QStringLiteral("data_files"), stagedData.size() },
     { QStringLiteral("data_bytes"), static_cast<double>(stagedDataBytes) },
@@ -5762,6 +5777,38 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
            .arg(frontEnd));
     return;
   }
+  // And the guest's data. `executable` is only the module that is branched to —
+  // for a Switch package the ExeFS `main`, which is under 2% of the title — so a
+  // package that carries it and nothing else builds, verifies and then has
+  // nothing to load. The build was supposed to copy package_inputs/data beside
+  // the runtime; this is where that is established rather than assumed, by
+  // re-hashing what arrived against what was staged.
+  quint64 packagedDataBytes = 0;
+  for (const QJsonValue& value : stagedData) {
+    const QJsonObject entry = value.toObject();
+    const QString relative = entry.value(QStringLiteral("path")).toString();
+    const QString packaged = QDir(stageDir).filePath(relative);
+    if (!QFileInfo(packaged).isFile()) {
+      fail(QStringLiteral(
+        "The built %1 package is missing %2. The export staged it under "
+        "package_inputs/, so the `guest-data` target did not run or did not "
+        "reach the staging directory.").arg(frontEnd, relative));
+      return;
+    }
+    if (sha256File(packaged, error) != entry.value(QStringLiteral("sha256")).toString()) {
+      fail(error.isEmpty()
+        ? QStringLiteral("%1 in the built %2 package does not match the file staged for it.")
+            .arg(relative, frontEnd)
+        : error);
+      return;
+    }
+    packagedDataBytes +=
+      static_cast<quint64>(entry.value(QStringLiteral("bytes")).toDouble());
+  }
+  if (!stagedData.isEmpty()) {
+    emit logLine(QStringLiteral("Verified: the package carries the guest's data — %1 file(s), %2 bytes beside the runtime as data/")
+                   .arg(stagedData.size()).arg(packagedDataBytes));
+  }
   // The staged guest image is the whole payload of this package: if it were
   // altered in transit there would be nothing else in the package to notice.
   if (sha256File(packagedImage, error) != imageSha256) {
@@ -5883,6 +5930,13 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
     { QStringLiteral("unresolved_import_policy"),
       QStringLiteral("a hard failure reported by name; never bound to a stub") },
     { QStringLiteral("package_contains_guest_image"), true },
+    // The data beside the runtime, verified in the built package rather than
+    // in the staging directory it was copied from.
+    { QStringLiteral("package_guest_data_files"), stagedData.size() },
+    { QStringLiteral("package_guest_data_bytes"), static_cast<double>(packagedDataBytes) },
+    { QStringLiteral("package_guest_data_verified"),
+      QStringLiteral("every file re-hashed in build/steganos-package after the "
+                     "build, against package_inputs/data") },
     { QStringLiteral("signing_mode"), QStringLiteral("none") },
   };
   if (sealedExecutableHash.isEmpty() ||
@@ -5916,6 +5970,22 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
         ? QStringLiteral("The delivered %1 executable changed during publication.").arg(frontEnd)
         : error);
       return;
+    }
+    // Publication is a tree copy and a rename, so the data is checked by name
+    // and size here rather than re-hashed: the hashes were established against
+    // the built package a moment ago, and this catches a copy that dropped a
+    // subdirectory.
+    for (const QJsonValue& value : stagedData) {
+      const QJsonObject entry = value.toObject();
+      const QString relative = entry.value(QStringLiteral("path")).toString();
+      const QFileInfo delivered(QDir(output).filePath(relative));
+      if (!delivered.isFile() ||
+          delivered.size() != static_cast<qint64>(
+            entry.value(QStringLiteral("bytes")).toDouble())) {
+        fail(QStringLiteral("The delivered %1 package is missing or truncated at %2.")
+               .arg(frontEnd, relative));
+        return;
+      }
     }
   }
   emit logLine(QStringLiteral("%1 package created: %2").arg(frontEnd, output));

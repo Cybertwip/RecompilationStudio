@@ -272,8 +272,19 @@ endif()
 # lets the caller choose where that pair lands, the same knob gba-to-mvii exposes
 # as GBA_MVII_STAGE_DIR.
 
-set(HORIZON2MVII_PAYLOAD "" CACHE FILEPATH
-    "Optional Horizon NRO/NSO staged beside the runtime as 'executable'")
+# The DEFINED guard is load-bearing, not tidiness. A parent project that adds
+# this directory passes the payload as a plain variable (that is how
+# gba-to-mvii's GBA_MVII_ROM is fed, and how PSXRecomp Studio's generated
+# package feeds this one). Under CMP0126-OLD -- which is what
+# cmake_minimum_required(3.20) selects -- an unguarded
+# `set(X "" CACHE ...)` *removes* the parent's normal variable and leaves the
+# empty cache entry visible, so the payload silently became "" and the staging
+# block below never ran. The guard leaves a caller-set value alone and still
+# publishes the cache entry for a standalone `-DHORIZON2MVII_PAYLOAD=...` build.
+if(NOT DEFINED HORIZON2MVII_PAYLOAD)
+    set(HORIZON2MVII_PAYLOAD "" CACHE FILEPATH
+        "Optional Horizon NRO/NSO staged beside the runtime as 'executable'")
+endif()
 if(NOT DEFINED HORIZON2MVII_STAGE_DIR)
     set(HORIZON2MVII_STAGE_DIR "")
 endif()

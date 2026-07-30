@@ -5500,6 +5500,41 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
                    .arg(imageSha256));
   }
 
+  // What was staged as the guest's data, hashed here rather than asserted. The
+  // list is read back off disk instead of from the staging log so the proof
+  // describes the files that exist, not the files that were meant to.
+  QJsonArray stagedData;
+  quint64 stagedDataBytes = 0;
+  {
+    const QString dataDir = QDir(inputsDir).filePath(QStringLiteral("data"));
+    QStringList relative;
+    QDirIterator iterator(dataDir, QDir::Files, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) relative.append(QDir(dataDir).relativeFilePath(iterator.next()));
+    relative.sort();
+    for (const QString& name : relative) {
+      const QString absolute = QDir(dataDir).filePath(name);
+      const QString hash = sha256File(absolute, error);
+      if (hash.isEmpty()) {
+        fail(error.isEmpty()
+               ? QStringLiteral("The staged guest data at %1 could not be hashed.")
+                   .arg(absolute)
+               : error);
+        return;
+      }
+      const qint64 bytes = QFileInfo(absolute).size();
+      stagedDataBytes += static_cast<quint64>(bytes);
+      stagedData.append(QJsonObject{
+        { QStringLiteral("path"), QStringLiteral("data/") + name },
+        { QStringLiteral("bytes"), static_cast<double>(bytes) },
+        { QStringLiteral("sha256"), hash },
+      });
+    }
+    if (!relative.isEmpty()) {
+      emit logLine(QStringLiteral("Guest data: %1 file(s), %2 bytes staged as data/")
+                     .arg(relative.size()).arg(stagedDataBytes));
+    }
+  }
+
   nextStage(QStringLiteral("Finalize %1 CMake repository").arg(frontEnd));
   QJsonArray containerContents;
   for (const QString& entry : app.contents) containerContents.append(entry);
@@ -5536,6 +5571,12 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
       static_cast<double>(QFileInfo(stagedExecutable).size()) },
     { QStringLiteral("image_sha256"), imageSha256 },
     { QStringLiteral("image_staged_as"), QStringLiteral("executable") },
+    // And the rest of what came out of the container: the whole ExeFS and the
+    // RomFS image for a Switch package. `executable` is one entry of this.
+    { QStringLiteral("data_staged_as"), QStringLiteral("data/") },
+    { QStringLiteral("data_files"), stagedData.size() },
+    { QStringLiteral("data_bytes"), static_cast<double>(stagedDataBytes) },
+    { QStringLiteral("data"), stagedData },
   };
   if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
                  generatedGuestAppProjectCMake(request, app, bundleName), error) ||

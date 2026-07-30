@@ -7,9 +7,9 @@ namespace psxstudio::crypto {
 
 // AES, because opening a PSN package or an NSP requires it and nothing Studio
 // already links supplies it: Qt has no block cipher, and the vendored QuaZip is
-// built without its AES sources. This is the plain FIPS-197 cipher plus the two
-// modes the two containers use — CTR for PKG items and NCA sections, XTS for
-// NCA headers — and nothing else.
+// built without its AES sources. This is the plain FIPS-197 cipher plus the
+// modes the containers use — CTR for PKG items and NCA sections, XTS for NCA
+// headers, CBC and CMAC for the Vita's PFS layer — and nothing else.
 //
 // It is used for reading formats, never for protecting anything, so it is
 // written for clarity over speed and makes no constant-time claim.
@@ -39,6 +39,22 @@ class Aes {
  * key — both of which are exactly one block. */
 QByteArray aesEcbEncrypt(const QByteArray& key, const QByteArray& data);
 QByteArray aesEcbDecrypt(const QByteArray& key, const QByteArray& data);
+
+/* AES-CBC over a whole buffer. `size` must be a whole number of blocks and
+ * `iv` is updated in place to the last ciphertext block, so consecutive calls
+ * chain the way one long call would. `src` and `dst` may be the same pointer;
+ * the decrypt saves the trailing ciphertext block before it overwrites it.
+ *
+ * False means nothing was written: a key that is not 16 or 32 bytes, or a size
+ * that is not a multiple of 16. Neither is padded around. */
+bool aesCbcEncrypt(const QByteArray& key, const quint8* src, quint8* dst,
+                   qsizetype size, quint8 iv[16]);
+bool aesCbcDecrypt(const QByteArray& key, const quint8* src, quint8* dst,
+                   qsizetype size, quint8 iv[16]);
+
+/* AES-CMAC, NIST SP 800-38B. 16 bytes for any input length including zero;
+ * empty on an invalid key. The Vita's key ladder is specified in terms of it. */
+QByteArray aesCmac(const QByteArray& key, const char* data, qsizetype size);
 
 /* AES-CTR positioned by absolute offset, so a caller can decrypt one item out
  * of the middle of a package without walking the stream to get there. The

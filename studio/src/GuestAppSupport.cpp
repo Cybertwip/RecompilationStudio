@@ -404,6 +404,48 @@ void inspectHorizonPackage(const QString& path, GuestAppDescription& description
     exeFs.append(QStringLiteral("%1 (%2)").arg(entry.name).arg(entry.size));
   description.notes.append(QStringLiteral("ExeFS: %1").arg(exeFs.join(QStringLiteral(", "))));
 
+  // The RomFS is where a title's bulk lives, so it is stated with the same
+  // detail as the ExeFS rather than summarised as "data".
+  if (package.romFsPresent) {
+    description.notes.append(
+      QStringLiteral("RomFS: %1 bytes at NCA offset 0x%2, %3 file(s) totalling %4 bytes.")
+        .arg(package.romFsSize)
+        .arg(package.romFsOffset, 0, 16)
+        .arg(package.romFsFileCount)
+        .arg(package.romFsFileBytes));
+    if (!package.romFsRootEntries.isEmpty()) {
+      description.notes.append(
+        QStringLiteral("  root: %1%2")
+          .arg(package.romFsRootEntries.join(QStringLiteral(", ")),
+               package.romFsRootEntries.size() >= 64 ? QStringLiteral(", …")
+                                                     : QString()));
+    }
+  } else {
+    // Said, not passed over. Almost every application NCA has one, so its
+    // absence is a fact about this package worth carrying into the export.
+    description.notes.append(
+      QStringLiteral("RomFS: none in the program NCA — this package carries no "
+                     "data section."));
+  }
+  for (const QString& entry : package.romFsRootEntries)
+    description.contents.append(QStringLiteral("romfs:/%1").arg(entry));
+
+  // The title's own name, out of the Control NCA's NACP. Until now the export
+  // was named after the NSP file.
+  if (!package.displayTitle.isEmpty()) {
+    description.containerTitle = package.displayTitle;
+    description.notes.append(
+      QStringLiteral("control.nacp: %1%2")
+        .arg(package.displayTitle,
+             package.publisher.isEmpty()
+               ? QString()
+               : QStringLiteral(" — %1").arg(package.publisher)));
+  }
+  if (!package.icon.isEmpty()) {
+    description.notes.append(QStringLiteral("Control NCA icon: %1 (%2 bytes).")
+                               .arg(package.iconEntryName).arg(package.icon.size()));
+  }
+
   if (package.mainModule.isEmpty()) {
     description.refusal = QStringLiteral(
       "The program NCA's ExeFS opened but carries no `main`, which is the NSO0 "
@@ -615,6 +657,46 @@ bool stageGuestApp(const GuestAppDescription& description,
       return false;
     for (const QString& relative : extracted)
       log.append(QStringLiteral("container/%1").arg(relative));
+
+    // The program, whole. `main` is branched to, but `rtld` is what relocates
+    // it and `sdk`/`subsdk*` are the libraries it resolves its imports against;
+    // `main.npdm` is the process manifest. Staging `main` alone produced a
+    // package that was 2.7 MB of a 180 MB title.
+    const QString data = QDir(destinationDirectory).filePath(QStringLiteral("data"));
+    QStringList exeFs;
+    if (!extractSwitchNspExeFs(sourcePath, package,
+                               QDir(data).filePath(QStringLiteral("exefs")),
+                               exeFs, error)) {
+      return false;
+    }
+    for (const QString& name : exeFs) {
+      const auto entry =
+        std::find_if(package.exeFsEntries.cbegin(), package.exeFsEntries.cend(),
+                     [&name](const Pfs0Entry& e) { return e.name == name; });
+      log.append(QStringLiteral("data/exefs/%1 (%2 bytes)")
+                   .arg(name)
+                   .arg(entry == package.exeFsEntries.cend() ? 0u : entry->size));
+    }
+
+    // And the data. Verbatim: the RomFS image is self-describing and is what a
+    // `romfs:` mount reads, so it is copied rather than unpacked into a host
+    // tree whose names would be a re-encoding of the game's.
+    if (package.romFsPresent) {
+      const QString romFs = QDir(data).filePath(QStringLiteral("romfs.bin"));
+      if (!extractSwitchNspRomFs(sourcePath, package, romFs, error)) return false;
+      log.append(QStringLiteral("data/romfs.bin (%1 bytes, %2 file(s) totalling %3)")
+                   .arg(package.romFsSize)
+                   .arg(package.romFsFileCount)
+                   .arg(package.romFsFileBytes));
+    }
+    if (!package.icon.isEmpty()) {
+      const QString icon = QDir(data).filePath(QStringLiteral("control/") +
+                                               package.iconEntryName);
+      if (!writeBytes(icon, package.icon, error)) return false;
+      log.append(QStringLiteral("data/control/%1 (%2 bytes)")
+                   .arg(package.iconEntryName).arg(package.icon.size()));
+    }
+
     if (!extractSwitchNspMain(sourcePath, package, executable, error)) return false;
     log.append(QStringLiteral("executable <- ExeFS %1 of %2 (%3 bytes)")
                  .arg(package.mainModule, package.programNca).arg(package.mainSize));
@@ -737,6 +819,32 @@ set(%3_PAYLOAD "${GUEST_APP_IMAGE}")
 set(%3_STAGE_DIR "${_GUEST_STAGE}")
 add_subdirectory(framework/extra/%2 "${CMAKE_BINARY_DIR}/%2")
 
+# The guest's data, staged as `data/` beside the runtime.
+#
+# `executable` above is only the module that is branched to. For a Switch
+# submission package that is the ExeFS `main`, and it is a small fraction of the
+# title: the rest of the ExeFS (`rtld`, which relocates it, `sdk` and the
+# subsdks, which its imports resolve against, and `main.npdm`) and the RomFS
+# image, which is the game's own data, are here. A package staged without them
+# is a loader with nothing behind it.
+#
+# The file list is globbed at configure time and the copy hangs off a stamp, so
+# a rebuild that changed nothing does not re-copy a RomFS image that is hundreds
+# of megabytes. Re-export or re-configure when the data changes.
+set(_GUEST_DATA "${_GUEST_SRC}/package_inputs/data")
+file(GLOB_RECURSE _GUEST_DATA_FILES LIST_DIRECTORIES false "${_GUEST_DATA}/*")
+if(_GUEST_DATA_FILES)
+  set(_GUEST_DATA_STAMP "${CMAKE_CURRENT_BINARY_DIR}/guest-data.stamp")
+  add_custom_command(
+    OUTPUT "${_GUEST_DATA_STAMP}"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${_GUEST_DATA}" "${_GUEST_STAGE}/data"
+    COMMAND ${CMAKE_COMMAND} -E touch "${_GUEST_DATA_STAMP}"
+    DEPENDS ${_GUEST_DATA_FILES}
+    COMMENT "Staging the ${GUEST_APP_NAME} guest data"
+    VERBATIM)
+  add_custom_target(guest-data DEPENDS "${_GUEST_DATA_STAMP}")
+endif()
+
 # The rest of what a Steganos package carries.
 add_custom_target(guest-runtime ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -751,6 +859,9 @@ add_custom_target(guest-runtime ALL
   COMMENT "Staging the ${GUEST_APP_NAME} Virtua package"
   VERBATIM)
 add_dependencies(guest-runtime %5-stage)
+if(TARGET guest-data)
+  add_dependencies(guest-runtime guest-data)
+endif()
 )CMAKE")
     .arg(cmakeQuoted(bundleName), subdirectory, prefix, guestOs, frontEnd);
 }
@@ -783,7 +894,16 @@ QString generatedGuestAppReadme(const PipelineRequest& request,
         "%2 that was selected, taken out of it at export time. "
         "`package_inputs/container/` holds what that package carried alongside "
         "it, so the extraction can be checked against its source rather than "
-        "taken on trust.")
+        "taken on trust.\n"
+        "- `package_inputs/data/` — the rest of what came out of that package, "
+        "staged as `data/` beside the runtime. For a Switch submission package "
+        "that is `exefs/` — the whole ExeFS, because `main` alone is the module "
+        "that is branched to and not the program: `rtld` relocates it, `sdk` and "
+        "the subsdks are what its imports resolve against, and `main.npdm` is "
+        "the process manifest — and `romfs.bin`, the RomFS image, decrypted and "
+        "otherwise verbatim. It is not unpacked into a directory tree: RomFS "
+        "names are UTF-8 and case-sensitive, the exporting host's filesystem is "
+        "not, and the image is what a `romfs:` mount reads anyway.")
         .arg(app.executableName, app.containerName)
     : QStringLiteral(
         "- `package_inputs/executable` — the guest image, exactly as selected: "
@@ -819,7 +939,7 @@ QString generatedGuestAppReadme(const PipelineRequest& request,
     "  -DVIRTUA_LLVM_ROOT=/path/to/PowerEngine/compiler-bundle\n"
     "cmake --build build --target guest-runtime --parallel\n```\n\n"
     "The package is emitted under `build/steganos-package/guest-runtime/Release/`: "
-    "`%8.virtua` with `executable` beside it.\n")
+    "`%8.virtua`, `executable`, and `data/` when the container carried any.\n")
       .arg(request.windowTitle, frontEnd, systemKindDisplayName(request.system),
            guestCpu, subdirectory, guestOs, imageProvenance, bundleName);
 }

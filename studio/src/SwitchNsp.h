@@ -20,9 +20,16 @@ namespace psxstudio {
 //     and the `.cnmt.xml` the package ships in the clear: title ID, content
 //     meta type, and which NCA is the program.
 //   * With a key file — the NCA header (AES-XTS under `header_key`), the
-//     section table, and the ExeFS partition (AES-CTR under the title key from
-//     the ticket, or the NCA's own key area), from which `main` — the NSO0
-//     module horizon2mvii loads — is read out.
+//     section table, and then both of the program's sections: the ExeFS
+//     partition, which holds `main` and the rest of the modules, and the RomFS,
+//     which holds the game's data. Both decrypt with AES-CTR under the title
+//     key from the ticket, or the NCA's own key area.
+//
+// The RomFS is the bulk of a package and it is not optional. UNDERTALE's
+// program NCA is 180 MB, of which `main` is 2.7 MB and the RomFS is 150 MB:
+// `game.win` and the soundtrack. A package staged without it is a loader with
+// no game behind it, so the RomFS is located, measured and written out like
+// everything else.
 //
 // Without keys the second tier is reported as unavailable and names the keys
 // it wanted. It is never approximated: a wrong key produces a wrong module,
@@ -63,6 +70,7 @@ struct SwitchNspInfo {
   QString titleId, contentMetaType, patchId;
   QList<SwitchNspContent> contents;
   QString programNca;  // the file name of the Program NCA
+  QString controlNca;  // and of the Control NCA, which carries the NACP
 
   // From the .tik.
   QString ticketName;
@@ -81,12 +89,33 @@ struct SwitchNspInfo {
   QString mainModule;             // "main", when the ExeFS carries one
   QByteArray mainModuleHead;      // its first bytes, for the architecture probe
 
-  // What `extractSwitchNspMain` needs to read the module out again.
+  // What the extraction functions need to read the sections out again.
   quint64 programNcaOffset{ 0 };  // the NCA's offset in the NSP file
   quint64 mainOffset{ 0 };        // `main`'s offset within the NCA
   quint64 mainSize{ 0 };
-  QByteArray sectionKey;      // AES-128-CTR key for the ExeFS section
-  QByteArray sectionCounter;  // its 16-byte counter at NCA offset 0
+  QByteArray sectionKey;      // AES-128-CTR key for both program sections
+  QByteArray sectionCounter;  // the ExeFS counter at NCA offset 0; empty when
+                              // that section is stored unencrypted
+
+  // The program's RomFS — the game's data. `romFsOffset` is NCA-relative and
+  // already past the IVFC hash levels, so it addresses the RomFS image itself:
+  // the thing a `romfs:` mount reads, staged verbatim rather than unpacked into
+  // a host directory tree that would re-encode every name.
+  bool romFsPresent{ false };
+  quint64 romFsOffset{ 0 };
+  quint64 romFsSize{ 0 };
+  QByteArray romFsCounter;      // empty when the section is unencrypted
+  quint64 romFsFileCount{ 0 };  // from its own file metadata table
+  quint64 romFsFileBytes{ 0 };
+  QStringList romFsRootEntries;  // what sits directly under the root, bounded
+
+  // From the Control NCA's RomFS, when the package carries one. This is where a
+  // Switch title's real name lives; the NSP file name is only ever a guess at
+  // it.
+  QString displayTitle;
+  QString publisher;
+  QString iconEntryName;
+  QByteArray icon;  // the bytes of icon_<language>.dat, which is a JPEG
 };
 
 /* Walks the package. Returns false only when the file cannot be read as a
@@ -100,6 +129,32 @@ bool extractSwitchNspMain(const QString& path,
                           const SwitchNspInfo& info,
                           const QString& destinationFile,
                           QString& error);
+
+/* Writes every ExeFS entry into `destination` — `main`, `main.npdm`, `rtld`,
+ * `sdk` and the subsdks. `main` is the module that is branched to, but the
+ * others are the ones it resolves its imports against and the NPDM is the
+ * process's own manifest, so a package that carries only `main` is missing the
+ * program. Names are taken from the partition and are flat, so nothing is
+ * created outside `destination`.
+ *
+ * `extracted` receives one entry name per file written. */
+bool extractSwitchNspExeFs(const QString& path,
+                           const SwitchNspInfo& info,
+                           const QString& destination,
+                           QStringList& extracted,
+                           QString& error);
+
+/* Writes the program's RomFS image to `destinationFile`, decrypted and
+ * otherwise verbatim — the IVFC hash levels above it are left behind, so the
+ * file begins at the RomFS header and is exactly what a `romfs:` mount reads.
+ *
+ * It is not unpacked into a directory tree on purpose: RomFS names are UTF-8
+ * and case-sensitive, the host filesystem here is neither, and an unpack would
+ * make the staged data a re-encoding of the game's rather than a copy of it. */
+bool extractSwitchNspRomFs(const QString& path,
+                           const SwitchNspInfo& info,
+                           const QString& destinationFile,
+                           QString& error);
 
 /* Copies the package's plaintext entries — the ticket, the certificate and the
  * `.cnmt.xml` — into `destination`. Used to keep the export's evidence next to

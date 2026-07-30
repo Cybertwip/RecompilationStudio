@@ -68,6 +68,78 @@ add_subdirectory(3rdparty/oclero/qlementine)
 add_subdirectory(3rdparty/oclero/qlementine-icons)
 add_subdirectory(3rdparty/oclero/qtappinstancemanager)
 
+# ── psvpfsparser: the Vita's PFS layer ─────────────────────────────────────
+#
+# A PSVita application's own files sit behind PFS, whose key comes from the
+# title's licence. Studio does not reimplement that: psvpfstools is the
+# reference implementation of the format and it is already in this repository,
+# vendored under the vita2hos front-end's Vita3K dependency, so it is compiled
+# in from there rather than copied or paraphrased.
+#
+# Three of its files are left out. OpenSSLCryptoOperations and
+# CryptoOperationsFactory would drag OpenSSL into Studio for ten primitives
+# that src/GuestCrypto.h already has; src/VitaPfs.cpp implements the same
+# ICryptoOperations interface against it instead. PsvPfsParserConfig is the
+# command-line driver, and it pulls in the factory.
+set(PSVPFS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../extra/vita2hos/external/Vita3K/external/psvpfstools")
+if(NOT EXISTS "${PSVPFS_ROOT}/psvpfsparser/PfsFilesystem.cpp")
+  message(FATAL_ERROR
+    "psvpfstools is missing at ${PSVPFS_ROOT}. It is a nested submodule of "
+    "extra/vita2hos; run `git submodule update --init --recursive`. Studio "
+    "cannot open a PSVita title's PFS layer without it, and a build that "
+    "quietly dropped that would produce exports with an encrypted eboot.bin.")
+endif()
+
+add_library(psvpfs STATIC
+  "${PSVPFS_ROOT}/libb64/src/cdecode.c"
+  "${PSVPFS_ROOT}/libb64/src/cencode.c"
+  "${PSVPFS_ROOT}/libzrif/src/keyflate.c"
+  "${PSVPFS_ROOT}/libzrif/src/licdec.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/F00DFileKeyEncryptor.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/F00DKeyEncryptorFactory.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/F00DNativeKeyEncryptor.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/FilesDbParser.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/FlagOperations.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/HashTree.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/IcvPrimitives.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/LocalKeyGenerator.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/LocalKeys.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/NodeIcvCalculator.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/PfsCryptEngine.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/PfsCryptEngineBase.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/PfsCryptEngineSelectors.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/PfsFile.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/PfsFilesystem.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/PfsKeyGenerator.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/PfsKeys.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/PfsPageMapper.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/SceKernelUtilsForDriver.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/SceSblSsMgrForDriver.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/SecretGenerator.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/UnicvDbParser.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/UnicvDbTypes.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/UnicvDbUtils.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/Utils.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/rif2zrif.cpp"
+  "${PSVPFS_ROOT}/psvpfsparser/zrif2rif.cpp"
+)
+target_include_directories(psvpfs PUBLIC
+  "${PSVPFS_ROOT}/psvpfsparser"
+  "${PSVPFS_ROOT}/libb64/include"
+  "${PSVPFS_ROOT}/libzrif/include"
+)
+target_include_directories(psvpfs PRIVATE ${ZLIB_INCLUDE_DIR})
+target_link_libraries(psvpfs PRIVATE ZLIB::ZLIB)
+target_compile_features(psvpfs PUBLIC cxx_std_17)
+set_target_properties(psvpfs PROPERTIES
+  AUTOMOC OFF AUTORCC OFF AUTOUIC OFF
+  POSITION_INDEPENDENT_CODE ON)
+if(NOT MSVC)
+  # Vendored third-party code, compiled as it stands. Its warnings are not
+  # Studio's to fix, and a wall of them hides the ones that are.
+  target_compile_options(psvpfs PRIVATE -w)
+endif()
+
 set(STUDIO_CORE_SOURCES
   src/BiosBrandingPatcher.cpp
   src/BiosBrandingPatcher.h
@@ -94,6 +166,8 @@ set(STUDIO_CORE_SOURCES
   src/SteganosClient.h
   src/SwitchNsp.cpp
   src/SwitchNsp.h
+  src/VitaPfs.cpp
+  src/VitaPfs.h
   src/VitaPkg.cpp
   src/VitaPkg.h
   ../runtime/src/iso_reader.cpp
@@ -132,6 +206,7 @@ target_link_libraries(PSXRecompStudio PRIVATE
   qlementine-icons
   oclero::QtAppInstanceManager
   QuaZip
+  psvpfs
   fmt
 )
 
@@ -201,6 +276,8 @@ if(BUILD_TESTING)
     src/PipelineWorker.h
     src/SwitchNsp.cpp
     src/SwitchNsp.h
+    src/VitaPfs.cpp
+    src/VitaPfs.h
     src/VitaPkg.cpp
     src/VitaPkg.h
     ../runtime/src/iso_reader.cpp
@@ -217,7 +294,7 @@ if(BUILD_TESTING)
     ../recompiler/include
   )
   target_link_libraries(PSXRecompStudioTests PRIVATE
-    Qt6::Core Qt6::Core5Compat Qt6::Gui Qt6::Widgets Qt6::Svg Qt6::Network QuaZip fmt
+    Qt6::Core Qt6::Core5Compat Qt6::Gui Qt6::Widgets Qt6::Svg Qt6::Network QuaZip psvpfs fmt
   )
   add_test(NAME PSXRecompStudioTests COMMAND PSXRecompStudioTests)
 

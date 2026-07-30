@@ -197,6 +197,81 @@ QByteArray aesEcbDecrypt(const QByteArray& key, const QByteArray& data) {
   return out;
 }
 
+bool aesCbcEncrypt(const QByteArray& key, const quint8* src, quint8* dst,
+                   qsizetype size, quint8 iv[16]) {
+  const Aes aes(key);
+  if (!aes.isValid() || size < 0 || size % 16 != 0) return false;
+  for (qsizetype at = 0; at < size; at += 16) {
+    quint8 block[16];
+    for (int i = 0; i < 16; ++i) block[i] = static_cast<quint8>(src[at + i] ^ iv[i]);
+    aes.encryptBlock(block, dst + at);
+    std::memcpy(iv, dst + at, 16);
+  }
+  return true;
+}
+
+bool aesCbcDecrypt(const QByteArray& key, const quint8* src, quint8* dst,
+                   qsizetype size, quint8 iv[16]) {
+  const Aes aes(key);
+  if (!aes.isValid() || size < 0 || size % 16 != 0) return false;
+  for (qsizetype at = 0; at < size; at += 16) {
+    // Saved first: src and dst are allowed to be the same buffer, and the
+    // ciphertext this block chains from is about to be written over.
+    quint8 chain[16];
+    std::memcpy(chain, src + at, 16);
+    quint8 block[16];
+    aes.decryptBlock(src + at, block);
+    for (int i = 0; i < 16; ++i) dst[at + i] = static_cast<quint8>(block[i] ^ iv[i]);
+    std::memcpy(iv, chain, 16);
+  }
+  return true;
+}
+
+QByteArray aesCmac(const QByteArray& key, const char* data, qsizetype size) {
+  const Aes aes(key);
+  if (!aes.isValid() || size < 0) return {};
+
+  // Subkeys: L = E(K, 0), then two big-endian doublings in GF(2^128).
+  auto doubleKey = [](quint8 value[16]) {
+    quint8 carry = 0;
+    for (int i = 15; i >= 0; --i) {
+      const quint8 next = static_cast<quint8>((value[i] >> 7u) & 1u);
+      value[i] = static_cast<quint8>((value[i] << 1u) | carry);
+      carry = next;
+    }
+    if (carry) value[15] ^= 0x87u;
+  };
+  quint8 zero[16] = {};
+  quint8 k1[16];
+  aes.encryptBlock(zero, k1);
+  doubleKey(k1);
+  quint8 k2[16];
+  std::memcpy(k2, k1, 16);
+  doubleKey(k2);
+
+  // The last block is padded and mixed with a different subkey depending on
+  // whether the message ended on a block boundary; that is what makes CMAC
+  // reject a message and its zero-padding as different inputs.
+  const bool whole = size != 0 && size % 16 == 0;
+  const qsizetype blocks = whole ? size / 16 : size / 16 + 1;
+  quint8 last[16] = {};
+  const qsizetype tailAt = (blocks - 1) * 16;
+  const qsizetype tail = size - tailAt;
+  std::memcpy(last, data + tailAt, static_cast<size_t>(tail));
+  if (!whole) last[tail] = 0x80u;
+  for (int i = 0; i < 16; ++i) last[i] ^= (whole ? k1[i] : k2[i]);
+
+  quint8 state[16] = {};
+  for (qsizetype block = 0; block + 1 < blocks; ++block) {
+    for (int i = 0; i < 16; ++i)
+      state[i] ^= static_cast<quint8>(data[block * 16 + i]);
+    aes.encryptBlock(state, state);
+  }
+  for (int i = 0; i < 16; ++i) state[i] ^= last[i];
+  aes.encryptBlock(state, state);
+  return QByteArray(reinterpret_cast<const char*>(state), 16);
+}
+
 CtrStream::CtrStream(const QByteArray& key, const QByteArray& baseCounter) {
   if (baseCounter.size() != 16) return;
   if (!aes_.setKey(key)) return;

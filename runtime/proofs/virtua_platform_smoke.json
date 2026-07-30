@@ -1,107 +1,188 @@
 {
-  "schema": 1,
-  "created_utc": "2026-07-27T07:32:15+00:00",
-  "repository_commit": "f5a6f3e0eda0730ca0456ac9a3b5243ca5de7997",
-  "bridge_abi": 2,
-  "native_device": "/dev/native0",
-  "horizon_service_device": "/dev/horizon0",
-  "artifacts": {
-    "playstation_runtime": {
-      "path": "/private/tmp/psx-virtua-runtime-smoke/build/PSXVirtuaSmoke.virtua",
-      "sha256": "06b37cbf41f352b8aaa02c8279988553249bb4861febc97a9cebc899110d5109",
-      "size": 51834058,
-      "magic": "0x56495254",
-      "version": 3,
-      "entry_offset": 7888,
-      "blob_size": 51792426,
-      "relocation_count": 5197,
-      "bss_size": 50114482,
-      "gp_offset": 0,
-      "flags": "0x403",
-      "architecture": "arm32",
-      "gui": true,
-      "cooperative": true,
-      "executed": false
-    },
-    "gba_native": {
-      "path": "/private/tmp/gba-native-studio-smoke/out/Studio Native Test-Virtua-ARM/Studio Native Test.virtua",
-      "sha256": "1a1bcb13e8f2f4efdb73042c89781587cdf638cb2520a53676ab00abcaf372e2",
-      "size": 1404,
-      "magic": "0x56495254",
-      "version": 3,
-      "entry_offset": 800,
-      "blob_size": 1308,
-      "relocation_count": 5,
-      "bss_size": 4,
-      "gp_offset": 0,
-      "flags": "0x403",
-      "architecture": "arm32",
-      "gui": true,
-      "cooperative": true,
-      "executed": false
-    },
-    "vita_native": {
-      "path": "/private/tmp/vita2mvii-build/steganos-package/vita2mvii/Release/vita2mvii.virtua",
-      "sha256": "cf91c08118bcc2e73ac799f6e9a1c7c4f66c06efbb2b7eaa3448b4c99b5a2f7d",
-      "size": 1512,
-      "magic": "0x56495254",
-      "version": 3,
-      "entry_offset": 896,
-      "blob_size": 1416,
-      "relocation_count": 5,
-      "bss_size": 4,
-      "gp_offset": 0,
-      "flags": "0x403",
-      "architecture": "arm32",
-      "gui": true,
-      "cooperative": true,
-      "executed": false
-    },
-    "horizon_native": {
-      "path": "/private/tmp/horizon2mvii-build/steganos-package/horizon2mvii/Release/horizon2mvii.virtua",
-      "sha256": "aa058704f27f7163081e99ed641cbd6d2f9b71296f3b0e3b26fee592e799f1dd",
-      "size": 1416,
-      "magic": "0x56495254",
-      "version": 3,
-      "entry_offset": 768,
-      "blob_size": 1320,
-      "relocation_count": 5,
-      "bss_size": 4,
-      "gp_offset": 0,
-      "flags": "0x403",
-      "architecture": "arm32",
-      "gui": true,
-      "cooperative": true,
-      "executed": false
+  "schema": 2,
+  "created_utc": "2026-07-29T00:00:00+00:00",
+
+  "note": "Schema 1 (2026-07-27) certified a /dev/native0 + /dev/horizon0 ioctl bridge. Neither device nor any MVII_NATIVE_*/MVII_HORIZON_* ioctl exists in PowerEngine, so what it certified was that four trivial launchers compiled and packaged -- each of which would have failed at its first open(). The 1404/1512/1416-byte artifacts it recorded are the size of that: launchers with nothing behind them. Those rows are retained below under superseded_schema_1 rather than deleted, because the hashes are the record of what was actually built then, but they are NOT evidence about the current tree and none of them is re-asserted here. Only the horizon2mvii row was rebuilt and re-inspected on 2026-07-29.",
+
+  "verified_2026_07_29": {
+    "horizon2mvii": {
+      "model": "WINE. The guest's ARMv7 instructions execute on the Cortex-A7 directly; Horizon's kernel, SVC layer and IPC are reimplemented on MVII. No CPU emulation, no interpreter, no static recompilation.",
+      "toolchain": {
+        "driver": "POWERENGINE_ROOT/build/Release/package/bin/Release/bundles/compiler/bin/compiler",
+        "clang_version": "22.1.4",
+        "target": "armv7a-none-eabi",
+        "cpu": "cortex-a7",
+        "instruction_set": "-marm",
+        "float_abi": "soft"
+      },
+      "armv7_only_guard": {
+        "asserted": "configuring without the Virtua toolchain fails at CMakeLists.txt:34",
+        "checked": true,
+        "host_configure_result": "FATAL_ERROR as designed"
+      },
+      "elf": {
+        "path": "/tmp/h2m-build/horizon2mvii.elf",
+        "sha256": "104be9503a9f7229a422c7a1349fec2eb64347578beb2740781ceee666b79b61",
+        "format": "elf32-littlearm",
+        "architecture": "arm",
+        "start_address": "0x00001730"
+      },
+      "virtua": {
+        "path": "/tmp/h2m-build/horizon2mvii.virtua",
+        "sha256": "056ef34e2b542e748c630e23a7f58ac206aeb8d79a0add8938f779a104394553",
+        "size": 63465,
+        "magic": "0x56495254",
+        "version": 3,
+        "entry_offset": 5936,
+        "blob_size": 63361,
+        "relocation_count": 6,
+        "bss_size": 15977,
+        "gp_offset": 0,
+        "flags": "0x403",
+        "architecture": "arm32",
+        "gui": true,
+        "cooperative": true,
+        "executed": false
+      },
+      "disassembly_checks": [
+        {
+          "what": "horizon_context_save / horizon_context_restore",
+          "why": "naked asm; a compiler-inserted prologue would corrupt the context switch",
+          "found": "exactly the five written ARM instructions at 0x4204 and 0x3c24, all cond=AL 4-byte encodings, no prologue or epilogue",
+          "passed": true
+        },
+        {
+          "what": "TPIDRURO access",
+          "why": "a Horizon thread finds its TLS block, and therefore its IPC command buffer, through this register",
+          "found": "mcr p15,0,rX,c13,c0,3 at three write sites and mrc at one read site (the table-vs-register cross-check in horizon_kernel_current_ipc_buffer)",
+          "passed": true
+        },
+        {
+          "what": "guest entry privilege bracket",
+          "why": "an svc executed in SVC mode clobbers LR_svc/SPSR_svc; System mode banks cleanly",
+          "found": "cps #0x1f (System) ... cps #0x13 (SVC) at both call sites -- 0x41bc (main thread) and 0x3ba4 (spawned-thread trampoline)",
+          "passed": true
+        },
+        {
+          "what": "vwine_make_executable cache maintenance",
+          "why": "the Cortex-A7's I-cache is not coherent with its D-cache; a stale line means executing something other than the relocated code",
+          "found": "CTR read (mrc p15,0,rX,c0,c0,1) then DCCMVAU (c7,c11,1), ICIMVAU (c7,c5,1), BPIALL (c7,c5,6)",
+          "passed": true
+        },
+        {
+          "what": "no svc instructions in the front-end itself",
+          "why": "this binary services SVCs, it does not issue them",
+          "found": "none",
+          "passed": true
+        }
+      ],
+      "source_hashes": {
+        "extra/horizon2mvii/CMakeLists.txt": "cc439660aed1468dbb07fb4d6f50a618c37423ad9c244eb960296f29beeee8ac",
+        "extra/horizon2mvii/source/horizon_main.c": "4b8036b00acf339f295789dc41a1ca8eb8afaedce7ed99e620020493a655da93",
+        "extra/horizon2mvii/source/horizon_image.c": "72ac28b8f4c0a8cd2bcb3cecd2f4bb218e7f06031f2d3356602877f665785d89",
+        "extra/horizon2mvii/source/horizon_kernel.c": "00635351c6dfe3cb8ae2dc5f79bfd41205cc443197f92b04d4045e6b95191eb3",
+        "extra/horizon2mvii/source/horizon_svc.c": "e0fff113dcf63288024b75f49b49558c9ef06bccf5c842ae9e53386275efc1ea",
+        "extra/horizon2mvii/source/horizon_ipc.c": "edf315f0d4f394f4a20272f5dd4689ed9b568d214acb49ae61b574e743bd44eb",
+        "extra/horizon2mvii/include/horizon_image.h": "f1a28ac70abe4b3bb4b925b4792df174e90c812830505da166316197cef27eb3",
+        "extra/horizon2mvii/include/horizon_kernel.h": "f15e3c59693b7b6158a33556b345b0a984a787c335bd421ea4c31207e64c4d10",
+        "extra/horizon2mvii/include/horizon_svc.h": "fe00ea112c1d8c2ff2de00c7c23b1b2a14d5cf1031c08643c6a613531c23f0a8",
+        "extra/horizon2mvii/include/horizon_ipc.h": "71fa9a0aeba33a93bdcb582a35f83c907b54f28a1758d045f4254cfe06476e56",
+        "extra/horizon2mvii/include/horizon_result.h": "91e79ea20d62028ec9b0d55e67acbecf6bd72e1fa836e42d9217df3b66b9aaa9"
+      },
+      "deleted_with_the_mock": [
+        "extra/horizon2mvii/source/main.c (opened /dev/native0, MVII_NATIVE_IOCTL_LAUNCH)",
+        "extra/horizon2mvii/source/horizon_servctl_mvii.c (/dev/horizon0, ioctl 0x485A0100)",
+        "extra/horizon2mvii/include/horizon_servctl_mvii.h (the 13 HZN_SCTL_* commands)",
+        "extra/horizon2mvii/include/horizon_format.h (horizon-linux's binfmt handoff struct; this front-end loads NRO/NSO, not that container)"
+      ],
+      "not_executed": "No guest was launched. The device was not involved in this run.",
+      "coverage_limits": [
+        "AArch64 modules are refused, not supported -- a Cortex-A7 cannot execute them",
+        "address-aliasing SVCs are refused: MVII is a flat 1:1 identity map with no per-process page tables",
+        "IPC transport is complete and sm: is implemented; hid, vi, nvdrv and fsp-srv are not, and are refused by name",
+        "the 32-bit SVC register ABI is DERIVED, not transcribed -- see abi_derivations in extra/horizon2mvii/REFERENCE_PROVENANCE.json"
+      ]
     }
   },
-  "source_hashes": {
-    "extra/virtua/include/native_bridge.h": "960cec69b18c2a6f24011a3ab70e7570d86b8cad504228c051d75968bfa991c1",
-    "extra/virtua/native/gba_native_main.c": "9339c150fd42f519d503c3ba2360ce2859713d2f37f8c9aded3373ff74e27439",
-    "extra/vita2hos/source/mvii_main.c": "1760257b89b4616709e4c5ce5f7866a08bbeb0dedbd33119ad8a9e34b7d4a95f",
-    "extra/horizon2mvii/source/main.c": "8c04e7dbccc0a82b95135f0d3dc452cf61fd5e9164cf23e81206e4e321fa7c6a",
-    "extra/horizon2mvii/source/horizon_servctl_mvii.c": "00302ba2f6ef4125d4de454c7bc848a52028204eeda67a2345ca2a0d3b4b8494"
+
+  "superseded_schema_1": {
+    "status": "NOT re-verified. Retained as the record of the 2026-07-27 run only.",
+    "created_utc": "2026-07-27T07:32:15+00:00",
+    "repository_commit": "f5a6f3e0eda0730ca0456ac9a3b5243ca5de7997",
+    "bridge_abi": 2,
+    "native_device": "/dev/native0",
+    "horizon_service_device": "/dev/horizon0",
+    "artifacts": {
+      "playstation_runtime": {
+        "path": "/private/tmp/psx-virtua-runtime-smoke/build/PSXVirtuaSmoke.virtua",
+        "sha256": "06b37cbf41f352b8aaa02c8279988553249bb4861febc97a9cebc899110d5109",
+        "size": 51834058,
+        "relocation_count": 5197,
+        "architecture": "arm32",
+        "executed": false
+      },
+      "gba_native": {
+        "path": "/private/tmp/gba-native-studio-smoke/out/Studio Native Test-Virtua-ARM/Studio Native Test.virtua",
+        "sha256": "1a1bcb13e8f2f4efdb73042c89781587cdf638cb2520a53676ab00abcaf372e2",
+        "size": 1404,
+        "architecture": "arm32",
+        "executed": false,
+        "superseded_by": "the /dev/native0 GBA launcher was replaced by gbarecomp static recompilation into extra/gba-to-mvii"
+      },
+      "vita_native": {
+        "path": "/private/tmp/vita2mvii-build/steganos-package/vita2mvii/Release/vita2mvii.virtua",
+        "sha256": "cf91c08118bcc2e73ac799f6e9a1c7c4f66c06efbb2b7eaa3448b4c99b5a2f7d",
+        "size": 1512,
+        "architecture": "arm32",
+        "executed": false,
+        "superseded_by": "vita2mvii was rewritten on the WINE model; this artifact is the launcher-era build"
+      },
+      "horizon_native": {
+        "path": "/private/tmp/horizon2mvii-build/steganos-package/horizon2mvii/Release/horizon2mvii.virtua",
+        "sha256": "aa058704f27f7163081e99ed641cbd6d2f9b71296f3b0e3b26fee592e799f1dd",
+        "size": 1416,
+        "architecture": "arm32",
+        "executed": false,
+        "superseded_by": "verified_2026_07_29.horizon2mvii"
+      }
+    },
+    "source_hashes": {
+      "extra/virtua/include/native_bridge.h": "960cec69b18c2a6f24011a3ab70e7570d86b8cad504228c051d75968bfa991c1",
+      "extra/virtua/native/gba_native_main.c": "9339c150fd42f519d503c3ba2360ce2859713d2f37f8c9aded3373ff74e27439",
+      "extra/vita2hos/source/mvii_main.c": "1760257b89b4616709e4c5ce5f7866a08bbeb0dedbd33119ad8a9e34b7d4a95f",
+      "extra/horizon2mvii/source/main.c": "8c04e7dbccc0a82b95135f0d3dc452cf61fd5e9164cf23e81206e4e321fa7c6a",
+      "extra/horizon2mvii/source/horizon_servctl_mvii.c": "00302ba2f6ef4125d4de454c7bc848a52028204eeda67a2345ca2a0d3b4b8494"
+    },
+    "verification_as_recorded_then": {
+      "studio_ctest": "passed",
+      "psx_runtime_cross_link": "passed",
+      "gba_native_pipeline_build": "passed",
+      "vita2mvii_build": "passed",
+      "horizon2mvii_build": "passed",
+      "runtime_launch_performed": false,
+      "virtua_packager_go_tests": "passed",
+      "horizon_servctl_command_match": "13_of_13"
+    },
+    "payload_staging": {
+      "vita": {
+        "source": "branding/vita/terraria.pkg",
+        "source_sha256": "da7fb890f5e67d783a3838819c0ce62427cbf59a09c8869d77f76bccc7ec3f97",
+        "executed": false
+      },
+      "horizon": {
+        "source": "branding/switch/Undertale.nsp",
+        "source_sha256": "ccd1851c55ab97e2f358705bbf44de9480b3415102db6a855663a3660ed05fba",
+        "executed": false,
+        "note": "An NSP is an encrypted archive. horizon2mvii loads NRO/NSO and does not open it."
+      }
+    }
   },
-  "vita_payload_staging": {
-    "source": "branding/vita/terraria.pkg",
-    "source_sha256": "da7fb890f5e67d783a3838819c0ce62427cbf59a09c8869d77f76bccc7ec3f97",
-    "staged_sha256": "da7fb890f5e67d783a3838819c0ce62427cbf59a09c8869d77f76bccc7ec3f97",
-    "executed": false
-  },
-  "verification": {
-    "studio_ctest": "passed",
-    "psx_runtime_cross_link": "passed",
-    "gba_native_pipeline_build": "passed",
-    "vita2mvii_build": "passed",
-    "horizon2mvii_build": "passed",
-    "runtime_launch_performed": false,
-    "virtua_packager_go_tests": "passed",
-    "horizon_servctl_command_match": "13_of_13"
-  },
-  "horizon_payload_staging": {
-    "source": "branding/switch/Undertale.nsp",
-    "source_sha256": "ccd1851c55ab97e2f358705bbf44de9480b3415102db6a855663a3660ed05fba",
-    "staged_sha256": "ccd1851c55ab97e2f358705bbf44de9480b3415102db6a855663a3660ed05fba",
-    "executed": false
+
+  "orphaned_pending_user_decision": {
+    "note": "Left in the tree, not deleted. Nothing includes or builds either: extra/virtua/native is a standalone CMake project no parent adds, and its only source is the launcher gba-to-mvii replaced.",
+    "paths": [
+      "extra/virtua/native/",
+      "extra/virtua/include/native_bridge.h"
+    ]
   }
 }

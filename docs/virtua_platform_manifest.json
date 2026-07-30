@@ -1,29 +1,53 @@
 {
-  "schema": 1,
+  "schema": 2,
   "target": "virtua-arm",
   "format": "Virtua v3",
   "architecture_flag": 4,
   "cooperative_required": true,
+
+  "note": "Schema 1 recorded every non-PSX guest as mode 'native-bridge' against /dev/native0 guest kinds. That bridge does not exist in PowerEngine and has been removed; see the 'Removed: the native-bridge mock' section of docs/VIRTUA_PLATFORM.md. Each guest now reaches the device by one of two real routes, chosen by whether the guest CPU is the host CPU.",
+
+  "modes": {
+    "static-recompilation": "guest CPU is not ARMv7; guest code is translated to C ahead of time and compiled for Cortex-A7",
+    "direct-execution": "guest CPU is ARMv7, same as the host; guest instructions run untranslated and the guest's OS is reimplemented around them (the WINE model)"
+  },
+
   "playstation": {
-    "mode": "static-recompiled-runtime",
-    "recompilation": true
+    "mode": "static-recompilation",
+    "guest_cpu": "MIPS R3000A",
+    "recompilation": true,
+    "path": "runtime/"
   },
   "gba": {
-    "mode": "native-bridge",
-    "guest_kind": "MVII_NATIVE_GUEST_GBA_ARM7TDMI",
-    "recompilation": false
+    "mode": "static-recompilation",
+    "guest_cpu": "ARM7TDMI (ARMv4T)",
+    "recompilation": true,
+    "path": "extra/gbarecomp -> extra/gba-to-mvii",
+    "note": "Studio drives this automatically; the previous 'Native' checkbox and its /dev/native0 launcher are gone."
   },
   "vita": {
-    "mode": "native-bridge",
-    "guest_kind": "MVII_NATIVE_GUEST_VITA_ARMV7",
-    "recompilation": false
+    "mode": "direct-execution",
+    "guest_cpu": "ARMv7-A Cortex-A9",
+    "recompilation": false,
+    "path": "extra/vita2hos",
+    "armv7_only": true,
+    "shared_layer": "extra/virtua/wine"
   },
   "horizon": {
-    "mode": "native-bridge",
-    "guest_kind": "MVII_NATIVE_GUEST_HORIZON_AARCH64",
+    "mode": "direct-execution",
+    "guest_cpu": "ARMv7-A (AArch32)",
     "recompilation": false,
-    "servctl_commands": 13
+    "path": "extra/horizon2mvii",
+    "armv7_only": true,
+    "shared_layer": "extra/virtua/wine",
+    "containers": ["NRO0", "NSO0"],
+    "aarch64_supported": false,
+    "aarch64_note": "refused by name; a Cortex-A7 cannot execute AArch64 at all",
+    "ipc": "HIPC/CMIF transport complete; sm: implemented, no device services yet",
+    "svc_abi_32bit": "derived from the AArch64 ABI, documented as D1/D2/D3 in extra/horizon2mvii/include/horizon_svc.h",
+    "provenance": "extra/horizon2mvii/REFERENCE_PROVENANCE.json"
   },
+
   "proof": "runtime/proofs/virtua_platform_smoke.json",
   "dependencies": {
     "powerengine_source": "POWERENGINE_ROOT",

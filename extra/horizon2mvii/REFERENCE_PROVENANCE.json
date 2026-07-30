@@ -1,21 +1,80 @@
 {
-  "schema": 1,
-  "captured_on": "2026-07-27",
+  "schema": 2,
+  "captured_on": "2026-07-29",
+  "note": "Schema 1 described a /dev/horizon0 ioctl transport (HZN_SCTL_*) and a /dev/native0 launch path. Neither device nor either ioctl exists anywhere in PowerEngine, so that wiring was a transport to an implementation nobody wrote. It was deleted rather than ported. What replaced it executes the guest's own ARMv7 instructions on the Cortex-A7 and reimplements Horizon around them, so the references that matter now are the ones that describe Horizon's kernel and IPC behaviour, not a syscall numbering.",
+
   "sources": [
     {
+      "path": "Reference/horizon-linux/kernel/horizon/sys.c",
+      "sha256": "f398357e482102aff5e498db03b2dfeb61280152e9c8e07d6ca6a7fe8b414402",
+      "used_for": [
+        "SVC semantics, per handler, checked against every hzn_* implementation in source/horizon_kernel.c",
+        "HSYSCALL_DEFINEn parameter lists, which fix the AArch64 register order the 32-bit ABI is derived from",
+        "wait_process_wide_key_atomic argument order: x0 is the condition variable and x1 the mutex, the reverse of this kernel's parameter order (source/horizon_svc.c swaps them explicitly)",
+        "query_memory gap semantics: out of range reports INACCESSIBLE, a free gap runs to prev_vma->vm_end",
+        "get_system_tick and get_current_processor_number return a bare value, not a Result",
+        "build_result_response: HIPC reply layout and its deliberately over-reported raw word count (10 + payload words)",
+        "command_type enum and the IPC_ERR_REMOTE_PROCESS_DEAD close semantics"
+      ]
+    },
+    {
+      "path": "Reference/horizon-linux/arch/arm64/include/asm/syscall_wrapper.h",
+      "sha256": "6be8c2867e93253e413800e831f45963801ddaf4f7d060aa2652f1448a4fc486",
+      "used_for": [
+        "HSYSCALL_OUT writes the single out-value to regs->regs[1], i.e. x1 -- which is what makes r1 the out-register in the 32-bit derivation",
+        "the SVC number is the svc immediate (esr & ESR_ELx_xVC_IMM_MASK), matching minos_svc_frame.imm"
+      ]
+    },
+    {
       "path": "Reference/horizon-linux/include/uapi/linux/horizon.h",
-      "sha256": "16a223de42d9700e03c5ec8168062741022f43717018a4b83a741af25c63aa5f"
+      "sha256": "16a223de42d9700e03c5ec8168062741022f43717018a4b83a741af25c63aa5f",
+      "used_for": [
+        "struct horizon_hdr.is_64bit -- cited in include/horizon_image.h as the metadata a bare NRO/NSO does NOT carry, which is why horizon_image_probe_arch has to derive the architecture from the container itself"
+      ],
+      "transcribed": false
     },
     {
-      "path": "Reference/horizon-linux/kernel/horizon/servctl.c",
-      "sha256": "4b0874ae083ffea613d2dc5498f62a3f26d3f9f0289e9f528822390ef1f497ae"
-    },
-    {
-      "path": "Reference/mizu/horizon_servctl.h",
-      "sha256": "3e6369fbd3461aad022fbc2107e610b839f8ab0ae6c73d43e6518da082a8ffc7"
+      "path": "Reference/mizu/core/loader/loader.cpp",
+      "sha256": "bdbc5d94667d1d7886fb22f774718252a979bc72f1724d8670143ba976cac651",
+      "used_for": [
+        "NRO0/NSO0 container layout and MOD0 placement, cross-checked against switchbrew"
+      ]
     }
   ],
-  "horizon_magic": "0x70417020",
-  "servctl_command_count": 13,
+
+  "abi_derivations": {
+    "note": "No AArch32 Horizon SVC ABI exists in Reference/ -- horizon-linux's compat path is an explicit '// horizon TODO 32-bit syscalls'. The three decisions below are DERIVED from the AArch64 ABI, not transcribed. Each is stated with its reasoning and its falsifier at the top of include/horizon_svc.h.",
+    "D1": "arguments in r0..r7, results from r0, parallel to x0..x7 / x0..",
+    "D2": "64-bit arguments occupy even-aligned register pairs, low word first (AAPCS). Observable at only three call sites -- svcWaitSynchronization, svcWaitProcessWideKeyAtomic, svcGetInfo -- each of which logs its raw r0..r7 frame on first call.",
+    "D3": "MemoryInfo is the ilp32 form with 32-bit addr/size; field order follows horizon-linux, which documents the two refcounts in the opposite order to libnx and wins as the in-tree source."
+  },
+
+  "implemented": {
+    "containers": ["NRO0", "NSO0 (incl. LZ4-compressed segments)"],
+    "architectures": ["ARM32"],
+    "ipc": "HIPC/CMIF transport complete; sm: implemented",
+    "services": []
+  },
+
+  "refused_by_name": [
+    "AArch64 modules (a Cortex-A7 cannot execute them)",
+    "address aliasing: svcMapMemory, svcUnmapMemory, svcMapSharedMemory, svcUnmapSharedMemory (MVII is a flat 1:1 identity map)",
+    "services with no handler registered (hid, vi, nvdrv, fsp-srv and the rest)",
+    "SVCs this front-end does not implement",
+    "unresolved imports"
+  ],
+
+  "build_verified": {
+    "on": "2026-07-29",
+    "toolchain": "PowerEngine Virtua clang 22.1.4, --target=armv7a-none-eabi -mcpu=cortex-a7 -marm",
+    "artifacts": ["horizon2mvii.elf (elf32-littlearm)", "horizon2mvii.virtua (exec, gui, cooperative)"],
+    "checked_in_disassembly": [
+      "horizon_context_save / horizon_context_restore emit exactly the five written ARM instructions, no compiler prologue",
+      "TPIDRURO accessors emit mcr/mrc p15,0,rX,c13,c0,3",
+      "guest entry brackets with cps #0x1f (System) / cps #0x13 (SVC) at both call sites",
+      "vwine_make_executable emits the full Cortex-A7 coherency sequence: DCCMVAU, ICIMVAU, BPIALL"
+    ]
+  },
+
   "launch_tested": false
 }

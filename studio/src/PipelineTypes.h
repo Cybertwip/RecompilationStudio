@@ -139,6 +139,9 @@ inline bool targetPlatformSupportedOnHost(TargetPlatform platform) {
   return hostCanSelectTargetPlatform() || platform == hostTargetPlatform();
 }
 
+/* The exports a platform selection expands into. The platform is the only
+ * input: All is the three desktop platforms, which share one host-toolchain
+ * story, and Virtua ARM is its own cross-compiled package. */
 inline QList<TargetPlatform> concreteTargetPlatforms(TargetPlatform platform) {
   if (platform == TargetPlatform::All) {
     return { TargetPlatform::MacOS, TargetPlatform::Windows, TargetPlatform::Linux };
@@ -146,35 +149,39 @@ inline QList<TargetPlatform> concreteTargetPlatforms(TargetPlatform platform) {
   return { platform };
 }
 
-/* Vita and Horizon exist on Virtua ARM and nowhere else, and the restriction is
- * the architecture rather than a packaging gap: the whole design is that the
- * guest's ARMv7 instructions run on the device's ARMv7 CPU. A macOS or Windows
- * x86_64 build would have a loader with nothing it could branch to, which is
- * why extra/vita2hos and extra/horizon2mvii both refuse a non-ARM
- * CMAKE_SYSTEM_PROCESSOR outright. Studio makes the same call one step earlier,
- * where the platform is actually chosen. */
-inline bool systemSupportsTargetPlatform(SystemKind system, TargetPlatform platform) {
+/* Asked in the direction the choice is actually made: the platform is picked
+ * first, and it decides what can be built for it. What a platform can run is a
+ * property of its CPU, not of the export. Vita and Horizon are ARMv7-A and so
+ * is the J36's Cortex-A7, so their own instructions execute directly; an
+ * x86_64 macOS/Windows/Linux package would compile a whole loader and then
+ * have nothing it could branch to, which is why extra/vita2hos and
+ * extra/horizon2mvii both refuse a non-ARM CMAKE_SYSTEM_PROCESSOR outright.
+ * Studio makes the same call one step earlier, where the platform is chosen.
+ * The PlayStation and Game Boy Advance are recompiled to C and build on every
+ * platform. Nothing anywhere asks the reverse question. */
+inline bool targetPlatformRunsSystem(TargetPlatform platform, SystemKind system) {
   if (!systemRunsGuestNatively(system)) return true;
   return platform == TargetPlatform::VirtuaArm;
 }
 
-inline QList<TargetPlatform> concreteTargetPlatforms(TargetPlatform platform,
-                                                     SystemKind system) {
-  if (systemRunsGuestNatively(system)) return { TargetPlatform::VirtuaArm };
-  return concreteTargetPlatforms(platform);
-}
-
-/* The platform is the primary choice and the systems follow from it, because
- * what a platform can run is a property of its CPU rather than of the export.
- * Virtua ARM is the only ARMv7 target, so it is the only one that can offer the
- * two direct-execution guests; every platform can host the PlayStation and Game
- * Boy Advance recompilers, whose output is C. Order is the menu order. */
+/* The systems a platform offers, in menu order. This is the single source of
+ * truth for the System combo, and the reason a system can never contradict the
+ * selected platform: it was only ever offered because the platform runs it. */
 inline QList<SystemKind> systemsForTargetPlatform(TargetPlatform platform) {
-  QList<SystemKind> systems{ SystemKind::PlayStation, SystemKind::GameBoyAdvance };
-  for (const SystemKind guest : { SystemKind::Vita, SystemKind::Horizon }) {
-    if (systemSupportsTargetPlatform(guest, platform)) systems.append(guest);
+  QList<SystemKind> systems;
+  for (const SystemKind system : { SystemKind::PlayStation, SystemKind::GameBoyAdvance,
+                                   SystemKind::Vita, SystemKind::Horizon }) {
+    if (targetPlatformRunsSystem(platform, system)) systems.append(system);
   }
   return systems;
+}
+
+/* What a platform falls back to when the previously selected system is not one
+ * it runs — leaving Virtua ARM with Vita selected lands on the PlayStation
+ * rather than on whatever happens to sit at the old combo index. */
+inline SystemKind defaultSystemForTargetPlatform(TargetPlatform platform) {
+  const QList<SystemKind> systems = systemsForTargetPlatform(platform);
+  return systems.isEmpty() ? SystemKind::PlayStation : systems.first();
 }
 
 inline QString targetPlatformKey(TargetPlatform platform) {

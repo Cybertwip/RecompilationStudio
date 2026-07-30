@@ -586,6 +586,57 @@ int main(int argc, char** argv) {
   check(psxstudio::targetPlatformSupportedOnHost(psxstudio::TargetPlatform::All) ==
           psxstudio::hostCanSelectTargetPlatform(),
         QStringLiteral("All is available only on macOS Studio builds"));
+
+  /* The platform drives the systems and nothing asks the reverse question.
+   * Virtua ARM is the only ARMv7 platform, so it is the only one that offers
+   * the two direct-execution guests; every platform offers the two recompiled
+   * systems, whose output is C. */
+  check(psxstudio::systemsForTargetPlatform(psxstudio::TargetPlatform::VirtuaArm) ==
+          QList<psxstudio::SystemKind>{ psxstudio::SystemKind::PlayStation,
+                                        psxstudio::SystemKind::GameBoyAdvance,
+                                        psxstudio::SystemKind::Vita,
+                                        psxstudio::SystemKind::Horizon },
+        QStringLiteral("Virtua ARM offers the Vita and Nintendo Switch systems"));
+  const QList<psxstudio::TargetPlatform> desktopPlatforms{
+    psxstudio::TargetPlatform::All, psxstudio::TargetPlatform::MacOS,
+    psxstudio::TargetPlatform::Windows, psxstudio::TargetPlatform::Linux };
+  bool desktopOffersRecompiledOnly = true;
+  for (const auto platform : desktopPlatforms) {
+    desktopOffersRecompiledOnly = desktopOffersRecompiledOnly &&
+      psxstudio::systemsForTargetPlatform(platform) ==
+        QList<psxstudio::SystemKind>{ psxstudio::SystemKind::PlayStation,
+                                      psxstudio::SystemKind::GameBoyAdvance } &&
+      !psxstudio::targetPlatformRunsSystem(platform, psxstudio::SystemKind::Vita) &&
+      !psxstudio::targetPlatformRunsSystem(platform, psxstudio::SystemKind::Horizon);
+  }
+  check(desktopOffersRecompiledOnly,
+        QStringLiteral("x86_64 platforms offer only the recompiled systems"));
+  /* The invariant that lets the export read the platform alone: every target a
+   * platform expands into runs every system that platform put on offer. */
+  bool everyTargetRunsItsSystems = true;
+  QList<psxstudio::TargetPlatform> everyPlatform = desktopPlatforms;
+  everyPlatform.append(psxstudio::TargetPlatform::VirtuaArm);
+  for (const auto platform : everyPlatform) {
+    for (const auto system : psxstudio::systemsForTargetPlatform(platform)) {
+      for (const auto target : psxstudio::concreteTargetPlatforms(platform)) {
+        everyTargetRunsItsSystems = everyTargetRunsItsSystems &&
+          psxstudio::targetPlatformRunsSystem(target, system);
+      }
+    }
+  }
+  check(everyTargetRunsItsSystems,
+        QStringLiteral("every expanded target runs every system its platform offers"));
+  check(psxstudio::defaultSystemForTargetPlatform(psxstudio::TargetPlatform::VirtuaArm) ==
+            psxstudio::SystemKind::PlayStation &&
+          psxstudio::defaultSystemForTargetPlatform(psxstudio::TargetPlatform::MacOS) ==
+            psxstudio::SystemKind::PlayStation &&
+          psxstudio::systemKindFromKey(QStringLiteral("switch")) ==
+            psxstudio::SystemKind::Horizon &&
+          psxstudio::systemKindDisplayName(psxstudio::SystemKind::Horizon) ==
+            QStringLiteral("Nintendo Switch") &&
+          psxstudio::systemKindDisplayName(psxstudio::SystemKind::Vita) ==
+            QStringLiteral("PlayStation Vita"),
+        QStringLiteral("leaving Virtua ARM falls back to the PlayStation"));
   gipRequest.targetPlatform = psxstudio::TargetPlatform::Windows;
   check(psxstudio::targetPlatformKey(gipRequest.targetPlatform) == QStringLiteral("windows") &&
           psxstudio::targetPlatformFromKey(QStringLiteral("WINDOWS")) ==

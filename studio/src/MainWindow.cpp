@@ -233,20 +233,9 @@ MainWindow::MainWindow(QWidget* parent)
   inputLayout->setSpacing(10);
   inputLayout->addWidget(makeSectionTitle(QStringLiteral("App inputs"), inputCard_));
 
-  auto* systemRow = new QWidget(inputCard_);
-  systemRow->setMinimumHeight(34);
-  auto* systemLayout = new QHBoxLayout(systemRow);
-  systemLayout->setContentsMargins(0, 0, 0, 0);
-  auto* systemLabel = new QLabel(QStringLiteral("System"), systemRow);
-  systemLabel->setMinimumWidth(142);
-  systemCombo_ = new QComboBox(systemRow);
-  // Filled by repopulateSystemCombo() once the platform combo exists below:
-  // which systems are on offer is a consequence of the selected platform.
-  configureReadOnlyComboBox(systemCombo_);
-  systemLayout->addWidget(systemLabel);
-  systemLayout->addWidget(systemCombo_, 1);
-  inputLayout->addWidget(systemRow);
-
+  /* The platform is the first choice and it stands above the system, because it
+   * decides which systems exist at all: the System combo below is filled from
+   * whatever is selected here, never the other way around. */
   auto* platformRow = new QWidget(inputCard_);
   platformRow->setMinimumHeight(34);
   auto* platformLayout = new QHBoxLayout(platformRow);
@@ -260,12 +249,32 @@ MainWindow::MainWindow(QWidget* parent)
   platformCombo_->addItem(QStringLiteral("Linux"), targetPlatformKey(TargetPlatform::Linux));
   platformCombo_->addItem(QStringLiteral("Virtua ARM"), targetPlatformKey(TargetPlatform::VirtuaArm));
   configureReadOnlyComboBox(platformCombo_);
+  platformCombo_->setToolTip(QStringLiteral(
+    "The platform decides what can be built for it. Virtua ARM is the device's "
+    "own ARMv7, so it is the only platform that can run PlayStation Vita and "
+    "Nintendo Switch applications, whose code is never recompiled."));
   platformCombo_->setCurrentIndex(0);
-  repopulateSystemCombo();
   platformLayout->addWidget(platformLabel);
   platformLayout->addWidget(platformCombo_, 1);
   inputLayout->addWidget(platformRow);
-  platformRow->setVisible(true);
+
+  auto* systemRow = new QWidget(inputCard_);
+  systemRow->setMinimumHeight(34);
+  auto* systemLayout = new QHBoxLayout(systemRow);
+  systemLayout->setContentsMargins(0, 0, 0, 0);
+  auto* systemLabel = new QLabel(QStringLiteral("System"), systemRow);
+  systemLabel->setMinimumWidth(142);
+  systemCombo_ = new QComboBox(systemRow);
+  // Filled by repopulateSystemCombo() from the platform combo above: which
+  // systems are on offer is a consequence of the selected platform.
+  configureReadOnlyComboBox(systemCombo_);
+  systemCombo_->setToolTip(QStringLiteral(
+    "PlayStation Vita and Nintendo Switch applications run their own ARMv7 "
+    "code, so they are listed here only while the platform is Virtua ARM."));
+  systemLayout->addWidget(systemLabel);
+  systemLayout->addWidget(systemCombo_, 1);
+  inputLayout->addWidget(systemRow);
+  repopulateSystemCombo();
 
   useCi_ = new QCheckBox(QStringLiteral("Use CI"), inputCard_);
   useCi_->setObjectName(QStringLiteral("useCiCheckBox"));
@@ -811,11 +820,15 @@ void MainWindow::repopulateSystemCombo() {
   for (const SystemKind system : systems) {
     systemCombo_->addItem(systemKindDisplayName(system), systemKindKey(system));
   }
-  /* Leaving Virtua ARM drops Vita and Horizon from the list; the export falls
-   * back to the PlayStation rather than to whatever happens to sit at the
-   * index the old selection used to occupy. */
-  const int index = systemCombo_->findData(wanted);
-  systemCombo_->setCurrentIndex(index >= 0 ? index : 0);
+  /* Leaving Virtua ARM drops Vita and Horizon from the list; the selection
+   * falls back to the platform's own first system rather than to whatever
+   * happens to sit at the index the old selection used to occupy. */
+  int index = systemCombo_->findData(wanted);
+  if (index < 0) {
+    index = systemCombo_->findData(
+      systemKindKey(defaultSystemForTargetPlatform(platform)));
+  }
+  systemCombo_->setCurrentIndex(std::max(index, 0));
 }
 
 void MainWindow::loadSettings() {
@@ -1640,7 +1653,9 @@ PipelineRequest MainWindow::requestFromUi(bool overwrite) const {
 QList<PipelineRequest> MainWindow::requestsFromUi(bool overwrite) const {
   QList<PipelineRequest> requests;
   const PipelineRequest base = requestFromUi(overwrite);
-  const auto targets = concreteTargetPlatforms(base.targetPlatform, base.system);
+  /* The platform alone decides what is exported. The system cannot disagree
+   * with it: the System combo only ever offered systems this platform runs. */
+  const auto targets = concreteTargetPlatforms(base.targetPlatform);
   if (batchCheck_->isChecked()) {
     for (const auto& entry : batchEntries_) {
       for (const auto target : targets) {
@@ -2118,10 +2133,12 @@ void MainWindow::updatePlatformControls() {
   macosGipGamepad_->setVisible(!guest && includesMacos);
   macosGipGamepad_->setEnabled(!guest && includesMacos && !busy);
   // Virtua consumes PowerEngine in place and uses its LLVM/compiler bundle;
-  // neither dependency is duplicated into the generated framework.
-  const bool needsVirtuaRoots = guest ||
-                                selectedPlatform == TargetPlatform::VirtuaArm ||
-                                selectedPlatform == TargetPlatform::All;
+  // neither dependency is duplicated into the generated framework. It is the
+  // only cross-compiled target, so only a selection that expands to it needs
+  // those roots — All is the three desktop platforms and builds with the host
+  // toolchain.
+  const bool needsVirtuaRoots =
+    concreteTargetPlatforms(selectedPlatform).contains(TargetPlatform::VirtuaArm);
   powerEngineEdit_->parentWidget()->setVisible(needsVirtuaRoots);
   powerEngineEdit_->parentWidget()->setEnabled(needsVirtuaRoots && !busy);
   llvmEdit_->parentWidget()->setVisible(needsVirtuaRoots);
@@ -2220,7 +2237,7 @@ void MainWindow::updateBuildButton() {
   }
   const bool ciReady = !buildMode || !useCi_->isChecked() ||
                        (ciPanel_ && ciPanel_->canScheduleBuilds());
-  const auto selectedTargets = concreteTargetPlatforms(selectedPlatform, currentSystem_);
+  const auto selectedTargets = concreteTargetPlatforms(selectedPlatform);
   const bool localPlatformReady = !buildMode || useCi_->isChecked() ||
     std::all_of(selectedTargets.cbegin(), selectedTargets.cend(),
                 [this](TargetPlatform platform) {
@@ -2232,9 +2249,7 @@ void MainWindow::updateBuildButton() {
                 });
   const bool analysisReady = guest || !ghidraEdit_->text().isEmpty();
   const bool biosReady = guest || !biosEdit_->text().isEmpty();
-  const bool needsVirtuaRoots = guest ||
-                                selectedPlatform == TargetPlatform::VirtuaArm ||
-                                selectedPlatform == TargetPlatform::All;
+  const bool needsVirtuaRoots = selectedTargets.contains(TargetPlatform::VirtuaArm);
   const bool virtuaRootsReady = !needsVirtuaRoots ||
     (!powerEngineEdit_->text().trimmed().isEmpty() &&
      !llvmEdit_->text().trimmed().isEmpty());

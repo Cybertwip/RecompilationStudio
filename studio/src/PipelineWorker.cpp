@@ -4,6 +4,7 @@
 #include "CueSheet.h"
 #include "DiscInspector.h"
 #include "GbaSupport.h"
+#include "GuestAppSupport.h"
 #include "PipelineSupport.h"
 
 #include <QCoreApplication>
@@ -1046,6 +1047,10 @@ void PipelineWorker::run(PipelineRequest request) {
   cancelRequested_.store(false, std::memory_order_relaxed);
   if (request.system == SystemKind::GameBoyAdvance) {
     runGba(request);
+    return;
+  }
+  if (systemRunsGuestNatively(request.system)) {
+    runGuestApp(request);
     return;
   }
   const bool windowsTarget = request.targetPlatform == TargetPlatform::Windows;
@@ -3674,7 +3679,9 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   const bool localBuild = request.exportMode == ExportMode::Build && !remoteCiBuild;
   const bool signingRequested = localBuild && macosTarget &&
     !request.certificatePath.trimmed().isEmpty() && !request.certificatePassword.isEmpty();
-  const int totalStages = localBuild ? 11 : 8;
+  // Ghidra has no stage of its own: it runs inside the recompilation stage,
+  // once per pass, because it is seeded from what that pass translated.
+  const int totalStages = localBuild ? 10 : 7;
   int stage = 0;
   QString workspace;
   QString error;
@@ -4005,204 +4012,251 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   }
 
   // ── Ghidra ─────────────────────────────────────────────────────────────
-  // Function discovery is seeded from a headless analysis rather than from a
-  // scan, so every seed the recompiler receives is evidence-backed.
-  nextStage(QStringLiteral("Analyze cartridge with Ghidra"));
+  // Ghidra does not run as its own stage. It runs inside the recompilation loop
+  // below, once per pass, seeded with the extents that pass proved are code.
+  //
+  // It used to run first, over the whole cartridge, before the recompiler had
+  // said anything. A .gba image has no section table, so that asked it to find
+  // functions in megabytes of undifferentiated bytes, and on ARMv4T that
+  // mistake compounds: an orphan THUMB `bl.lo` halfword — one halfword in 32 of
+  // arbitrary data — decodes as a call through LR, so ArmAnalyzer disassembles
+  // at whatever the constant propagator holds in LR and creates a function
+  // there, which is analyzed in turn. Measured on a 16 MB cartridge: 119,202
+  // functions, 113,516 COMPUTED_CALL references against 22 real COMPUTED_JUMP
+  // switch targets, bodies over 53% of the image, 26 minutes of analysis. Of
+  // the 131,737 reference sources it recorded, 426 landed on an instruction
+  // gba_recompile had decoded, and 374 of those were themselves orphan `bl.lo`
+  // halfwords; not one candidate passed a seed rule. The stage cost 26 minutes
+  // to contribute nothing.
+  //
+  // So the dependency is inverted. The recompiler runs first from the entry
+  // point alone and reports the extents its recursive descent proved reachable;
+  // those extents seed the analysis. Ghidra still follows flow wherever it
+  // leads — resolving the switch and pointer targets gba_recompile could not is
+  // the only reason it is here — but it starts only from instructions the
+  // recompiler decoded, so the cascade has nowhere to begin. Each pass widens
+  // the extents, so each pass gets its own analysis, until admission reaches a
+  // fixed point.
   const QString projectName = QStringLiteral("GBA_%1").arg(
     game.gameCode.isEmpty() ? sanitizedFileStem(request.windowTitle)
                             : sanitizedFileStem(game.gameCode));
-  const QString ghidraAnalysisPath = QDir(proofDir).filePath(QStringLiteral("ghidra_analysis.json"));
   const QString romForAnalysis = QDir(inputsDir).filePath(QStringLiteral("game.gba"));
   constexpr quint32 kGbaRomBase = 0x08000000u;
   const quint32 romEndExclusive =
     kGbaRomBase + static_cast<quint32>(game.romSize);
-  const QStringList ghidraArgs{
-    ghidraDir,
-    projectName,
-    QStringLiteral("-import"), romForAnalysis,
-    QStringLiteral("-overwrite"),
-    QStringLiteral("-processor"), QStringLiteral("ARM:LE:32:v4t"),
-    QStringLiteral("-loader"), QStringLiteral("BinaryLoader"),
-    QStringLiteral("-loader-baseAddr"), hex32(kGbaRomBase),
-    QStringLiteral("-loader-blockName"), QStringLiteral("ROM"),
-    QStringLiteral("-scriptPath"), ghidraScriptsPath,
-    QStringLiteral("-prescript"), QStringLiteral("SeedGbaEntry.java"),
-      hex32(kGbaRomBase), hex32(game.entryTarget),
-    QStringLiteral("-postscript"), QStringLiteral("ExportGbaAnalysis.java"),
-      ghidraAnalysisPath, hex32(game.entryTarget), hex32(kGbaRomBase),
-      hex32(romEndExclusive),
-    QStringLiteral("-analysisTimeoutPerFile"), QStringLiteral("5400"),
-    QStringLiteral("-max-cpu"), QString::number(std::max(1, QThread::idealThreadCount())),
-  };
-  QByteArray ghidraOutput;
-  if (!runCommand(analyzeHeadless, ghidraArgs, workspace,
-                  QStringLiteral("analyzeHeadless <workspace> %1 -import game.gba [ARMv4T analysis]")
-                    .arg(projectName),
-                  110 * 60 * 1000, &ghidraOutput)) {
-    if (cancellationRequested()) cancelledOut();
-    else fail(QStringLiteral("Ghidra headless analysis failed."));
-    return;
-  }
-  // A timed-out analysis still writes a manifest, and that manifest is a
-  // truncated function list. Trusting it would silently shrink the coverage
-  // oracle, so the timeout is fatal rather than a warning.
-  if (QString::fromUtf8(ghidraOutput).contains(QStringLiteral("Analysis timed out"))) {
-    fail(QStringLiteral("Ghidra's analysis timed out, so its function list is incomplete and cannot be used as the coverage oracle."));
-    return;
-  }
-  if (!QFileInfo(ghidraAnalysisPath).isFile()) {
-    fail(QStringLiteral("Ghidra did not produce its analysis manifest."));
-    return;
-  }
-  const auto ghidraDocument = readJson(ghidraAnalysisPath, error);
-  if (ghidraDocument.isNull()) {
-    fail(error);
-    return;
-  }
-  const auto ghidraObject = ghidraDocument.object();
-  QString observedEntry = ghidraObject.value(QStringLiteral("entry")).toString().toLower();
-  observedEntry.remove(QStringLiteral("0x"));
-  const QString expectedEntry =
-    QStringLiteral("%1").arg(game.entryTarget, 8, 16, QLatin1Char('0')).toLower();
-  const QString observedLanguage = ghidraObject.value(QStringLiteral("language")).toString();
-  const QString observedEntryFunction =
-    ghidraObject.value(QStringLiteral("entry_function")).toString();
-  bool romBlockMatches = false;
-  for (const auto& blockValue : ghidraObject.value(QStringLiteral("memory_blocks")).toArray()) {
-    const auto block = blockValue.toObject();
-    if (block.value(QStringLiteral("name")).toString() != QStringLiteral("ROM")) continue;
-    bool okStart = false;
-    const quint32 startAddress =
-      block.value(QStringLiteral("start")).toString().toUInt(&okStart, 16);
-    romBlockMatches = okStart && startAddress == kGbaRomBase &&
-                      block.value(QStringLiteral("initialized")).toBool();
-    break;
-  }
-  // Cross-check Ghidra's decoded entry word against the cartridge bytes so the
-  // analysis is tied to this exact image and not a stale project.
-  QString observedWord;
-  QString expectedWord;
-  bool entryWordMatches = false;
-  const auto entryInstructions = ghidraObject.value(QStringLiteral("entry_instructions")).toArray();
-  if (!entryInstructions.isEmpty() && game.entryTarget >= kGbaRomBase) {
-    observedWord = entryInstructions.first().toObject()
-                     .value(QStringLiteral("word_little_endian")).toString().toUpper();
-    QFile romFile(request.romPath);
-    if (romFile.open(QIODevice::ReadOnly) &&
-        romFile.seek(game.entryTarget - kGbaRomBase)) {
-      const QByteArray word = romFile.read(4);
-      if (word.size() == 4) {
-        expectedWord = hex32(qFromLittleEndian<quint32>(
-          reinterpret_cast<const uchar*>(word.constData())));
-        entryWordMatches = observedWord == expectedWord;
+  QJsonArray ghidraPassRecords;
+  int modeConflictCount = 0;
+  // Runs one analysis over `extentsPath` and leaves the verified manifest in
+  // `manifest`. Every failure is terminal: a manifest that does not match these
+  // cartridge bytes, or one truncated by a timeout, would be a proof artifact
+  // that quietly says less than it appears to.
+  auto analyzeWithGhidra = [&](int iteration, const QString& extentsPath,
+                               QJsonObject& manifest) -> bool {
+    const QString ghidraAnalysisPath = QDir(proofDir).filePath(
+      QStringLiteral("ghidra_analysis_pass%1.json").arg(iteration));
+    const QStringList ghidraArgs{
+      ghidraDir,
+      projectName,
+      QStringLiteral("-import"), romForAnalysis,
+      QStringLiteral("-overwrite"),
+      QStringLiteral("-processor"), QStringLiteral("ARM:LE:32:v4t"),
+      QStringLiteral("-loader"), QStringLiteral("BinaryLoader"),
+      QStringLiteral("-loader-baseAddr"), hex32(kGbaRomBase),
+      QStringLiteral("-loader-blockName"), QStringLiteral("ROM"),
+      QStringLiteral("-scriptPath"), ghidraScriptsPath,
+      QStringLiteral("-prescript"), QStringLiteral("SeedGbaEntry.java"),
+        hex32(kGbaRomBase), hex32(game.entryTarget), extentsPath,
+      QStringLiteral("-postscript"), QStringLiteral("ExportGbaAnalysis.java"),
+        ghidraAnalysisPath, hex32(game.entryTarget), hex32(kGbaRomBase),
+        hex32(romEndExclusive),
+      QStringLiteral("-analysisTimeoutPerFile"), QStringLiteral("5400"),
+      // One CPU, deliberately. This manifest is a proof artifact — seeds are
+      // admitted from it — so two runs over the same cartridge bytes have to
+      // produce the same file, and Ghidra's analyzers mutate the program they are
+      // reading. It is affordable now only because the extents cut the work by
+      // more than an order of magnitude; it was not affordable over 16 MB.
+      QStringLiteral("-max-cpu"), QStringLiteral("1"),
+    };
+    QByteArray ghidraOutput;
+    if (!runCommand(analyzeHeadless, ghidraArgs, workspace,
+                    QStringLiteral("analyzeHeadless <workspace> %1 -import game.gba [ARMv4T analysis, pass %2]")
+                      .arg(projectName).arg(iteration),
+                    110 * 60 * 1000, &ghidraOutput)) {
+      if (cancellationRequested()) cancelledOut();
+      else fail(QStringLiteral("Ghidra headless analysis failed on pass %1.").arg(iteration));
+      return false;
+    }
+    // A timed-out analysis still writes a manifest, and that manifest is a
+    // truncated function list. Trusting it would silently shrink the seed source,
+    // so the timeout is fatal rather than a warning.
+    if (QString::fromUtf8(ghidraOutput).contains(QStringLiteral("Analysis timed out"))) {
+      fail(QStringLiteral("Ghidra's analysis timed out on pass %1, so its function list is incomplete and cannot be used as a seed source.").arg(iteration));
+      return false;
+    }
+    if (!QFileInfo(ghidraAnalysisPath).isFile()) {
+      fail(QStringLiteral("Ghidra did not produce its analysis manifest on pass %1.").arg(iteration));
+      return false;
+    }
+    const auto ghidraDocument = readJson(ghidraAnalysisPath, error);
+    if (ghidraDocument.isNull()) {
+      fail(error);
+      return false;
+    }
+    manifest = ghidraDocument.object();
+    const QJsonObject& ghidraObject = manifest;
+    QString observedEntry = ghidraObject.value(QStringLiteral("entry")).toString().toLower();
+    observedEntry.remove(QStringLiteral("0x"));
+    const QString expectedEntry =
+      QStringLiteral("%1").arg(game.entryTarget, 8, 16, QLatin1Char('0')).toLower();
+    const QString observedLanguage = ghidraObject.value(QStringLiteral("language")).toString();
+    const QString observedEntryFunction =
+      ghidraObject.value(QStringLiteral("entry_function")).toString();
+    bool romBlockMatches = false;
+    for (const auto& blockValue : ghidraObject.value(QStringLiteral("memory_blocks")).toArray()) {
+      const auto block = blockValue.toObject();
+      if (block.value(QStringLiteral("name")).toString() != QStringLiteral("ROM")) continue;
+      bool okStart = false;
+      const quint32 startAddress =
+        block.value(QStringLiteral("start")).toString().toUInt(&okStart, 16);
+      romBlockMatches = okStart && startAddress == kGbaRomBase &&
+                        block.value(QStringLiteral("initialized")).toBool();
+      break;
+    }
+    // Cross-check Ghidra's decoded entry word against the cartridge bytes so the
+    // analysis is tied to this exact image and not a stale project.
+    QString observedWord;
+    QString expectedWord;
+    bool entryWordMatches = false;
+    const auto entryInstructions = ghidraObject.value(QStringLiteral("entry_instructions")).toArray();
+    if (!entryInstructions.isEmpty() && game.entryTarget >= kGbaRomBase) {
+      observedWord = entryInstructions.first().toObject()
+                       .value(QStringLiteral("word_little_endian")).toString().toUpper();
+      QFile romFile(request.romPath);
+      if (romFile.open(QIODevice::ReadOnly) &&
+          romFile.seek(game.entryTarget - kGbaRomBase)) {
+        const QByteArray word = romFile.read(4);
+        if (word.size() == 4) {
+          expectedWord = hex32(qFromLittleEndian<quint32>(
+            reinterpret_cast<const uchar*>(word.constData())));
+          entryWordMatches = observedWord == expectedWord;
+        }
       }
     }
-  }
-  const int ghidraSchema = ghidraObject.value(QStringLiteral("schema")).toInt();
-  const int ghidraFunctionCount = ghidraObject.value(QStringLiteral("function_count")).toInt();
-  const int ghidraPointerOnlyCount =
-    ghidraObject.value(QStringLiteral("pointer_referenced_count")).toInt();
-  const int ghidraUnreferencedCount =
-    ghidraObject.value(QStringLiteral("unreferenced_count")).toInt();
-  const int truncatedSourceLists =
-    ghidraObject.value(QStringLiteral("truncated_source_lists")).toInt();
-  const int modeConflictCount = ghidraObject.value(QStringLiteral("mode_conflict_count")).toInt();
-  const double regionBytes = ghidraObject.value(QStringLiteral("region_bytes")).toDouble();
-  const double gradedBodyBytes = ghidraObject.value(QStringLiteral("graded_body_bytes")).toDouble();
-  const double ghidraCodeFraction = regionBytes > 0.0 ? gradedBodyBytes / regionBytes : 0.0;
-  const int referenceTypeTotal = [&] {
-    int total = 0;
-    const auto histogram =
-      ghidraObject.value(QStringLiteral("reference_type_histogram")).toObject();
-    for (const QString& key : histogram.keys()) total += histogram.value(key).toInt();
-    return total;
-  }();
-  const bool ghidraVerified =
-    ghidraSchema == 4 &&
-    observedEntry == expectedEntry &&
-    observedLanguage == QStringLiteral("ARM:LE:32:v4t") &&
-    observedEntryFunction == QStringLiteral("entry") &&
-    romBlockMatches && entryWordMatches && ghidraFunctionCount > 0;
-  const QJsonObject ghidraVerification{
-    { QStringLiteral("schema"), 2 },
-    { QStringLiteral("status"), ghidraVerified ? QStringLiteral("CLEAN") : QStringLiteral("CONFLICT") },
-    { QStringLiteral("manifest_schema"), ghidraSchema },
-    { QStringLiteral("expected_entry"), hex32(game.entryTarget) },
-    { QStringLiteral("observed_entry"), ghidraObject.value(QStringLiteral("entry")) },
-    { QStringLiteral("entry_function"), observedEntryFunction },
-    { QStringLiteral("language"), observedLanguage },
-    { QStringLiteral("rom_block_matches_cartridge"), romBlockMatches },
-    { QStringLiteral("expected_entry_word"), expectedWord },
-    { QStringLiteral("observed_entry_word"), observedWord },
-    { QStringLiteral("entry_word_matches_cartridge"), entryWordMatches },
-    { QStringLiteral("function_count"), ghidraFunctionCount },
-    { QStringLiteral("pointer_referenced_count"), ghidraPointerOnlyCount },
-    { QStringLiteral("unreferenced_count"), ghidraUnreferencedCount },
-    { QStringLiteral("truncated_source_lists"), truncatedSourceLists },
-    { QStringLiteral("region_bytes"), regionBytes },
-    { QStringLiteral("function_body_bytes"), gradedBodyBytes },
-    { QStringLiteral("function_body_fraction"), ghidraCodeFraction },
-    // Recorded because it is what shows the function list is mostly decoded
-    // data: on a 16 MB cartridge the COMPUTED_CALL bucket runs to six figures
-    // while COMPUTED_JUMP — Ghidra's real switch-table recovery — stays in the
-    // dozens. Seed admission ignores these classes and decodes the cited
-    // instruction itself; the histogram is here so the ratio stays visible.
-    { QStringLiteral("reference_type_histogram"),
-      ghidraObject.value(QStringLiteral("reference_type_histogram")) },
-    { QStringLiteral("reference_count"), referenceTypeTotal },
-    { QStringLiteral("function_list_role"),
-      QStringLiteral("seed source, not a coverage oracle: a raw cartridge has no "
-                     "section table, so Ghidra's function list includes data it "
-                     "decoded as code") },
-    { QStringLiteral("mode_conflict_count"), modeConflictCount },
-    { QStringLiteral("mode_conflicts"), ghidraObject.value(QStringLiteral("mode_conflicts")) },
-    { QStringLiteral("verification_source"),
-      QStringLiteral("Ghidra headless post-analysis manifest and raw cartridge bytes") },
-  };
-  if (!writeJson(QDir(proofDir).filePath(QStringLiteral("ghidra_verification.json")),
-                 ghidraVerification, error)) {
-    fail(error);
-    return;
-  }
-  if (!ghidraVerified) {
-    fail(QStringLiteral("Ghidra's analysis does not match the selected cartridge; the build stopped without guessing."));
-    return;
-  }
-  // Every candidate Ghidra offers, strongest evidence first. The pointer-only
-  // tier is kept because a function-pointer table is how a GBA title reaches
-  // most of its code, and the seed rule below tests each candidate's evidence
-  // against gbarecomp's own translated extent rather than trusting the tier.
-  QJsonArray ghidraCandidates =
-    ghidraObject.value(QStringLiteral("functions")).toArray();
-  for (const auto& value :
-       ghidraObject.value(QStringLiteral("pointer_referenced_functions")).toArray()) {
-    ghidraCandidates.append(value);
-  }
-  emit logLine(QStringLiteral("Ghidra verified entry %1 and its raw instruction word.")
-                 .arg(hex32(game.entryTarget)));
-  emit logLine(QStringLiteral("Ghidra calls %1% of the cartridge code: %2 flow-referenced functions, %3 reachable only through a pointer word, %4 unreferenced. A cartridge has no section table, so this list is a seed source, not a coverage target.")
-                 .arg(ghidraCodeFraction * 100.0, 0, 'f', 1)
-                 .arg(ghidraFunctionCount).arg(ghidraPointerOnlyCount)
-                 .arg(ghidraUnreferencedCount));
-  if (truncatedSourceLists > 0) {
-    emit logLine(QStringLiteral("%1 function entries have more than %2 recorded references of one kind; the surplus is counted but not listed, so a seed that depends only on those is missed and self-heals loudly at runtime.")
-                   .arg(truncatedSourceLists)
-                   .arg(ghidraObject.value(QStringLiteral("max_recorded_sources")).toInt()));
-  }
-  if (modeConflictCount > 0) {
-    // Neither the TMode context register nor the entry alignment is
-    // trustworthy for these, so they are reported and left unseeded rather
-    // than guessed into ARM or THUMB.
-    emit logLine(QStringLiteral("%1 function entries have an ARM/THUMB mode that contradicts their alignment. They are recorded in ghidra_verification.json and deliberately not seeded:")
-                   .arg(modeConflictCount));
-    for (const auto& conflictValue : ghidraObject.value(QStringLiteral("mode_conflicts")).toArray()) {
-      const auto conflict = conflictValue.toObject();
-      emit logLine(QStringLiteral("  %1 %2 (recorded %3)")
-                     .arg(conflict.value(QStringLiteral("entry")).toString(),
-                          escapedComment(conflict.value(QStringLiteral("name")).toString()),
-                          conflict.value(QStringLiteral("tmode")).toString()));
+    const int ghidraSchema = ghidraObject.value(QStringLiteral("schema")).toInt();
+    const int ghidraFunctionCount = ghidraObject.value(QStringLiteral("function_count")).toInt();
+    const int ghidraPointerOnlyCount =
+      ghidraObject.value(QStringLiteral("pointer_referenced_count")).toInt();
+    const int ghidraUnreferencedCount =
+      ghidraObject.value(QStringLiteral("unreferenced_count")).toInt();
+    const int truncatedSourceLists =
+      ghidraObject.value(QStringLiteral("truncated_source_lists")).toInt();
+    modeConflictCount = ghidraObject.value(QStringLiteral("mode_conflict_count")).toInt();
+    const double regionBytes = ghidraObject.value(QStringLiteral("region_bytes")).toDouble();
+    const double gradedBodyBytes = ghidraObject.value(QStringLiteral("graded_body_bytes")).toDouble();
+    const double ghidraCodeFraction = regionBytes > 0.0 ? gradedBodyBytes / regionBytes : 0.0;
+    const int referenceTypeTotal = [&] {
+      int total = 0;
+      const auto histogram =
+        ghidraObject.value(QStringLiteral("reference_type_histogram")).toObject();
+      for (const QString& key : histogram.keys()) total += histogram.value(key).toInt();
+      return total;
+    }();
+    const bool ghidraVerified =
+      ghidraSchema == 4 &&
+      observedEntry == expectedEntry &&
+      observedLanguage == QStringLiteral("ARM:LE:32:v4t") &&
+      observedEntryFunction == QStringLiteral("entry") &&
+      romBlockMatches && entryWordMatches && ghidraFunctionCount > 0;
+    const QJsonObject ghidraVerification{
+      { QStringLiteral("iteration"), iteration },
+      { QStringLiteral("status"), ghidraVerified ? QStringLiteral("CLEAN") : QStringLiteral("CONFLICT") },
+      { QStringLiteral("seeded_from_extents"), extentsPath },
+      { QStringLiteral("manifest"), QFileInfo(ghidraAnalysisPath).fileName() },
+      { QStringLiteral("manifest_schema"), ghidraSchema },
+      { QStringLiteral("expected_entry"), hex32(game.entryTarget) },
+      { QStringLiteral("observed_entry"), ghidraObject.value(QStringLiteral("entry")) },
+      { QStringLiteral("entry_function"), observedEntryFunction },
+      { QStringLiteral("language"), observedLanguage },
+      { QStringLiteral("rom_block_matches_cartridge"), romBlockMatches },
+      { QStringLiteral("expected_entry_word"), expectedWord },
+      { QStringLiteral("observed_entry_word"), observedWord },
+      { QStringLiteral("entry_word_matches_cartridge"), entryWordMatches },
+      { QStringLiteral("function_count"), ghidraFunctionCount },
+      { QStringLiteral("pointer_referenced_count"), ghidraPointerOnlyCount },
+      { QStringLiteral("unreferenced_count"), ghidraUnreferencedCount },
+      { QStringLiteral("truncated_source_lists"), truncatedSourceLists },
+      { QStringLiteral("region_bytes"), regionBytes },
+      { QStringLiteral("function_body_bytes"), gradedBodyBytes },
+      { QStringLiteral("function_body_fraction"), ghidraCodeFraction },
+      // Recorded because it is what shows the function list is mostly decoded
+      // data: on a 16 MB cartridge the COMPUTED_CALL bucket runs to six figures
+      // while COMPUTED_JUMP — Ghidra's real switch-table recovery — stays in the
+      // dozens. Seed admission ignores these classes and decodes the cited
+      // instruction itself; the histogram is here so the ratio stays visible.
+      { QStringLiteral("reference_type_histogram"),
+        ghidraObject.value(QStringLiteral("reference_type_histogram")) },
+      { QStringLiteral("reference_count"), referenceTypeTotal },
+      { QStringLiteral("function_list_role"),
+        QStringLiteral("seed source, not a coverage oracle: a raw cartridge has no "
+                       "section table, so Ghidra's function list includes data it "
+                       "decoded as code") },
+      { QStringLiteral("mode_conflict_count"), modeConflictCount },
+      { QStringLiteral("mode_conflicts"), ghidraObject.value(QStringLiteral("mode_conflicts")) },
+      { QStringLiteral("verification_source"),
+        QStringLiteral("Ghidra headless post-analysis manifest and raw cartridge bytes") },
+    };
+    ghidraPassRecords.append(ghidraVerification);
+    // Rewritten after every pass rather than once at the end, so a pass that
+    // fails verification still leaves behind the record of why.
+    if (!writeJson(QDir(proofDir).filePath(QStringLiteral("ghidra_verification.json")),
+                   QJsonObject{
+                     { QStringLiteral("schema"), 3 },
+                     { QStringLiteral("analysis_scope"),
+                       QStringLiteral("seeded from the extents gba_recompile proved "
+                                      "reachable on the same pass; disassembly starts "
+                                      "only inside them and is free to follow flow out "
+                                      "of them") },
+                     { QStringLiteral("verification_source"),
+                       QStringLiteral("Ghidra headless post-analysis manifest and raw "
+                                      "cartridge bytes") },
+                     { QStringLiteral("passes"), ghidraPassRecords },
+                   }, error)) {
+      fail(error);
+      return false;
     }
-  }
+    if (!ghidraVerified) {
+      fail(QStringLiteral("Ghidra's pass %1 analysis does not match the selected cartridge; the build stopped without guessing.").arg(iteration));
+      return false;
+    }
+    emit logLine(QStringLiteral("Ghidra pass %1 verified entry %2 and its raw instruction word.")
+                   .arg(iteration).arg(hex32(game.entryTarget)));
+    emit logLine(QStringLiteral("Ghidra calls %1% of the cartridge code: %2 flow-referenced functions, %3 reachable only through a pointer word, %4 unreferenced. A cartridge has no section table, so this list is a seed source, not a coverage target.")
+                   .arg(ghidraCodeFraction * 100.0, 0, 'f', 1)
+                   .arg(ghidraFunctionCount).arg(ghidraPointerOnlyCount)
+                   .arg(ghidraUnreferencedCount));
+    if (truncatedSourceLists > 0) {
+      emit logLine(QStringLiteral("%1 function entries have more than %2 recorded references of one kind; the surplus is counted but not listed, so a seed that depends only on those is missed and self-heals loudly at runtime.")
+                     .arg(truncatedSourceLists)
+                     .arg(ghidraObject.value(QStringLiteral("max_recorded_sources")).toInt()));
+    }
+    if (modeConflictCount > 0) {
+      // Neither the TMode context register nor the entry alignment is
+      // trustworthy for these, so they are reported and left unseeded rather
+      // than guessed into ARM or THUMB. Seeding from the recompiler's extents
+      // pins TMode over every one of them, so a conflict now means Ghidra flowed
+      // somewhere the recompiler never went and disagreed with itself there.
+      emit logLine(QStringLiteral("%1 function entries have an ARM/THUMB mode that contradicts their alignment. They are recorded in ghidra_verification.json and deliberately not seeded:")
+                     .arg(modeConflictCount));
+      for (const auto& conflictValue : ghidraObject.value(QStringLiteral("mode_conflicts")).toArray()) {
+        const auto conflict = conflictValue.toObject();
+        emit logLine(QStringLiteral("  %1 %2 (recorded %3)")
+                       .arg(conflict.value(QStringLiteral("entry")).toString(),
+                            escapedComment(conflict.value(QStringLiteral("name")).toString()),
+                            conflict.value(QStringLiteral("tmode")).toString()));
+      }
+    }
+    return true;
+  };
 
   // ── Recompiler ─────────────────────────────────────────────────────────
   nextStage(QStringLiteral("Build the gbarecomp recompiler"));
@@ -4292,10 +4346,11 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
                  .arg(biosDispatchRows).arg(biosModesByAddress.size()));
 
   // ── Cartridge ──────────────────────────────────────────────────────────
-  // Pass 1 runs on the entry seed alone so the recompiler's own recursive
-  // discovery is exercised. Every later pass hands it the Ghidra functions
-  // whose evidence lands inside the code the previous pass proved reachable,
-  // which grows the reachable set and exposes more evidence, so the passes are
+  // Pass 1 runs on the entry seed alone, so the recompiler's own recursive
+  // discovery is what establishes the first extent. Every pass then hands those
+  // extents to Ghidra, and admits the functions it reports whose evidence lands
+  // on an instruction the recompiler itself decoded. That grows the reachable
+  // set, which widens the extents, which is a new analysis — so the passes are
   // iterated to a fixed point: the build converges when a pass admits nothing
   // new, not when Ghidra's list is exhausted.
   nextStage(QStringLiteral("Statically recompile the cartridge"));
@@ -4311,39 +4366,6 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     if (romBytes.isEmpty()) {
       fail(QStringLiteral("The cartridge image is empty."));
       return;
-    }
-  }
-  QVector<GbaSeedCandidate> candidates;
-  candidates.reserve(ghidraCandidates.size());
-  for (const auto& candidateValue : ghidraCandidates) {
-    const auto function = candidateValue.toObject();
-    GbaSeedCandidate candidate;
-    bool ok = false;
-    candidate.entry = function.value(QStringLiteral("entry")).toString().toUInt(&ok, 16);
-    if (!ok) {
-      fail(QStringLiteral("Ghidra produced an invalid function address."));
-      return;
-    }
-    candidate.thumb =
-      function.value(QStringLiteral("mode")).toString() == QStringLiteral("thumb");
-    candidate.name = function.value(QStringLiteral("name")).toString();
-    candidate.directSources = readGbaSourceList(function, QStringLiteral("direct_sources"));
-    candidate.computedSources = readGbaSourceList(function, QStringLiteral("computed_sources"));
-    candidate.pointerSources = readGbaSourceList(function, QStringLiteral("pointer_sources"));
-    candidates.append(candidate);
-  }
-  // Only an address Ghidra cites can ever be asked about, and a bl.lo is only
-  // admissible when its bl.hi two bytes earlier was decoded as well, so both
-  // are what the shard scan needs to retain out of a corpus that reaches
-  // hundreds of megabytes once the cartridge is well covered.
-  QSet<quint32> citedSources;
-  for (const auto& candidate : candidates) {
-    for (const auto* list : { &candidate.directSources, &candidate.computedSources,
-                              &candidate.pointerSources }) {
-      for (const quint32 source : *list) {
-        citedSources.insert(source);
-        citedSources.insert(source - 2);
-      }
     }
   }
   const QString seedsPath = QDir(seedsDir).filePath(QStringLiteral("ghidra_funcs.tsv"));
@@ -4371,6 +4393,10 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   int dispatchAddresses = 0;
   int translatedSpanCount = 0;
   quint32 translatedBytes = 0;
+  // From the last pass's analysis, not a running total: each pass analyses a
+  // wider extent than the one before, so the final count is the one that
+  // describes the cartridge as it was finally seen.
+  int candidateCount = 0;
   int admittedTotal = 0;
   bool converged = false;
   constexpr int kMaxGbaPasses = 8;
@@ -4398,16 +4424,76 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
       return;
     }
     dispatchAddresses = modesByAddress.size();
-    // What gbarecomp proved reachable this pass, and what it decoded at each
-    // address Ghidra cites. Every seed admitted below has to be backed by both.
+    // What gbarecomp proved reachable this pass. Read alone first, with no
+    // instruction map, because this is what Ghidra is seeded with: the extents
+    // have to exist before there is anything for Ghidra to cite.
     QList<GbaTranslatedSpan> spans;
     GbaInstructionMap instructions;
-    if (!readGbaTranslation(generatedDir, citedSources, spans, instructions, error)) {
+    if (!readGbaTranslation(generatedDir, nullptr, spans, instructions, error)) {
       fail(error);
       return;
     }
     translatedSpanCount = spans.size();
     translatedBytes = gbaTranslatedBytes(spans);
+    const QString extentsPath = QDir(seedsDir).filePath(
+      QStringLiteral("translated_extents_pass%1.tsv").arg(iteration));
+    if (!writeText(extentsPath, gbaExtentsTable(spans), error)) {
+      fail(error);
+      return;
+    }
+    QJsonObject ghidraObject;
+    if (!analyzeWithGhidra(iteration, extentsPath, ghidraObject)) return;
+    // Every candidate Ghidra offers, strongest evidence first. The pointer-only
+    // tier is kept because a function-pointer table is how a GBA title reaches
+    // most of its code, and the seed rule below tests each candidate's evidence
+    // against gbarecomp's own translated extent rather than trusting the tier.
+    QJsonArray ghidraCandidates =
+      ghidraObject.value(QStringLiteral("functions")).toArray();
+    for (const auto& value :
+         ghidraObject.value(QStringLiteral("pointer_referenced_functions")).toArray()) {
+      ghidraCandidates.append(value);
+    }
+    QVector<GbaSeedCandidate> candidates;
+    candidates.reserve(ghidraCandidates.size());
+    for (const auto& candidateValue : ghidraCandidates) {
+      const auto function = candidateValue.toObject();
+      GbaSeedCandidate candidate;
+      bool ok = false;
+      candidate.entry = function.value(QStringLiteral("entry")).toString().toUInt(&ok, 16);
+      if (!ok) {
+        fail(QStringLiteral("Ghidra produced an invalid function address."));
+        return;
+      }
+      candidate.thumb =
+        function.value(QStringLiteral("mode")).toString() == QStringLiteral("thumb");
+      candidate.name = function.value(QStringLiteral("name")).toString();
+      candidate.directSources = readGbaSourceList(function, QStringLiteral("direct_sources"));
+      candidate.computedSources = readGbaSourceList(function, QStringLiteral("computed_sources"));
+      candidate.pointerSources = readGbaSourceList(function, QStringLiteral("pointer_sources"));
+      candidates.append(candidate);
+    }
+    candidateCount = candidates.size();
+    // Only an address Ghidra cites can ever be asked about, and a bl.lo is only
+    // admissible when its bl.hi two bytes earlier was decoded as well, so both
+    // are what the shard scan needs to retain out of a corpus that reaches
+    // hundreds of megabytes once the cartridge is well covered.
+    QSet<quint32> citedSources;
+    for (const auto& candidate : candidates) {
+      for (const auto* list : { &candidate.directSources, &candidate.computedSources,
+                                &candidate.pointerSources }) {
+        for (const quint32 source : *list) {
+          citedSources.insert(source);
+          citedSources.insert(source - 2);
+        }
+      }
+    }
+    // Now that there is something to look for, read the shards again for what
+    // gbarecomp decoded at each cited address. Every seed admitted below has to
+    // be backed by both this and the extents above.
+    if (!readGbaTranslation(generatedDir, &citedSources, spans, instructions, error)) {
+      fail(error);
+      return;
+    }
 
     QList<QPair<GbaSeedCandidate, QString>> admitted;  // candidate, rule
     QJsonArray admissionSamples;
@@ -4498,6 +4584,12 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
       { QStringLiteral("dispatch_address_count"), dispatchAddresses },
       { QStringLiteral("translated_span_count"), translatedSpanCount },
       { QStringLiteral("translated_bytes"), static_cast<double>(translatedBytes) },
+      // What this pass handed Ghidra and what Ghidra handed back. Both grow
+      // pass over pass; if the candidate count ever jumps by orders of
+      // magnitude, the analysis has escaped the extents into cartridge data.
+      { QStringLiteral("ghidra_seeded_from"), QFileInfo(extentsPath).fileName() },
+      { QStringLiteral("ghidra_candidate_count"), candidates.size() },
+      { QStringLiteral("ghidra_cited_source_count"), citedSources.size() },
       { QStringLiteral("admitted_seed_count"), admitted.size() },
       { QStringLiteral("admitted_by_direct_branch"),
         admittedByRule.value(QStringLiteral("direct-branch")) },
@@ -4553,12 +4645,22 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     return;
   }
   const QJsonObject coverageProof{
-    { QStringLiteral("schema"), 3 },
+    { QStringLiteral("schema"), 4 },
     { QStringLiteral("status"), QStringLiteral("CONVERGED") },
     { QStringLiteral("criterion"),
       QStringLiteral("fixed point: a pass admitted no Ghidra function reachable "
                      "by a control transfer gbarecomp itself decoded inside "
                      "code it had already translated") },
+    { QStringLiteral("analysis_order"),
+      QStringLiteral("gbarecomp runs first, from the entry point alone. Each "
+                     "pass writes the extents its recursive descent proved "
+                     "reachable and Ghidra is re-analysed from those, so "
+                     "disassembly starts only at instructions the recompiler "
+                     "decoded. It stays free to follow flow out of them — "
+                     "resolving targets gbarecomp could not is the only reason "
+                     "it runs — but it can no longer start inside cartridge "
+                     "art. Per-pass manifests are ghidra_analysis_pass<N>.json "
+                     "and their verification is ghidra_verification.json.") },
     { QStringLiteral("why_not_full_ghidra_coverage"),
       QStringLiteral("a raw cartridge has no section table, so Ghidra "
                      "disassembles compressed art and sample data as code and "
@@ -4600,7 +4702,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
                        "address other than the candidate entry"),
       } },
     { QStringLiteral("interworking_admissions"), interworkingSamples },
-    { QStringLiteral("ghidra_candidate_count"), candidates.size() },
+    { QStringLiteral("ghidra_candidate_count"), candidateCount },
     { QStringLiteral("admitted_seed_count"), admittedTotal },
     { QStringLiteral("dispatch_entry_count"), dispatchRows },
     { QStringLiteral("dispatch_address_count"), dispatchAddresses },
@@ -4622,8 +4724,8 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     fail(error);
     return;
   }
-  emit logLine(QStringLiteral("Seed admission converged: %1 of Ghidra's %2 candidates admitted on evidence inside translated code. Dispatch table holds %3 entries over %4 addresses, translating %5 of the cartridge's %6 bytes.")
-                 .arg(admittedTotal).arg(candidates.size()).arg(dispatchRows)
+  emit logLine(QStringLiteral("Seed admission converged: %1 seeds admitted on evidence inside translated code, out of the %2 candidates the final analysis offered. Dispatch table holds %3 entries over %4 addresses, translating %5 of the cartridge's %6 bytes.")
+                 .arg(admittedTotal).arg(candidateCount).arg(dispatchRows)
                  .arg(dispatchAddresses).arg(translatedBytes).arg(romBytes.size()));
   if (!modeConflictsObserved.isEmpty()) {
     emit logLine(QStringLiteral("%1 address(es) were translated by both tools in different instruction sets. gbarecomp reached them by following real control flow, so its decoding stands; each one is recorded in ghidra_coverage_proof.json.")
@@ -5049,7 +5151,7 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
     { QStringLiteral("cartridge_dispatch_entries"), dispatchRows },
     { QStringLiteral("cartridge_dispatch_addresses"), dispatchAddresses },
     { QStringLiteral("bios_dispatch_entries"), biosDispatchRows },
-    { QStringLiteral("ghidra_candidate_count"), candidates.size() },
+    { QStringLiteral("ghidra_candidate_count"), candidateCount },
     { QStringLiteral("ghidra_seeds_admitted"), admittedTotal },
     { QStringLiteral("translated_cartridge_bytes"), static_cast<double>(translatedBytes) },
     { QStringLiteral("pre_sign_executable_sha256"), preSignExecutableHash },
@@ -5154,5 +5256,581 @@ void PipelineWorker::runGba(const PipelineRequest& request) {
   emit completed(output);
 }
 
+/* Vita and Horizon.
+ *
+ * This is the one pipeline in Studio with no recompilation stage, and its
+ * absence is the point rather than an omission. The Vita is an ARMv7-A
+ * Cortex-A9, 32-bit Horizon is ARMv7-A, and the MVII device is an ARMv7-A
+ * Cortex-A7 — one instruction set across all three, so the guest's own code
+ * runs on the CPU untranslated. What the device is missing is the guest's
+ * operating system, and that is what extra/vita2hos and extra/horizon2mvii
+ * supply. The WINE model.
+ *
+ * So the export is: identify the container and refuse it here if the front-end
+ * cannot open it, cross-compile the front-end for Cortex-A7, and stage the
+ * guest image beside the .virtua as `executable` — the path both front-ends
+ * read from argv[1]. Virtua ARM only; there is no desktop form of this and
+ * never could be. */
+void PipelineWorker::runGuestApp(const PipelineRequest& request) {
+  const bool vita = request.system == SystemKind::Vita;
+  const QString systemName = systemKindDisplayName(request.system);
+  const QString frontEnd = systemFrontEndName(request.system);
+  const QString frontEndDir = vita ? QStringLiteral("vita2hos")
+                                   : QStringLiteral("horizon2mvii");
+  const bool sourceExport = request.exportMode == ExportMode::Source;
+  const bool remoteCiBuild = request.exportMode == ExportMode::Build &&
+                             request.buildBackend == BuildBackend::RemoteCi;
+  const bool localBuild = request.exportMode == ExportMode::Build && !remoteCiBuild;
+  const int totalStages = localBuild ? 8 : 5;
+  int stage = 0;
+  QString workspace;
+  QString error;
+  auto nextStage = [&](const QString& name) {
+    emit stageChanged(name, ++stage, totalStages);
+    emit logLine(QStringLiteral("\n=== %1 ===").arg(name));
+  };
+  auto fail = [&](const QString& message) {
+    emit logLine(QStringLiteral("ERROR: %1").arg(message));
+    emit failed(message, workspace);
+  };
+  auto cancelledOut = [&]() {
+    if (!workspace.isEmpty()) QDir(workspace).removeRecursively();
+    emit cancelled();
+  };
+
+  nextStage(QStringLiteral("Validate %1 application").arg(systemName));
+  // Not a packaging gap: an x86_64 build would compile the whole loader and
+  // then have nothing it could branch to, which is a worse failure than not
+  // building because it looks like it works. Both front-ends refuse a non-ARM
+  // CMAKE_SYSTEM_PROCESSOR for the same reason.
+  if (request.targetPlatform != TargetPlatform::VirtuaArm) {
+    fail(QStringLiteral("%1 applications are Virtua ARM only: the guest's ARMv7 code runs on the device's ARMv7 CPU, so there is no %2 form of this package.")
+           .arg(systemName, targetPlatformDisplayName(request.targetPlatform)));
+    return;
+  }
+  if (!isPowerEngineRoot(request.powerEngineRoot)) {
+    fail(QStringLiteral("The selected PowerEngine root does not contain the canonical Virtua/MVII sources."));
+    return;
+  }
+  if (!isVirtuaLlvmRoot(request.llvmRoot)) {
+    fail(QStringLiteral("The selected LLVM root is not a complete PowerEngine compiler bundle."));
+    return;
+  }
+  GuestAppDescription app;
+  if (!inspectGuestApp(request.system, request.romPath, app, error)) {
+    fail(error);
+    return;
+  }
+  // The front-end refuses this too, but only after the package has been built,
+  // copied to the device and launched. Refusing here costs nothing and names
+  // the format that was actually found.
+  if (!app.loadable()) {
+    if (!app.contents.isEmpty()) {
+      emit logLine(QStringLiteral("%1 contains:").arg(app.containerName));
+      for (const QString& entry : app.contents)
+        emit logLine(QStringLiteral("  %1").arg(entry));
+    }
+    fail(QStringLiteral("%1 cannot load this file. %2").arg(frontEnd, app.refusal));
+    return;
+  }
+  if (request.skipBiosBoot) {
+    fail(QStringLiteral("%1 has no BIOS to skip: the guest's own code is loaded and branched to directly.")
+           .arg(systemName));
+    return;
+  }
+  const QString iconSourcePath = request.iconPath.trimmed().isEmpty()
+    ? QStringLiteral(":/psxrecomp/studio/resources/psxrecomp-studio.svg")
+    : request.iconPath;
+  if (!QFileInfo(iconSourcePath).isFile() && !iconSourcePath.startsWith(QStringLiteral(":/"))) {
+    fail(QStringLiteral("The selected app icon is not readable."));
+    return;
+  }
+  const QString bundleName = cleanBundleName(request.windowTitle);
+  if (bundleName.isEmpty()) {
+    fail(QStringLiteral("The window title cannot be converted to a valid app name."));
+    return;
+  }
+  if (!QFileInfo(request.outputDirectory).isDir() ||
+      !QFileInfo(request.outputDirectory).isWritable()) {
+    fail(QStringLiteral("Select a writable output directory."));
+    return;
+  }
+  const QString frontEndRoot =
+    QDir(request.frameworkRoot).filePath(QStringLiteral("extra/%1").arg(frontEndDir));
+  const QString virtuaRoot =
+    QDir(request.frameworkRoot).filePath(QStringLiteral("extra/virtua"));
+  const QString elfInfoTool = QDir(virtuaRoot).filePath(QStringLiteral("tools/elfinfo.py"));
+  for (const auto& required : {
+         QDir(frontEndRoot).filePath(QStringLiteral("CMakeLists.txt")),
+         QDir(virtuaRoot).filePath(QStringLiteral("CMake/VirtuaArmToolchain.cmake")),
+         QDir(virtuaRoot).filePath(QStringLiteral("CMake/VirtuaPowerEngine.cmake")),
+         QDir(virtuaRoot).filePath(QStringLiteral("wine/CMakeLists.txt")),
+         elfInfoTool }) {
+    if (!QFileInfo(required).isFile()) {
+      fail(QStringLiteral("The framework does not contain the %1 front-end: %2 is missing.")
+             .arg(frontEnd, required));
+      return;
+    }
+  }
+  const QString cmake = findExecutable(QStringLiteral("cmake"));
+  const QString git = findExecutable(QStringLiteral("git"));
+  if (cmake.isEmpty() || git.isEmpty()) {
+    fail(QStringLiteral("%1 exports require CMake and Git.").arg(systemName));
+    return;
+  }
+  // Single-configuration Ninja whatever the host is, PowerEngine's packager
+  // built from Go source on first use, and Python to read the linked ELF: the
+  // compiler bundle ships no llvm-nm and macOS nm cannot read ELF at all.
+  const QString ninja = localBuild ? findExecutable(QStringLiteral("ninja")) : QString();
+  const QString go = localBuild ? findExecutable(QStringLiteral("go")) : QString();
+  const QString python = localBuild ? findWorkingPython() : QString();
+  if (localBuild) {
+    const QList<QPair<QString, QString>> tools{
+      { QStringLiteral("Ninja"), ninja },
+      { QStringLiteral("Go for the Virtua packager"), go },
+      { QStringLiteral("Python 3 for ELF verification"), python },
+    };
+    for (const auto& tool : tools) {
+      if (tool.second.isEmpty()) {
+        fail(QStringLiteral("A Virtua ARM %1 package requires %2 on the build host.")
+               .arg(systemName, tool.first));
+        return;
+      }
+    }
+  }
+  const QString imageSha256 = sha256File(request.romPath, error);
+  if (imageSha256.isEmpty()) {
+    fail(error.isEmpty() ? QStringLiteral("The guest image could not be hashed.") : error);
+    return;
+  }
+  emit logLine(QStringLiteral("%1 application: %2 · %3 · %4 bytes")
+                 .arg(systemName, app.containerName, guestArchName(app.arch))
+                 .arg(app.size));
+  emit logLine(QStringLiteral("SHA-256: %1").arg(imageSha256));
+  emit logLine(QStringLiteral("Execution: direct — the guest is ARMv7 and so is the device, so its instructions are not translated. %1 supplies the guest's operating system.")
+                 .arg(frontEnd));
+  if (app.arch == GuestArch::Unknown) {
+    // Studio applies the entry-branch signal only; horizon_image_probe_arch
+    // also reads .dynamic, which is reachable only after the module is decoded,
+    // and refuses if the two disagree.
+    emit logLine(QStringLiteral("Note: the entry word does not identify the architecture. %1 decides on the device, where it can read .dynamic as well.")
+                   .arg(frontEnd));
+  }
+
+  nextStage(QStringLiteral("Prepare %1 package workspace").arg(frontEnd));
+  const QString preferredWorkspaceRoot =
+    QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
+      .filePath(QStringLiteral("org.psxrecomp.studio/workspaces"));
+  const QString fallbackWorkspaceRoot =
+    QDir(QDir::tempPath()).filePath(QStringLiteral("org.psxrecomp.studio/workspaces"));
+  std::unique_ptr<QTemporaryDir> temporary;
+  for (const QString& root : { preferredWorkspaceRoot, fallbackWorkspaceRoot }) {
+    if (!QDir().mkpath(root)) continue;
+    auto candidate = std::make_unique<QTemporaryDir>(
+      QDir(root).filePath(QStringLiteral("psxrecomp-%1-XXXXXX").arg(frontEnd)));
+    candidate->setAutoRemove(false);
+    if (candidate->isValid()) {
+      temporary = std::move(candidate);
+      break;
+    }
+  }
+  if (!temporary) {
+    fail(QStringLiteral("Could not create a %1 build workspace in the cache or temporary directory.")
+           .arg(systemName));
+    return;
+  }
+  workspace = temporary->path();
+  const QString projectDir = QDir(workspace).filePath(QStringLiteral("project"));
+  const QString inputsDir = QDir(projectDir).filePath(QStringLiteral("package_inputs"));
+  const QString proofDir = QDir(projectDir).filePath(QStringLiteral("proof"));
+  const QString buildDir = QDir(workspace).filePath(QStringLiteral("build"));
+  const QString stageDir = QDir(workspace).filePath(QStringLiteral("stage"));
+  const QString frameworkExtra = QDir(projectDir).filePath(QStringLiteral("framework/extra"));
+  for (const auto& path : { projectDir, inputsDir, proofDir, buildDir, stageDir,
+                            frameworkExtra }) {
+    if (!QDir().mkpath(path)) {
+      fail(QStringLiteral("Could not create workspace directory %1.").arg(path));
+      return;
+    }
+  }
+  // The front-end includes ../../extra/virtua/CMake/VirtuaPowerEngine.cmake by
+  // relative path, so the two have to land in the project the way they sit in
+  // the framework. Nothing from PowerEngine itself is copied: the toolchain,
+  // sysroot, R-Dash, linker script and packager are all resolved out of
+  // POWERENGINE_ROOT at configure time.
+  if (!copySourceDirectory(frontEndRoot,
+                           QDir(frameworkExtra).filePath(frontEndDir), error) ||
+      !copySourceDirectory(virtuaRoot,
+                           QDir(frameworkExtra).filePath(QStringLiteral("virtua")), error) ||
+      !copyFileReplacing(request.romPath,
+                         QDir(inputsDir).filePath(QStringLiteral("executable")), error) ||
+      !createPngIcon(iconSourcePath,
+                     QDir(projectDir).filePath(QStringLiteral("AppIcon.png")), error)) {
+    fail(error);
+    return;
+  }
+
+  nextStage(QStringLiteral("Finalize %1 CMake repository").arg(frontEnd));
+  QJsonArray containerContents;
+  for (const QString& entry : app.contents) containerContents.append(entry);
+  const QJsonObject identificationProof{
+    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("system"), systemKindKey(request.system) },
+    { QStringLiteral("front_end"), frontEnd },
+    { QStringLiteral("execution"), QStringLiteral("direct-execution") },
+    { QStringLiteral("execution_note"),
+      QStringLiteral("guest CPU is ARMv7, same as the device; guest instructions "
+                     "run untranslated and the guest's OS is reimplemented around "
+                     "them (the WINE model)") },
+    { QStringLiteral("recompilation"), false },
+    { QStringLiteral("container"), app.containerName },
+    { QStringLiteral("guest_architecture"), guestArchName(app.arch) },
+    { QStringLiteral("architecture_signal"),
+      QStringLiteral("entry branch encoding; the front-end additionally reads "
+                     ".dynamic and refuses when the two disagree") },
+    { QStringLiteral("image_bytes"), static_cast<double>(app.size) },
+    { QStringLiteral("image_sha256"), imageSha256 },
+    { QStringLiteral("image_staged_as"), QStringLiteral("executable") },
+    { QStringLiteral("container_contents"), containerContents },
+  };
+  if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
+                 generatedGuestAppProjectCMake(request, app, bundleName), error) ||
+      !writeText(QDir(projectDir).filePath(QStringLiteral("README.md")),
+                 generatedGuestAppReadme(request, app, bundleName), error) ||
+      !writeJson(QDir(projectDir).filePath(QStringLiteral("game.manifest.json")),
+                 gameManifestForRequest(request), error) ||
+      !writeJson(QDir(proofDir).filePath(QStringLiteral("guest_image_identification.json")),
+                 identificationProof, error) ||
+      !createProofArchive(proofDir,
+                          QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")), error)) {
+    fail(error);
+    return;
+  }
+
+  QByteArray commitOutput;
+  if (!runCommand(git, { QStringLiteral("init"), QStringLiteral("--initial-branch=main") },
+                  projectDir, QStringLiteral("git init --initial-branch=main"), 60000) ||
+      !runCommand(git, { QStringLiteral("config"), QStringLiteral("user.name"),
+                         QStringLiteral("PSXRecomp Studio") }, projectDir,
+                  QStringLiteral("git config user.name <studio>"), 30000) ||
+      !runCommand(git, { QStringLiteral("config"), QStringLiteral("user.email"),
+                         QStringLiteral("studio@psxrecomp.local") }, projectDir,
+                  QStringLiteral("git config user.email <studio>"), 30000) ||
+      !runCommand(git, { QStringLiteral("add"), QStringLiteral("-A") }, projectDir,
+                  QStringLiteral("git add -A"), 2 * 60 * 60 * 1000) ||
+      !runCommand(git, { QStringLiteral("commit"), QStringLiteral("-m"),
+                         QStringLiteral("Generate %1 Virtua ARM %2 source")
+                           .arg(request.windowTitle, frontEnd) },
+                  projectDir, QStringLiteral("git commit -m <generated source>"),
+                  2 * 60 * 60 * 1000) ||
+      !runCommand(git, { QStringLiteral("rev-parse"), QStringLiteral("HEAD") },
+                  projectDir, QStringLiteral("git rev-parse HEAD"), 30000, &commitOutput)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The generated %1 source repository could not be committed.")
+                .arg(frontEnd));
+    return;
+  }
+  const QString sourceCommit = QString::fromUtf8(commitOutput).trimmed().section('\n', -1);
+  emit logLine(QStringLiteral("Generated %1 source commit: %2").arg(frontEnd, sourceCommit));
+
+  auto removeEntry = [](const QString& path) {
+    const QFileInfo info(path);
+    if (!info.exists() && !info.isSymLink()) return true;
+    return info.isDir() && !info.isSymLink() ? QDir(path).removeRecursively()
+                                             : QFile::remove(path);
+  };
+  auto publishZip = [&](const QString& source, const QString& rootName,
+                        const QString& output) -> bool {
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
+    const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
+    removeEntry(staging); removeEntry(backup);
+    if (!createPackageArchive(source, rootName, staging, error, {},
+                              [this]() { return cancellationRequested(); })) {
+      removeEntry(staging); return false;
+    }
+    const QString stagedHash = sha256File(staging, error);
+    if (stagedHash.isEmpty()) { removeEntry(staging); return false; }
+    const bool exists = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
+    if (exists && !request.overwriteOutput) {
+      error = QStringLiteral("The output already exists and overwrite was not approved: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (exists && !QFile::rename(output, backup)) {
+      error = QStringLiteral("Could not preserve the previous output: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (!QFile::rename(staging, output)) {
+      if (exists) QFile::rename(backup, output);
+      error = QStringLiteral("Could not publish %1.").arg(output);
+      return false;
+    }
+    if (exists) removeEntry(backup);
+    return sha256File(output, error) == stagedHash;
+  };
+  auto publishDirectory = [&](const QString& source, const QString& output) -> bool {
+    const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString staging = output + QStringLiteral(".psxrecomp-new-") + token;
+    const QString backup = output + QStringLiteral(".psxrecomp-old-") + token;
+    removeEntry(staging); removeEntry(backup);
+    if (!copyDirectoryTree(source, staging, error)) return false;
+    const bool exists = QFileInfo::exists(output) || QFileInfo(output).isSymLink();
+    if (exists && !request.overwriteOutput) {
+      error = QStringLiteral("The output already exists and overwrite was not approved: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (exists && !QDir().rename(output, backup)) {
+      error = QStringLiteral("Could not preserve the previous output: %1").arg(output);
+      removeEntry(staging); return false;
+    }
+    if (!QDir().rename(staging, output)) {
+      if (exists) QDir().rename(backup, output);
+      error = QStringLiteral("Could not publish %1.").arg(output);
+      return false;
+    }
+    if (exists) removeEntry(backup);
+    return true;
+  };
+
+  if (sourceExport) {
+    nextStage(QStringLiteral("Deliver %1 source repository").arg(frontEnd));
+    const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
+    const bool ok = request.exportAsZip
+      ? publishZip(projectDir, QFileInfo(output).completeBaseName(), output)
+      : publishDirectory(projectDir, output);
+    if (!ok) {
+      if (cancellationRequested()) cancelledOut(); else fail(error);
+      return;
+    }
+    QDir(workspace).removeRecursively();
+    emit completed(output);
+    return;
+  }
+
+  if (remoteCiBuild) {
+    nextStage(QStringLiteral("Stage %1 source for CI").arg(frontEnd));
+    const QString ciRoot =
+      QDir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation))
+        .filePath(QStringLiteral("org.psxrecomp.studio/psxrecomp-ci-sources"));
+    if (!QDir().mkpath(ciRoot)) {
+      fail(QStringLiteral("Could not create the CI source cache."));
+      return;
+    }
+    const QString ciRepository = QDir(ciRoot).filePath(
+      QStringLiteral("%1-%2-%3-%4")
+        .arg(sanitizedFileStem(request.windowTitle), frontEnd,
+             targetPlatformKey(request.targetPlatform),
+             QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    if (!QDir().rename(projectDir, ciRepository) &&
+        (!copyDirectoryTree(projectDir, ciRepository, error) ||
+         !QDir(projectDir).removeRecursively())) {
+      fail(error.isEmpty()
+        ? QStringLiteral("Could not stage the %1 source repository for CI.").arg(frontEnd)
+        : error);
+      return;
+    }
+    QDir(workspace).removeRecursively();
+    emit ciSourcePrepared(request, ciRepository, sourceCommit);
+    return;
+  }
+
+  nextStage(QStringLiteral("Cross-compile %1 for Virtua ARM").arg(frontEnd));
+  const QStringList configure{
+    QStringLiteral("-S"), projectDir, QStringLiteral("-B"), buildDir,
+    QStringLiteral("-G"), QStringLiteral("Ninja"),
+    QStringLiteral("-DCMAKE_BUILD_TYPE=Release"),
+    QStringLiteral("-DCMAKE_TOOLCHAIN_FILE=%1")
+      .arg(QDir(projectDir).filePath(QStringLiteral(
+        "framework/extra/virtua/CMake/VirtuaArmToolchain.cmake"))),
+    QStringLiteral("-DPOWERENGINE_ROOT=%1").arg(request.powerEngineRoot),
+    QStringLiteral("-DVIRTUA_LLVM_ROOT=%1").arg(request.llvmRoot),
+  };
+  const QStringList build{
+    QStringLiteral("--build"), buildDir, QStringLiteral("--target"),
+    QStringLiteral("guest-runtime"), QStringLiteral("--parallel"),
+    QString::number(std::max(1, QThread::idealThreadCount())),
+  };
+  if (!runCommand(cmake, configure, workspace,
+                  QStringLiteral("cmake -S <%1 project> -B <build>").arg(frontEnd),
+                  10 * 60 * 1000) ||
+      !runCommand(cmake, build, workspace,
+                  QStringLiteral("cmake --build <build> --target guest-runtime"),
+                  2 * 60 * 60 * 1000)) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(QStringLiteral("The Virtua ARM %1 package could not be built and staged.")
+                .arg(frontEnd));
+    return;
+  }
+  const QString builtPackage =
+    QDir(buildDir).filePath(QStringLiteral("steganos-package/guest-runtime/Release"));
+  QDir(stageDir).removeRecursively();
+  if (!copyDirectoryTree(builtPackage, stageDir, error)) {
+    fail(error.isEmpty()
+      ? QStringLiteral("The built %1 package could not be staged.").arg(frontEnd) : error);
+    return;
+  }
+  const QString mainExecutable =
+    QDir(stageDir).filePath(bundleName + QStringLiteral(".virtua"));
+  const QString packagedImage = QDir(stageDir).filePath(QStringLiteral("executable"));
+  if (!QFileInfo(mainExecutable).isFile() || !QFileInfo(packagedImage).isFile()) {
+    fail(QStringLiteral("The Virtua ARM %1 package is missing its .virtua image or the guest executable beside it.")
+           .arg(frontEnd));
+    return;
+  }
+  // The staged guest image is the whole payload of this package: if it were
+  // altered in transit there would be nothing else in the package to notice.
+  if (sha256File(packagedImage, error) != imageSha256) {
+    fail(error.isEmpty()
+      ? QStringLiteral("The packaged guest image does not match the selected application.")
+      : error);
+    return;
+  }
+
+  nextStage(QStringLiteral("Verify %1 package").arg(frontEnd));
+  const QString linkedElf =
+    QDir(buildDir).filePath(QStringLiteral("%1/%2.elf").arg(frontEndDir, bundleName));
+  if (!QFileInfo(linkedElf).isFile()) {
+    fail(QStringLiteral("The Virtua ARM link did not produce %1, so the package cannot be verified.")
+           .arg(linkedElf));
+    return;
+  }
+  const QString projectElfInfo = QDir(projectDir).filePath(
+    QStringLiteral("framework/extra/virtua/tools/elfinfo.py"));
+  QByteArray attributes;
+  if (!runCommand(python, { projectElfInfo, QStringLiteral("armattrs"), linkedElf },
+                  workspace, QStringLiteral("elfinfo.py armattrs <%1 ELF>").arg(frontEnd),
+                  5 * 60 * 1000, &attributes)) {
+    fail(QStringLiteral("The Virtua ARM ELF has no readable .ARM.attributes section."));
+    return;
+  }
+  const QString attributeText = QString::fromUtf8(attributes);
+  // Tag_CPU_arch 10 is ARMv7 and Tag_CPU_arch_profile 65 is 'A'. This one
+  // matters more here than anywhere else in Studio: the whole design rests on
+  // the front-end and the guest sharing an instruction set.
+  if (!attributeText.contains(QStringLiteral("Tag_CPU_arch = 10")) ||
+      !attributeText.contains(QStringLiteral("Tag_CPU_arch_profile = 65"))) {
+    fail(QStringLiteral("The linked image is not tagged ARMv7-A:\n%1").arg(attributeText));
+    return;
+  }
+  // Nothing may be left undefined: the image is statically linked and MVII has
+  // no dynamic loader to resolve a straggler at run time.
+  QByteArray undefined;
+  if (!runCommand(python, { projectElfInfo, QStringLiteral("undef"), linkedElf },
+                  workspace, QStringLiteral("elfinfo.py undef <%1 ELF>").arg(frontEnd),
+                  5 * 60 * 1000, &undefined)) {
+    fail(QStringLiteral("The Virtua ARM image has undefined symbols, which MVII has no loader to resolve:\n%1")
+           .arg(QString::fromUtf8(undefined)));
+    return;
+  }
+  // vwine_make_executable is the shared layer's cache-maintenance barrier: a
+  // Cortex-A7's I-cache is not coherent with its D-cache, so a relocated image
+  // that is branched into without it executes whatever was in the line before.
+  // Its presence is the packaged proof that the loader was linked, not dropped.
+  // The second symbol is the front-end's own, so the package cannot pass with
+  // the shared layer alone.
+  const QString frontEndSymbol = vita ? QStringLiteral("load_file")
+                                      : QStringLiteral("horizon_image_probe_arch");
+  for (const QString& symbol : { QStringLiteral("vwine_make_executable"), frontEndSymbol }) {
+    QByteArray found;
+    if (!runCommand(python, { projectElfInfo, QStringLiteral("symbols"), linkedElf, symbol },
+                    workspace,
+                    QStringLiteral("elfinfo.py symbols <%1 ELF> %2").arg(frontEnd, symbol),
+                    5 * 60 * 1000, &found)) {
+      fail(QStringLiteral("The linked Virtua ARM image does not contain %1, so it cannot load the guest.")
+             .arg(symbol));
+      return;
+    }
+  }
+  // And the packaged container: a v3 image, ARM32, cooperatively scheduled. A
+  // preemptive image would be descheduled mid-frame by a kernel that expects
+  // the guest to yield.
+  QFile container(mainExecutable);
+  if (!container.open(QIODevice::ReadOnly)) {
+    fail(QStringLiteral("The staged .virtua image could not be read."));
+    return;
+  }
+  const QByteArray header = container.read(56);
+  container.close();
+  if (header.size() != 56 ||
+      qFromLittleEndian<quint32>(header.constData()) != 0x56495254u ||
+      qFromLittleEndian<quint32>(header.constData() + 4) != 3u) {
+    fail(QStringLiteral("The staged executable is not a Virtua v3 image."));
+    return;
+  }
+  const quint64 containerFlags = qFromLittleEndian<quint64>(header.constData() + 48);
+  if (((containerFlags >> 8u) & 0xffu) != 4u || (containerFlags & (1u << 1u)) == 0u) {
+    fail(QStringLiteral("The staged .virtua image is not a cooperative ARM32 executable (flags 0x%1).")
+           .arg(containerFlags, 16, 16, QLatin1Char('0')));
+    return;
+  }
+  emit logLine(QStringLiteral("Verified: a cooperative ARMv7-A Virtua image, nothing undefined, carrying the %1 loader and the guest image it will branch into.")
+                 .arg(frontEnd));
+
+  nextStage(QStringLiteral("Seal %1 package").arg(frontEnd));
+  const QString sealedExecutableHash = sha256File(mainExecutable, error);
+  const QJsonObject buildProof{
+    { QStringLiteral("schema"), 1 },
+    { QStringLiteral("platform"), targetPlatformDisplayName(request.targetPlatform) },
+    { QStringLiteral("system"), systemKindKey(request.system) },
+    { QStringLiteral("runtime"), frontEnd },
+    { QStringLiteral("execution"), QStringLiteral("direct-execution") },
+    { QStringLiteral("recompilation"), false },
+    { QStringLiteral("executable"), QFileInfo(mainExecutable).fileName() },
+    { QStringLiteral("target_architecture"), QStringLiteral("armv7a-none-eabi (Cortex-A7)") },
+    { QStringLiteral("guest_architecture"), guestArchName(app.arch) },
+    { QStringLiteral("guest_container"), app.containerName },
+    { QStringLiteral("guest_image"), QStringLiteral("executable") },
+    { QStringLiteral("guest_image_sha256"), imageSha256 },
+    { QStringLiteral("host_runtime"),
+      QStringLiteral("%1 on MVII devices, over the shared virtua-wine guest-OS layer")
+        .arg(frontEnd) },
+    { QStringLiteral("armv7a_tagged"), true },
+    { QStringLiteral("undefined_symbols"), 0 },
+    { QStringLiteral("virtua_format_version"), 3 },
+    { QStringLiteral("virtua_cooperative"), true },
+    { QStringLiteral("virtua_arch_flag"), 4 },
+    { QStringLiteral("executable_sha256"), sealedExecutableHash },
+    { QStringLiteral("unresolved_import_policy"),
+      QStringLiteral("a hard failure reported by name; never bound to a stub") },
+    { QStringLiteral("package_contains_guest_image"), true },
+    { QStringLiteral("signing_mode"), QStringLiteral("none") },
+  };
+  if (sealedExecutableHash.isEmpty() ||
+      !writeJson(QDir(proofDir).filePath(QStringLiteral("guest_build.json")), buildProof, error) ||
+      !createProofArchive(proofDir,
+                          QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")), error) ||
+      !copyFileReplacing(QDir(projectDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")),
+                         QDir(stageDir).filePath(QStringLiteral("PSXRecomp-Proof.zip")), error)) {
+    fail(error.isEmpty()
+      ? QStringLiteral("The final %1 proof archive could not be embedded.").arg(frontEnd) : error);
+    return;
+  }
+  emit logLine(QStringLiteral("Verified %1 executable SHA-256: %2")
+                 .arg(frontEnd, sealedExecutableHash));
+
+  nextStage(QStringLiteral("Deliver %1 package").arg(frontEnd));
+  const QString output = QDir(request.outputDirectory).filePath(exportOutputName(request));
+  const bool delivered = request.exportAsZip ? publishZip(stageDir, {}, output)
+                                             : publishDirectory(stageDir, output);
+  if (!delivered) {
+    if (cancellationRequested()) cancelledOut();
+    else fail(error.isEmpty()
+      ? QStringLiteral("The %1 package could not be delivered.").arg(frontEnd) : error);
+    return;
+  }
+  if (!request.exportAsZip) {
+    const QString deliveredExecutable =
+      QDir(output).filePath(bundleName + QStringLiteral(".virtua"));
+    if (sha256File(deliveredExecutable, error) != sealedExecutableHash) {
+      fail(error.isEmpty()
+        ? QStringLiteral("The delivered %1 executable changed during publication.").arg(frontEnd)
+        : error);
+      return;
+    }
+  }
+  emit logLine(QStringLiteral("%1 package created: %2").arg(frontEnd, output));
+  QDir(workspace).removeRecursively();
+  emit completed(output);
+}
 
 } // namespace psxstudio

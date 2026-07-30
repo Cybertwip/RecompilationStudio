@@ -34,6 +34,9 @@ signals:
 
 private:
   void runGba(const psxstudio::PipelineRequest& request);
+  /* Vita and Horizon: the guest's ARMv7 code is the device's ARMv7 code, so
+   * this pipeline packages rather than recompiles. Virtua ARM only. */
+  void runGuestApp(const psxstudio::PipelineRequest& request);
   bool runCommand(const QString& program,
                   const QStringList& arguments,
                   const QString& workingDirectory,

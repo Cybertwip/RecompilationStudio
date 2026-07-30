@@ -3,6 +3,7 @@
 #include "PipelineTypes.h"
 
 #include <QMainWindow>
+#include <QMap>
 #include <QSet>
 
 class QCheckBox;
@@ -89,6 +90,9 @@ private:
   QString detectLlvmRoot() const;
   void loadSettings();
   void saveSettings() const;
+  /* Refills the system combo with the systems the selected platform can run,
+   * keeping the current choice when it survives the change. */
+  void repopulateSystemCombo();
   void applyTheme();
   void reflowForms(bool force = false);
   PipelineRequest requestFromUi(bool overwrite) const;
@@ -164,17 +168,19 @@ private:
   QScrollArea* formsScroll_{ nullptr };
   QGridLayout* formsLayout_{ nullptr };
   oclero::qlementine::ThemeManager* themeManager_{ nullptr };
+  /* One form's worth of state per system. Switching the system combo swaps the
+   * whole set, so a PlayStation disc never survives into a Vita export and a
+   * Horizon title never lands on the GBA form. This was two parallel sets of
+   * scalars for two systems; four systems is where that stops scaling. */
+  struct SystemFormState {
+    QString inputPath;
+    QString biosPath;
+    QString batchDirectory;
+    QString iconPath;
+    QString name;
+  };
   SystemKind currentSystem_{ SystemKind::PlayStation };
-  QString psxInputPath_;
-  QString psxBiosPath_;
-  QString psxBatchDirectory_;
-  QString psxIconPath_;
-  QString psxName_;
-  QString gbaInputPath_;
-  QString gbaBiosPath_;
-  QString gbaBatchDirectory_;
-  QString gbaIconPath_;
-  QString gbaName_;
+  QMap<SystemKind, SystemFormState> systemState_;
   QStringList selectedBins_;
   QList<BatchGameEntry> batchEntries_;
   QList<PipelineRequest> pendingRequests_;

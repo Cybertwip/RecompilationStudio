@@ -18,8 +18,14 @@ cartridge image and the canonical 16 KiB `gba_bios.bin`. Studio statically
 recompiles both with `extra/gbarecomp` — the same shape as the PlayStation flow.
 Batch mode scans recursively for `.gba` files.
 
-Function discovery is seeded by a headless Ghidra analysis (`ARM:LE:32:v4t`,
-raw image based at `0x08000000`, `TMode` deciding ARM vs THUMB per function).
+Function discovery runs **the recompiler first and Ghidra second**. Pass 1 runs
+`gba_recompile` from the cartridge entry point alone; it writes the guest extents
+its recursive descent proved reachable, and a headless Ghidra analysis
+(`ARM:LE:32:v4t`, raw image based at `0x08000000`, `TMode` deciding ARM vs THUMB)
+is then seeded from those extents. Disassembly may only *start* at an instruction
+the recompiler decoded. It stays free to follow flow out of them — resolving
+targets `gba_recompile` could not is the only reason Ghidra runs at all — so
+discovery is not confined, only its starting points are.
 
 **Ghidra is a seed source here, not a coverage oracle.** A cartridge image has
 no section table, so Ghidra disassembles compressed art and sample data exactly
@@ -37,12 +43,30 @@ Ghidra function would therefore mean translating megabytes of graphics.
 from that same decoding. A THUMB `BL` is two halfwords; where Ghidra decodes a
 second halfword with no first halfword in front of it, it models the result as a
 call through `LR` and propagates a destination into it — manufacturing a
-`COMPUTED_CALL` out of data. On FFVI that produces **113,516 `COMPUTED_CALL`
-references against 22 `COMPUTED_JUMP`**, its only real switch-table recovery.
-Seeding on reference class alone admits those artifacts, and because each
-admitted seed extends the translated extent, the next pass admits more of them:
-a self-feeding cascade that on FFVI reached 834,559 dispatch rows and 1.5 GB of
-generated C++ by pass 11.
+`COMPUTED_CALL` out of data. On ARMv4T there is no `BLX <reg>`, so a genuine
+`COMPUTED_CALL` is nearly impossible; on FFVI Ghidra reports **113,516
+`COMPUTED_CALL` references against 22 `COMPUTED_JUMP`**, its only real
+switch-table recovery. Each such function is analysed in turn, so the mistake
+feeds itself across cartridge data. Seeding on reference class alone admits the
+artifacts, and because each admitted seed extends the translated extent, the next
+pass admits more of them: a cascade that on FFVI reached 834,559 dispatch rows
+and 1.5 GB of generated C++ by pass 11.
+
+**Running Ghidra over the whole image first is what made that possible, so it no
+longer happens.** Measured on FFVI: an unseeded analysis produced 119,202
+functions covering 53% of the image in 26 minutes, and of the 131,737 reference
+sources it recorded, 426 landed on an instruction `gba_recompile` had decoded —
+374 of those themselves orphan `bl.lo` halfwords. Not one candidate passed a seed
+rule. Two of the log's recurring complaints are the same phenomenon: thousands of
+`Unable to resolve constructor` decompiler warnings are the switch analyser
+decompiling cartridge *data* (`0xB21A` at `0x087D7650` is `SXTH`, an ARMv6T2
+encoding that correctly does not exist in `ARM:LE:32:v4t`), and the
+`ContextChangeException` errors are `ArmAnalyzer` racing itself between its
+"is this address still undefined" check and its `TMode` write. Studio pins
+`ARM Constant Reference Analyzer.Max Threads` to 1 and passes `-max-cpu 1`: this
+manifest is a proof artifact seeds are admitted from, so two runs over the same
+bytes have to produce the same file. That is affordable only because the extents
+cut the input by more than an order of magnitude.
 
 So each pass asks **`gba_recompile`, not Ghidra, what the cited source address
 contains**. The shards carry both descriptions of the translation: a
@@ -73,12 +97,15 @@ where control goes; and a direct branch resolving somewhere other than the
 candidate.
 
 Admitted entries are appended to the symbol TSV and the recompiler runs again;
-more translated code exposes more evidence, so the passes iterate to a fixed
-point. The build converges when a pass admits nothing new — not when Ghidra's
-list is exhausted — and fails only if the fixed point is not reached within
-eight passes. `game.toml` is never auto-written; the recompiler is seeded
-through the TSV instead. `ghidra_coverage_proof.json` records every pass with
-per-rule counts and sampled admissions and rejections.
+more translated code means wider extents, which is a new analysis with new
+starting points, so the passes iterate to a fixed point. The build converges when
+a pass admits nothing new — not when Ghidra's list is exhausted — and fails only
+if the fixed point is not reached within eight passes. `game.toml` is never
+auto-written; the recompiler is seeded through the TSV instead.
+`ghidra_coverage_proof.json` records every pass with per-rule counts and sampled
+admissions and rejections; each pass's raw manifest is
+`ghidra_analysis_pass<N>.json`, verified against the cartridge bytes in
+`ghidra_verification.json` before any seed is taken from it.
 
 On FFVI this converges on the **first** pass: every candidate Ghidra offers is
 either already translated or backed only by references manufactured from asset
@@ -114,11 +141,16 @@ The GBA runtime provides automatic keyboard/gamepad input, the shared static
 macOS Xbox/PDP GIP backend, keyboard rebinding, an in-game settings menu, and
 persistent audio/video/controller settings.
 
-**Virtua ARM is not available for GBA yet.** The bundled Virtua SDL
-compatibility surface (`extra/virtua/sdl`) does not implement the renderer
-viewport/fill/line calls, blend modes, audio device status, controller sensor,
-or touch entry points that the gbarecomp host layer uses. The platform entry is
-greyed out for GBA rather than producing a package that cannot run.
+**Virtua ARM builds the same recompiled cartridge, not a port.** The guest is
+ARMv4T and the device is ARMv7-A — two different instruction sets — so the
+`.virtua` image links the identical `generated/recompiled_*.cpp` shards, compiled
+by PowerEngine's clang instead of the host's. It does not go through the bundled
+Virtua SDL compatibility surface, which is missing the renderer viewport/fill/line
+calls, blend modes, audio device status, controller sensor, and touch entry
+points gbarecomp's desktop host uses. `extra/gba-to-mvii` replaces that layer
+outright and talks to `/dev/fb0`, `/dev/input0`, and `/dev/dac0` directly,
+compiling a curated subset of the core with no window, no audio device, and no
+overlay recompiler, since none of those exist on MVII.
 
 ## Required inputs
 

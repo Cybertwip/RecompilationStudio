@@ -845,8 +845,12 @@ void CiPanel::submitBuild(const QSharedPointer<Job>& job) {
   const QJsonObject request{
     { QStringLiteral("repository"), job->repositoryPath },
     { QStringLiteral("commit"), job->commit },
-    { QStringLiteral("target"), job->request.system == SystemKind::GameBoyAdvance
-        ? QStringLiteral("gba-runtime") : QStringLiteral("psx-runtime") },
+    // The CMake target the generated project builds. Vita and Horizon share
+    // one, because their packages differ only in which front-end they add.
+    { QStringLiteral("target"),
+      job->request.system == SystemKind::GameBoyAdvance ? QStringLiteral("gba-runtime")
+        : systemRunsGuestNatively(job->request.system) ? QStringLiteral("guest-runtime")
+        : QStringLiteral("psx-runtime") },
     { QStringLiteral("platform"), job->builder.platform },
     { QStringLiteral("architecture"), job->builder.architecture },
     { QStringLiteral("configuration"), QStringLiteral("Release") },

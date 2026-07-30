@@ -665,9 +665,11 @@ QString gbaMnemonic(const QString& disassembly) {
  * `wantedSources` bounds the instruction map to the addresses Ghidra actually
  * cites: a fully covered cartridge emits well over a hundred megabytes of C++,
  * and keeping every instruction would be paying to remember addresses no rule
- * can ever ask about. */
+ * can ever ask about. A null `wantedSources` skips the instruction scan
+ * outright, which is what a pass needs before Ghidra has run on it: the extents
+ * are the input to that run, and nothing has cited an address yet. */
 bool readGbaTranslation(const QString& generatedDir,
-                        const QSet<quint32>& wantedSources,
+                        const QSet<quint32>* wantedSources,
                         QList<GbaTranslatedSpan>& spans,
                         GbaInstructionMap& instructions,
                         QString& error) {
@@ -704,11 +706,12 @@ bool readGbaTranslation(const QString& generatedDir,
       if (span.end <= span.start) continue;
       spans.append(span);
     }
+    if (wantedSources == nullptr) continue;
     auto lowered = instructionPattern.globalMatch(text);
     while (lowered.hasNext()) {
       const auto match = lowered.next();
       const quint32 address = match.captured(1).toUInt(nullptr, 16);
-      if (wantedSources.contains(address)) instructions.insert(address, match.captured(2));
+      if (wantedSources->contains(address)) instructions.insert(address, match.captured(2));
     }
   }
   if (spans.isEmpty()) {
@@ -743,6 +746,31 @@ const GbaTranslatedSpan* gbaSpanContaining(const QList<GbaTranslatedSpan>& spans
     if (address >= it->start && address < it->end) return &*it;
   }
   return nullptr;
+}
+
+/* The extents file SeedGbaEntry.java reads. Every span is listed rather than
+ * merged: the prescript needs each one as a disassembly start, because a
+ * function reached only through a BX is inside its predecessor's merged range
+ * and would otherwise never be started at. Identical triples are dropped —
+ * gba_recompile emits one per alias entry into the same function — since the
+ * prescript would skip the duplicate anyway and the file is read by a script,
+ * not a stream parser. */
+QString gbaExtentsTable(const QList<GbaTranslatedSpan>& spans) {
+  QString text = QStringLiteral(
+    "# Function extents gba_recompile proved reachable by recursive descent.\n"
+    "# Format: 0xSTART<TAB>0xEND_EXCLUSIVE<TAB>arm|thumb\n");
+  QSet<QString> emitted;
+  emitted.reserve(spans.size());
+  for (const auto& span : spans) {
+    const QString row = QStringLiteral("0x%1\t0x%2\t%3\n")
+                          .arg(span.start, 8, 16, QLatin1Char('0'))
+                          .arg(span.end, 8, 16, QLatin1Char('0'))
+                          .arg(span.thumb ? QStringLiteral("thumb") : QStringLiteral("arm"));
+    if (emitted.contains(row)) continue;
+    emitted.insert(row);
+    text += row;
+  }
+  return text;
 }
 
 /* The number of distinct bytes the spans cover, counting an overlap once. */

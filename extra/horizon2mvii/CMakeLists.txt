@@ -265,20 +265,35 @@ endif()
 # runtime and the guest side by side. The payload is an NRO or NSO -- not an NSP
 # or an NCA, which are encrypted archives this front-end does not open, and the
 # old cache variable's "application.nsp" name promised otherwise.
+#
+# The staged image is named after HORIZON2MVII_OUTPUT_NAME rather than
+# "horizon2mvii", because a package built by PSXRecomp Studio is named for its
+# game and the runtime's own name never appears in it. HORIZON2MVII_STAGE_DIR
+# lets the caller choose where that pair lands, the same knob gba-to-mvii exposes
+# as GBA_MVII_STAGE_DIR.
 
 set(HORIZON2MVII_PAYLOAD "" CACHE FILEPATH
-    "Optional Horizon NRO/NSO staged beside horizon2mvii.virtua as 'executable'")
+    "Optional Horizon NRO/NSO staged beside the runtime as 'executable'")
+if(NOT DEFINED HORIZON2MVII_STAGE_DIR)
+    set(HORIZON2MVII_STAGE_DIR "")
+endif()
 if(HORIZON2MVII_PAYLOAD)
     if(NOT EXISTS "${HORIZON2MVII_PAYLOAD}")
         message(FATAL_ERROR "HORIZON2MVII_PAYLOAD does not exist: ${HORIZON2MVII_PAYLOAD}")
     endif()
-    set(_horizon2mvii_stage "${CMAKE_BINARY_DIR}/steganos-package/horizon2mvii/$<CONFIG>")
+    if(HORIZON2MVII_STAGE_DIR)
+        set(_horizon2mvii_stage "${HORIZON2MVII_STAGE_DIR}")
+    else()
+        set(_horizon2mvii_stage
+            "${CMAKE_BINARY_DIR}/steganos-package/horizon2mvii/$<CONFIG>")
+    endif()
     set(_horizon2mvii_stamp "${CMAKE_CURRENT_BINARY_DIR}/horizon2mvii-stage.stamp")
     add_custom_command(
         OUTPUT "${_horizon2mvii_stamp}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_horizon2mvii_stage}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${_horizon2mvii_virtua}" "${_horizon2mvii_stage}/horizon2mvii.virtua"
+                "${_horizon2mvii_virtua}"
+                "${_horizon2mvii_stage}/${HORIZON2MVII_OUTPUT_NAME}.virtua"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${HORIZON2MVII_PAYLOAD}" "${_horizon2mvii_stage}/executable"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -286,7 +301,8 @@ if(HORIZON2MVII_PAYLOAD)
         COMMAND ${CMAKE_COMMAND} -E touch "${_horizon2mvii_stamp}"
         DEPENDS "${_horizon2mvii_virtua}" "${HORIZON2MVII_PAYLOAD}"
                 "${HORIZON2MVII_HERE}/README.md"
-        COMMENT "Staging horizon2mvii package"
+        COMMENT "Staging horizon2mvii into ${_horizon2mvii_stage}"
         VERBATIM)
     add_custom_target(horizon2mvii-stage ALL DEPENDS "${_horizon2mvii_stamp}")
+    add_dependencies(horizon2mvii-stage horizon2mvii)
 endif()

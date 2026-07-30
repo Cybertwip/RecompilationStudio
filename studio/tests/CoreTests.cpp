@@ -974,13 +974,26 @@ int main(int argc, char** argv) {
     }
     QList<psxstudio::GbaTranslatedSpan> spans;
     psxstudio::GbaInstructionMap instructions;
-    check(psxstudio::readGbaTranslation(generatedDir, wanted, spans, instructions, error) &&
+    check(psxstudio::readGbaTranslation(generatedDir, &wanted, spans, instructions, error) &&
             spans.size() == 1 && instructions.size() == 6 &&
             psxstudio::gbaTranslatedBytes(spans) == 0x40u &&
             psxstudio::gbaSpanContaining(spans, 0x08000102u) != nullptr &&
             psxstudio::gbaSpanContaining(spans, 0x08000140u) == nullptr,
           error.isEmpty() ? QStringLiteral("gbarecomp shard spans and instructions parse")
                           : error);
+
+    // The pre-Ghidra read: extents only, because the extents are what Ghidra is
+    // about to be handed and nothing has cited an address yet.
+    QList<psxstudio::GbaTranslatedSpan> extentSpans;
+    psxstudio::GbaInstructionMap noInstructions;
+    check(psxstudio::readGbaTranslation(generatedDir, nullptr, extentSpans, noInstructions,
+                                        error) &&
+            extentSpans.size() == 1 && noInstructions.isEmpty(),
+          error.isEmpty() ? QStringLiteral("a null cited-source set reads extents alone")
+                          : error);
+    check(psxstudio::gbaExtentsTable(extentSpans)
+            .endsWith(QStringLiteral("0x08000100\t0x08000140\tthumb\n")),
+          QStringLiteral("the extents table names each span with its instruction set"));
 
     const auto candidate = [](quint32 entry, bool thumb, const QVector<quint32>& computed,
                               const QVector<quint32>& pointers = {}) {

@@ -100,12 +100,19 @@ struct GbaSeedCandidate {
 
 /* Reads both descriptions of the translation out of one pass over the shards.
  * `wantedSources` bounds the instruction map to addresses Ghidra cites: a fully
- * covered cartridge emits hundreds of megabytes of C++. */
+ * covered cartridge emits hundreds of megabytes of C++. Pass nullptr to read
+ * the extents alone, which is what the pass has before Ghidra has run on it and
+ * so has nothing to cite yet. */
 bool readGbaTranslation(const QString& generatedDir,
-                        const QSet<quint32>& wantedSources,
+                        const QSet<quint32>* wantedSources,
                         QList<GbaTranslatedSpan>& spans,
                         GbaInstructionMap& instructions,
                         QString& error);
+
+/* The extents as SeedGbaEntry.java reads them: one translated function per
+ * line, `0xSTART<TAB>0xEND_EXCLUSIVE<TAB>arm|thumb`. This is what confines
+ * Ghidra to code the recompiler proved is code. */
+QString gbaExtentsTable(const QList<GbaTranslatedSpan>& spans);
 
 /* The span covering `address`, or nullptr. */
 const GbaTranslatedSpan* gbaSpanContaining(const QList<GbaTranslatedSpan>& spans,

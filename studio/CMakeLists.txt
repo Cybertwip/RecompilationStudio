@@ -83,6 +83,8 @@ set(STUDIO_CORE_SOURCES
   src/GbaSupport.h
   src/GuestAppSupport.cpp
   src/GuestAppSupport.h
+  src/GuestCrypto.cpp
+  src/GuestCrypto.h
   src/PipelineSupport.cpp
   src/PipelineSupport.h
   src/PipelineTypes.h
@@ -90,6 +92,10 @@ set(STUDIO_CORE_SOURCES
   src/PipelineWorker.h
   src/SteganosClient.cpp
   src/SteganosClient.h
+  src/SwitchNsp.cpp
+  src/SwitchNsp.h
+  src/VitaPkg.cpp
+  src/VitaPkg.h
   ../runtime/src/iso_reader.cpp
   ../recompiler/src/ps1_exe_parser.cpp
 )
@@ -186,11 +192,17 @@ if(BUILD_TESTING)
     src/GbaSupport.h
     src/GuestAppSupport.cpp
     src/GuestAppSupport.h
+    src/GuestCrypto.cpp
+    src/GuestCrypto.h
     src/PipelineSupport.cpp
     src/PipelineSupport.h
     src/PipelineTypes.h
     src/PipelineWorker.cpp
     src/PipelineWorker.h
+    src/SwitchNsp.cpp
+    src/SwitchNsp.h
+    src/VitaPkg.cpp
+    src/VitaPkg.h
     ../runtime/src/iso_reader.cpp
     ../recompiler/src/ps1_exe_parser.cpp
   )

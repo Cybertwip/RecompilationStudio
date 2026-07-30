@@ -963,6 +963,16 @@ void MainWindow::chooseDisc() {
       QMessageBox::warning(this, QStringLiteral("Application selection"), error);
       return;
     }
+    /* The notes are what the container said about itself and the contents are
+     * what it holds; both were read whether or not the image turned out to be
+     * loadable, so a refusal shows the layer it stopped at with everything
+     * above it in the details. */
+    QStringList details = app.notes;
+    if (!app.contents.isEmpty()) {
+      if (!details.isEmpty()) details.append(QString());
+      details.append(QStringLiteral("%1 contains:").arg(app.containerName));
+      details.append(app.contents);
+    }
     if (!app.loadable()) {
       /* Refuse here rather than on the device. The front-end would refuse the
        * same container, but only after the package had been built, copied to
@@ -972,14 +982,23 @@ void MainWindow::chooseDisc() {
       message.setWindowTitle(QStringLiteral("Unsupported %1 container")
                                .arg(systemKindDisplayName(currentSystem_)));
       message.setText(app.refusal);
-      if (!app.contents.isEmpty())
-        message.setDetailedText(app.contents.join(QLatin1Char('\n')));
+      if (!details.isEmpty())
+        message.setDetailedText(details.join(QLatin1Char('\n')));
       message.exec();
       return;
     }
     discEdit_->setText(path);
     selectedBins_.clear();
     if (titleEdit_->text().isEmpty()) titleEdit_->setText(app.suggestedTitle);
+    if (app.requiresExtraction) {
+      /* Say so at selection time: the export will not copy the file that was
+       * chosen, it will open it and take one entry out. */
+      logView_->appendPlainText(
+        QStringLiteral("%1: %2 — the export will extract %3 from it.")
+          .arg(QFileInfo(path).fileName(), app.containerName, app.executableName));
+      for (const QString& note : app.notes)
+        logView_->appendPlainText(QStringLiteral("  %1").arg(note));
+    }
     return;
   }
 

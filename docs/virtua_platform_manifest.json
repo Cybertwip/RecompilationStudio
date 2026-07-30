@@ -4,14 +4,11 @@
   "format": "Virtua v3",
   "architecture_flag": 4,
   "cooperative_required": true,
-
   "note": "Schema 1 recorded every non-PSX guest as mode 'native-bridge' against /dev/native0 guest kinds. That bridge does not exist in PowerEngine and has been removed; see the 'Removed: the native-bridge mock' section of docs/VIRTUA_PLATFORM.md. Each guest now reaches the device by one of two real routes, chosen by whether the guest CPU is the host CPU.",
-
   "modes": {
     "static-recompilation": "guest CPU is not ARMv7; guest code is translated to C ahead of time and compiled for Cortex-A7",
     "direct-execution": "guest CPU is ARMv7, same as the host; guest instructions run untranslated and the guest's OS is reimplemented around them (the WINE model)"
   },
-
   "playstation": {
     "mode": "static-recompilation",
     "guest_cpu": "MIPS R3000A",
@@ -31,7 +28,18 @@
     "recompilation": false,
     "path": "extra/vita2hos",
     "armv7_only": true,
-    "shared_layer": "extra/virtua/wine"
+    "shared_layer": "extra/virtua/wine",
+    "containers": [
+      "ET_SCE_RELEXEC ELF32",
+      "SELF (version 3, header type 1)",
+      "VPK (zip)",
+      "PKG (PSN package)"
+    ],
+    "container_reader": "studio/src/VitaPkg.{h,cpp} with studio/src/GuestCrypto.{h,cpp}",
+    "pkg_reader": "header, metadata records and item table are decrypted with the format's own published key: key type at 0xE4, types 2-4 derive the AES-128-CTR key by ECB-encrypting the package riv, type 1 uses the key directly. The key is only accepted when the decrypted item table is self-consistent (offsets inside the data area, printable ASCII names). Yields the item list, sce_sys/param.sfo and the plaintext sce_pfs/pflist.",
+    "pkg_blocked_at": "sce_pfs — a file whose pflist mark is empty is stored PFS-encrypted, and the PFS key comes from the licence (work.bin / zRIF), which a package does not contain. The refusal names pflist as the evidence and eboot.bin as the file it wanted.",
+    "sample": "branding/vita/terraria.pkg",
+    "sample_result": "opens: 103 items, content id EP4040-PCSB00405_00-TERRARIA00000001, param.sfo Terraria / PCSB00405 / gd / 01.00, 78 PFS-protected files; blocked at sce_pfs because eboot.bin is one of them"
   },
   "horizon": {
     "mode": "direct-execution",
@@ -40,14 +48,27 @@
     "path": "extra/horizon2mvii",
     "armv7_only": true,
     "shared_layer": "extra/virtua/wine",
-    "containers": ["NRO0", "NSO0"],
+    "containers": [
+      "NRO0",
+      "NSO0",
+      "PFS0/NSP (submission package)"
+    ],
+    "container_reader": "studio/src/SwitchNsp.{h,cpp} with studio/src/GuestCrypto.{h,cpp}",
+    "nsp_reader_unkeyed": "the outer PFS0 partition, the .cnmt.xml content list and the ticket parse with no key at all: title id, content meta type, every NCA in the package, the ticket rights id and title key",
+    "nsp_reader_keyed": "the NCA header is AES-128-XTS under header_key with Nintendo's big-endian sector tweak; with a prod.keys present Studio decrypts it, walks the FS headers to the ExeFS PFS0 and stages main",
+    "nsp_key_search": [
+      "<package directory>/prod.keys",
+      "~/.switch/prod.keys"
+    ],
+    "nsp_blocked_at": "header_key, which Nintendo does not publish and which is not in this repo. The refusal names the key and lists the paths searched, after having read the whole unkeyed tier.",
+    "sample": "branding/switch/Undertale.nsp",
+    "sample_result": "opens unkeyed: 7 entries, title id 010080b00ad66000, meta type Application, Program/Control/LegalInformation/Meta contents, rights id 010080b00ad660000000000000000005; blocked at the NCA header for want of header_key. The keyed tier is unverified here because no prod.keys exists on this machine.",
     "aarch64_supported": false,
     "aarch64_note": "refused by name; a Cortex-A7 cannot execute AArch64 at all",
     "ipc": "HIPC/CMIF transport complete; sm: implemented, no device services yet",
     "svc_abi_32bit": "derived from the AArch64 ABI, documented as D1/D2/D3 in extra/horizon2mvii/include/horizon_svc.h",
     "provenance": "extra/horizon2mvii/REFERENCE_PROVENANCE.json"
   },
-
   "proof": "runtime/proofs/virtua_platform_smoke.json",
   "dependencies": {
     "powerengine_source": "POWERENGINE_ROOT",

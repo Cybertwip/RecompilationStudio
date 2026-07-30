@@ -2,8 +2,12 @@
 #include "DiscCatalog.h"
 #include "DiscInspector.h"
 #include "GbaSupport.h"
+#include "GuestAppSupport.h"
+#include "GuestCrypto.h"
 #include "PipelineSupport.h"
 #include "PipelineWorker.h"
+#include "SwitchNsp.h"
+#include "VitaPkg.h"
 
 #include "quazip.h"
 #include "quazipfile.h"
@@ -99,6 +103,210 @@ bool makeTestDisc(const QString& path, QString& error) {
   qToLittleEndian<quint32>(0x801ffff0u, reinterpret_cast<uchar*>(executable.data() + 0x30));
   std::memcpy(image.data() + 22 * sectorSize, executable.constData(), static_cast<size_t>(executable.size()));
   return psxstudio::writeBytes(path, image, error);
+}
+
+void putBe16(QByteArray& bytes, qsizetype at, quint16 value) {
+  qToBigEndian(value, reinterpret_cast<uchar*>(bytes.data() + at));
+}
+void putBe32(QByteArray& bytes, qsizetype at, quint32 value) {
+  qToBigEndian(value, reinterpret_cast<uchar*>(bytes.data() + at));
+}
+void putBe64(QByteArray& bytes, qsizetype at, quint64 value) {
+  qToBigEndian(value, reinterpret_cast<uchar*>(bytes.data() + at));
+}
+void putLe16(QByteArray& bytes, qsizetype at, quint16 value) {
+  qToLittleEndian(value, reinterpret_cast<uchar*>(bytes.data() + at));
+}
+void putLe32(QByteArray& bytes, qsizetype at, quint32 value) {
+  qToLittleEndian(value, reinterpret_cast<uchar*>(bytes.data() + at));
+}
+void putLe64(QByteArray& bytes, qsizetype at, quint64 value) {
+  qToLittleEndian(value, reinterpret_cast<uchar*>(bytes.data() + at));
+}
+
+QByteArray beBytes32(quint32 value) {
+  QByteArray bytes(4, 0);
+  putBe32(bytes, 0, value);
+  return bytes;
+}
+
+/* Sony's PSF blob, in the one form a Vita param.sfo uses: UTF-8 values. */
+QByteArray makeSonyPsf(const QList<QPair<QByteArray, QByteArray>>& values) {
+  QByteArray entries, keys, data;
+  for (const auto& pair : values) {
+    QByteArray entry(16, 0);
+    putLe16(entry, 0, static_cast<quint16>(keys.size()));
+    putLe16(entry, 2, 0x0204);  // UTF-8, NUL-terminated
+    QByteArray value = pair.second;
+    value += '\0';
+    const quint32 length = static_cast<quint32>(value.size());
+    const quint32 maxLength = (length + 3u) & ~3u;
+    value.append(static_cast<qsizetype>(maxLength - length), '\0');
+    putLe32(entry, 4, length);
+    putLe32(entry, 8, maxLength);
+    putLe32(entry, 12, static_cast<quint32>(data.size()));
+    entries += entry;
+    keys += pair.first;
+    keys += '\0';
+    data += value;
+  }
+  while (keys.size() % 4 != 0) keys += '\0';
+  QByteArray psf(20, 0);
+  std::memcpy(psf.data(), "\0PSF", 4);
+  putLe32(psf, 4, 0x00000101u);
+  putLe32(psf, 8, static_cast<quint32>(20 + entries.size()));
+  putLe32(psf, 12, static_cast<quint32>(20 + entries.size() + keys.size()));
+  putLe32(psf, 16, static_cast<quint32>(values.size()));
+  return psf + entries + keys + data;
+}
+
+/* An ET_SCE_RELEXEC ARM ELF32 head — the form vita2mvii loads. */
+QByteArray makeVitaModule() {
+  QByteArray elf(256, 0);
+  std::memcpy(elf.data(), "\x7f" "ELF", 4);
+  elf[4] = 1;  // ELFCLASS32
+  elf[5] = 1;  // little endian
+  elf[6] = 1;  // EV_CURRENT
+  putLe16(elf, 16, 0xFE04u);  // ET_SCE_RELEXEC
+  putLe16(elf, 18, 40u);      // EM_ARM
+  putLe32(elf, 20, 1u);
+  return elf;
+}
+
+/* A PSN package built the way a real one is: an item table, a name region and
+ * the file data, all under one AES-128-CTR stream keyed from the package's own
+ * riv and the type-2 package key. `ebootProtected` writes the pflist mark that
+ * says eboot.bin is stored inside the PFS layer, which is the case Studio has
+ * to refuse by name rather than open. */
+bool makeTestVitaPkg(const QString& path, bool ebootProtected, QString& error) {
+  struct Item { QByteArray name; QByteArray data; quint32 flags; };
+  const QByteArray module = makeVitaModule();
+  const QByteArray psf = makeSonyPsf({
+    { "TITLE", "Studio Test Vita" }, { "TITLE_ID", "PCST00001" },
+    { "CATEGORY", "gd" }, { "APP_VER", "01.00" },
+  });
+  QByteArray pflist;
+  pflist += "sce_sys\t0\tdir\t0\t0\t0\n";
+  pflist += "sce_sys/param.sfo\t0\tnenc\t1\t" + QByteArray::number(psf.size()) + "\t0\n";
+  pflist += "eboot.bin\t0\t";
+  if (!ebootProtected) pflist += "nenc";
+  pflist += "\t2\t" + QByteArray::number(module.size()) + "\t0\n";
+
+  const QList<Item> items{
+    { "sce_sys", {}, 4u },
+    { "sce_pfs", {}, 4u },
+    { "sce_sys/param.sfo", psf, 3u },
+    { "sce_pfs/pflist", pflist, 3u },
+    { "eboot.bin", module, 3u },
+  };
+  const qsizetype tableSize = items.size() * 32;
+  QByteArray names, blobs;
+  QList<quint32> nameOffsets;
+  QList<quint64> dataOffsets;
+  for (const Item& item : items) {
+    nameOffsets.append(static_cast<quint32>(tableSize + names.size()));
+    names += item.name;
+  }
+  const qsizetype blobsBase = tableSize + names.size();
+  for (const Item& item : items) {
+    dataOffsets.append(static_cast<quint64>(blobsBase + blobs.size()));
+    blobs += item.data;
+  }
+  QByteArray table(tableSize, 0);
+  for (qsizetype index = 0; index < items.size(); ++index) {
+    const qsizetype at = index * 32;
+    putBe32(table, at, nameOffsets.at(index));
+    putBe32(table, at + 4, static_cast<quint32>(items.at(index).name.size()));
+    putBe64(table, at + 8, dataOffsets.at(index));
+    putBe64(table, at + 16, static_cast<quint64>(items.at(index).data.size()));
+    putBe32(table, at + 24, items.at(index).flags);
+  }
+  QByteArray data = table + names + blobs;
+
+  const QByteArray riv = QByteArray::fromHex("000102030405060708090a0b0c0d0e0f");
+  // The type-2 package key, which is part of the format rather than a secret.
+  const QByteArray stream = psxstudio::crypto::aesEcbEncrypt(
+    QByteArray::fromHex("e31a70c9ce1dd72bf3c0622963f2eccb"), riv);
+  psxstudio::crypto::CtrStream cipher(stream, riv);
+  if (!cipher.isValid()) {
+    error = QStringLiteral("the test package cipher could not be prepared");
+    return false;
+  }
+  cipher.apply(data.data(), data.size());
+
+  QByteArray meta;
+  meta += beBytes32(2) + beBytes32(4) + beBytes32(0x15);          // PSVita game
+  meta += beBytes32(13) + beBytes32(8) + beBytes32(0) +
+          beBytes32(static_cast<quint32>(tableSize));             // item table at 0
+  const quint64 dataOffset = 0x100u + static_cast<quint64>(meta.size());
+
+  QByteArray header(0x100, 0);
+  std::memcpy(header.data(), "\x7f" "PKG", 4);
+  putBe16(header, 4, 1u);
+  putBe16(header, 6, 2u);  // PSVita
+  putBe32(header, 0x08, 0x100u);
+  putBe32(header, 0x0C, 2u);
+  putBe32(header, 0x10, static_cast<quint32>(meta.size()));
+  putBe32(header, 0x14, static_cast<quint32>(items.size()));
+  putBe64(header, 0x18, dataOffset + static_cast<quint64>(data.size()));
+  putBe64(header, 0x20, dataOffset);
+  putBe64(header, 0x28, static_cast<quint64>(data.size()));
+  const QByteArray contentId("EP0000-PCST00001_00-STUDIOTEST000001");
+  std::memcpy(header.data() + 0x30, contentId.constData(),
+              static_cast<size_t>(contentId.size()));
+  std::memcpy(header.data() + 0x70, riv.constData(), 16);
+  putBe32(header, 0xE4, 2u);
+  return psxstudio::writeBytes(path, header + meta + data, error);
+}
+
+/* A PFS0 archive: the container an NSP is. */
+QByteArray makePfs0(const QList<QPair<QByteArray, QByteArray>>& files) {
+  QByteArray stringTable, blobs;
+  QList<quint32> nameOffsets;
+  for (const auto& file : files) {
+    nameOffsets.append(static_cast<quint32>(stringTable.size()));
+    stringTable += file.first;
+    stringTable += '\0';
+  }
+  while (stringTable.size() % 0x10 != 0) stringTable += '\0';
+  QByteArray table(files.size() * 0x18, 0);
+  for (qsizetype index = 0; index < files.size(); ++index) {
+    const qsizetype at = index * 0x18;
+    putLe64(table, at, static_cast<quint64>(blobs.size()));
+    putLe64(table, at + 8, static_cast<quint64>(files.at(index).second.size()));
+    putLe32(table, at + 0x10, nameOffsets.at(index));
+    blobs += files.at(index).second;
+  }
+  QByteArray header(0x10, 0);
+  std::memcpy(header.data(), "PFS0", 4);
+  putLe32(header, 4, static_cast<quint32>(files.size()));
+  putLe32(header, 8, static_cast<quint32>(stringTable.size()));
+  return header + table + stringTable + blobs;
+}
+
+/* An NSP with the two files a package ships in the clear — the ticket and the
+ * .cnmt.xml — and one NCA that is what an NCA always is here: bytes no key in
+ * this test can open. */
+bool makeTestNsp(const QString& path, QString& error) {
+  const QByteArray programId("aabbccddeeff00112233445566778899");
+  QByteArray ticket(0x2C0, 0);
+  putLe32(ticket, 0, 0x00010004u);  // RSA-2048 SHA-256: body at 0x140
+  const QByteArray titleKey = QByteArray::fromHex("0f0e0d0c0b0a09080706050403020100");
+  const QByteArray rightsId = QByteArray::fromHex("01000000000010000000000000000003");
+  std::memcpy(ticket.data() + 0x140 + 0x40, titleKey.constData(), 16);
+  std::memcpy(ticket.data() + 0x140 + 0x160, rightsId.constData(), 16);
+  const QByteArray cnmt =
+    "<?xml version=\"1.0\"?>\n<ContentMeta>\n"
+    "  <Type>Application</Type>\n  <Id>0x0100000000001000</Id>\n"
+    "  <Content>\n    <Type>Program</Type>\n    <Id>" + programId +
+    "</Id>\n    <Size>4096</Size>\n  </Content>\n</ContentMeta>\n";
+  const QByteArray nca(4096, static_cast<char>(0x5A));
+  return psxstudio::writeBytes(
+    path,
+    makePfs0({ { rightsId.toHex() + ".tik", ticket },
+               { programId + ".nca", nca },
+               { programId + ".cnmt.xml", cnmt } }),
+    error);
 }
 
 } // namespace
@@ -247,6 +455,99 @@ int main(int argc, char** argv) {
           !gbaCmake.contains(QStringLiteral("GBA_CARGO")) &&
           !gbaCmake.contains(QStringLiteral("add_executable(psx-runtime")),
         QStringLiteral("generated GBA CMake compiles the recompiled cartridge and BIOS"));
+
+  // Vita and Horizon distribution containers. A .pkg and a .nsp are archives,
+  // and Studio opens them: the refusals below are about one named inner layer,
+  // never about the container being "encrypted".
+  const QString guestDir = QDir(temp.path()).filePath(QStringLiteral("guest-apps"));
+  check(QDir().mkpath(guestDir), QStringLiteral("guest application fixture directory"));
+  const QString openPkg = QDir(guestDir).filePath(QStringLiteral("studio-test.pkg"));
+  check(makeTestVitaPkg(openPkg, false, error), error);
+  psxstudio::GuestAppDescription vitaPackage;
+  check(psxstudio::inspectGuestApp(psxstudio::SystemKind::Vita, openPkg,
+                                   vitaPackage, error),
+        error.isEmpty() ? QStringLiteral("PKG inspection") : error);
+  check(vitaPackage.loadable() &&
+          vitaPackage.container == psxstudio::GuestContainer::VitaPkg &&
+          vitaPackage.arch == psxstudio::GuestArch::Arm32 &&
+          vitaPackage.containerTitle == QStringLiteral("Studio Test Vita") &&
+          vitaPackage.containerTitleId == QStringLiteral("PCST00001") &&
+          vitaPackage.suggestedTitle == QStringLiteral("Studio Test Vita") &&
+          vitaPackage.requiresExtraction &&
+          vitaPackage.executableName == QStringLiteral("eboot.bin") &&
+          vitaPackage.contents.size() == 5,
+        QStringLiteral("a PKG is opened: item table, param.sfo and a reachable eboot.bin"));
+  const QString vitaStage = QDir(temp.path()).filePath(QStringLiteral("vita-stage"));
+  QString stagedVita;
+  QStringList vitaStageLog;
+  check(psxstudio::stageGuestApp(vitaPackage, openPkg, vitaStage, stagedVita,
+                                 vitaStageLog, error),
+        error.isEmpty() ? QStringLiteral("PKG staging") : error);
+  QFile stagedVitaFile(stagedVita);
+  check(stagedVitaFile.open(QIODevice::ReadOnly) &&
+          stagedVitaFile.readAll() == makeVitaModule() &&
+          QFileInfo(QDir(vitaStage).filePath(
+            QStringLiteral("container/sce_sys/param.sfo"))).isFile(),
+        QStringLiteral("staging a PKG extracts eboot.bin and keeps what it was extracted from"));
+  stagedVitaFile.close();
+
+  const QString sealedPkg = QDir(guestDir).filePath(QStringLiteral("studio-sealed.pkg"));
+  check(makeTestVitaPkg(sealedPkg, true, error), error);
+  psxstudio::GuestAppDescription vitaSealed;
+  check(psxstudio::inspectGuestApp(psxstudio::SystemKind::Vita, sealedPkg,
+                                   vitaSealed, error),
+        error.isEmpty() ? QStringLiteral("sealed PKG inspection") : error);
+  check(!vitaSealed.loadable() &&
+          vitaSealed.refusal.contains(QStringLiteral("PFS")) &&
+          vitaSealed.refusal.contains(QStringLiteral("eboot.bin")) &&
+          vitaSealed.refusal.contains(QStringLiteral("pflist")) &&
+          vitaSealed.contents.size() == 5 &&
+          vitaSealed.containerTitle == QStringLiteral("Studio Test Vita"),
+        QStringLiteral("a PKG whose eboot.bin is inside the PFS layer is refused at that layer"));
+  // The scan queues the package it can open and reports the one it cannot,
+  // rather than passing both on to fail on the device.
+  QList<psxstudio::GuestCatalogEntry> vitaCatalog;
+  QStringList vitaWarnings;
+  check(psxstudio::scanGuestAppDirectory(psxstudio::SystemKind::Vita, guestDir,
+                                         vitaCatalog, vitaWarnings, error) &&
+          vitaCatalog.size() == 1 &&
+          vitaCatalog.constFirst().suggestedTitle == QStringLiteral("Studio Test Vita") &&
+          vitaWarnings.size() == 1,
+        error.isEmpty() ? QStringLiteral("Vita batch scan separates the openable package")
+                        : error);
+
+  const QString nspPath = QDir(guestDir).filePath(QStringLiteral("studio-test.nsp"));
+  check(makeTestNsp(nspPath, error), error);
+  psxstudio::SwitchNspInfo nsp;
+  check(psxstudio::readSwitchNsp(nspPath, nsp, error),
+        error.isEmpty() ? QStringLiteral("NSP PFS0 walk") : error);
+  check(nsp.entries.size() == 3 &&
+          nsp.titleId == QStringLiteral("0x0100000000001000") &&
+          nsp.contentMetaType == QStringLiteral("Application") &&
+          nsp.programNca == QStringLiteral("aabbccddeeff00112233445566778899.nca") &&
+          nsp.rightsId.toHex() == QByteArrayLiteral("01000000000010000000000000000003") &&
+          nsp.encryptedTitleKey.size() == 16,
+        QStringLiteral("an NSP's plaintext tier is read with no key at all"));
+  // Whether a key file exists on this machine is not the test's business; that
+  // the second tier never fails silently is.
+  check(nsp.programDecrypted || !nsp.missingKeys.isEmpty(),
+        QStringLiteral("an NSP that cannot be decrypted names the key it wanted"));
+  psxstudio::GuestAppDescription horizonPackage;
+  check(psxstudio::inspectGuestApp(psxstudio::SystemKind::Horizon, nspPath,
+                                   horizonPackage, error),
+        error.isEmpty() ? QStringLiteral("NSP inspection") : error);
+  check(horizonPackage.container == psxstudio::GuestContainer::HorizonNsp &&
+          horizonPackage.contents.size() == 3 &&
+          horizonPackage.containerTitleId == QStringLiteral("0x0100000000001000") &&
+          !horizonPackage.loadable() &&
+          horizonPackage.refusal.contains(QStringLiteral("prod.keys")),
+        QStringLiteral("an NSP with no usable keys is refused by naming them, having read the rest"));
+  check(psxstudio::guestAppFileFilter(psxstudio::SystemKind::Vita)
+          .contains(QStringLiteral("*.pkg")) &&
+          psxstudio::guestAppFileFilter(psxstudio::SystemKind::Horizon)
+            .contains(QStringLiteral("*.nsp")),
+        QStringLiteral("the file dialogs offer the distribution containers"));
+
   // An export that produced no translation must stop the build rather than
   // quietly ship an executable with nothing recompiled in it.
   // A separate root: CMake's compiler probe drops *.bin files into its build

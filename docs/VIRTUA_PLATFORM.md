@@ -22,8 +22,8 @@ by the guest's instruction set, not by preference:
 |---|---|
 | PlayStation | Static MIPS→C output linked to the MVII runtime. Video uses the complete software renderer through `/dev/fb0`, audio queued PCM through `/dev/dac0`, input from `/dev/input0`. |
 | Game Boy Advance | Static recompilation via `extra/gbarecomp`; the recompiled cartridge units and BIOS are linked into `extra/gba-to-mvii`, which builds the emulation half of gbarecomp against MVII's devices. Studio drives this automatically — there is no "Native" checkbox. |
-| PlayStation Vita | `extra/vita2hos` builds `vita2mvii.virtua`: loads the SELF/VPK, relocates it, binds each import to a host reimplementation of the Vita's kernel API, and branches. |
-| Nintendo Horizon | `extra/horizon2mvii` builds `horizon2mvii.virtua`: loads an NRO/NSO, relocates it, and runs it against a reimplementation of Horizon's kernel, SVC layer and HIPC/CMIF IPC. 32-bit only — see below. |
+| PlayStation Vita | `extra/vita2hos` builds `vita2mvii.virtua`: loads the SELF/VPK, relocates it, binds each import to a host reimplementation of the Vita's kernel API, and branches. Studio accepts a `.pkg` directly and unpacks the module out of it — see below. |
+| Nintendo Horizon | `extra/horizon2mvii` builds `horizon2mvii.virtua`: loads an NRO/NSO, relocates it, and runs it against a reimplementation of Horizon's kernel, SVC layer and HIPC/CMIF IPC. 32-bit only — see below. Studio accepts a `.nsp` directly and unpacks the ExeFS `main` out of it — see below. |
 
 Both direct-execution front-ends are **ARMv7-only** and their CMake files refuse
 any other `CMAKE_SYSTEM_PROCESSOR`. That guard is load-bearing rather than
@@ -48,6 +48,59 @@ until a stale line means executing something other than the relocated code.
 Binding unknown imports to a function that returns 0 produces a guest that
 starts, runs, and misbehaves somewhere far from the missing call. Refusing at
 load time costs one line of output and names the exact symbol.
+
+## Studio opens the shipping containers, it does not refuse them by extension
+
+A Vita title ships as a `.pkg` and a Switch title ships as a `.nsp`. Neither is
+the guest module — each is a container with the module somewhere inside — so
+Studio reads the container itself rather than telling the user to go find a
+loose `eboot.bin` or `main`. `studio/src/VitaPkg.{h,cpp}` and
+`studio/src/SwitchNsp.{h,cpp}` are the readers; `studio/src/GuestCrypto.{h,cpp}`
+is the AES-128 ECB/CTR/XTS they share. `stageGuestApp` in
+`studio/src/GuestAppSupport.cpp` is what actually unpacks the selected entry
+into `project/package_inputs/executable`, and the pipeline hashes the container
+and the extracted image separately (`container_sha256` and the image's own
+SHA-256 both land in the identification proof).
+
+**Vita `.pkg`.** The header, the metadata records, and the item table are read
+under the format's own published key. The package names its key type at 0xE4;
+types 2–4 derive the AES-128-CTR key by ECB-encrypting the package's `riv` with
+the corresponding public key, type 1 uses the key directly. The chosen key has
+to prove itself: the item table is only accepted when its offsets land inside
+the data area and its names are printable ASCII. From there the item list, the
+`sce_sys/param.sfo` (title, title id, category, version) and the plaintext
+`sce_pfs/pflist` are all readable. Studio shows the item list and stages
+`eboot.bin` when `pflist` marks it `nenc` or absent from PFS.
+
+**Switch `.nsp`.** The outer PFS0 partition, the `.cnmt.xml` content list and the
+ticket all parse with no key at all, so Studio can name the title id, the content
+meta type, every NCA in the package and the ticket's rights id and title key
+before it needs anything. The NCA header is AES-128-XTS under `header_key`,
+which Nintendo does not publish and which is not in the repo; Studio looks for a
+`prod.keys` next to the package and in `~/.switch/`, and when it finds one it
+decrypts the program NCA header, walks the FS headers to the ExeFS, and stages
+`main`.
+
+The point of both readers is that a refusal names the layer it stopped at rather
+than the file extension. The two samples in `branding/` are exactly the two
+interesting cases:
+
+- `branding/vita/terraria.pkg` opens completely — 103 items, content id
+  `EP4040-PCSB00405_00-TERRARIA00000001`, `Terraria` / `PCSB00405` / `gd` /
+  `01.00` from `param.sfo` — and then stops, because `sce_pfs/pflist` marks 78
+  files including `eboot.bin` as PFS-encrypted. The PFS key comes from the
+  licence (`work.bin` / zRIF), which a package does not contain, so the refusal
+  says so and names `pflist` as the evidence. That is a missing input, not an
+  unimplemented reader.
+- `branding/switch/Undertale.nsp` opens through its whole unkeyed tier — 7
+  entries, title id `010080b00ad66000`, meta type `Application`, the Program /
+  Control / LegalInformation / Meta contents, rights id
+  `010080b00ad660000000000000000005` — and then stops at the NCA header, naming
+  `header_key` as the key it wanted and listing the paths it searched. With a
+  `prod.keys` present that tier continues to the ExeFS and stages `main`. What
+  that `main` turns out to be has not been checked here, because no `prod.keys`
+  exists on this machine — and if it is AArch64, as nearly all Switch software
+  is, it meets the separate refusal below.
 
 ## What the front-ends refuse, and why that is the design
 

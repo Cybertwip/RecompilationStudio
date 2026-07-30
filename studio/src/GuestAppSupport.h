@@ -17,9 +17,17 @@ namespace psxstudio {
 // the guest's operating system, in the shape WINE supplies Win32 on Linux.
 //
 // So a Studio export here is not a recompilation pipeline. It is: identify the
-// container, refuse it by name if the front-end cannot open it, cross-compile
-// the front-end for Cortex-A7, and stage the guest image beside the .virtua as
-// `executable` — which is the path both front-ends read from argv[1].
+// container, take the guest image out of it, cross-compile the front-end for
+// Cortex-A7, and stage that image beside the .virtua as `executable` — which is
+// the path both front-ends read from argv[1].
+//
+// The distribution containers are opened here rather than refused. A PSN
+// package (`.pkg`) and a Switch submission package (`.nsp`) are archives, and
+// Studio reads them: see VitaPkg.h and SwitchNsp.h for what each layer needs.
+// Where a layer genuinely cannot be opened — a Vita package whose executable is
+// inside the PFS layer, an NSP with no key file — the refusal names that layer
+// and what it wanted, having read everything above it, instead of dismissing
+// the whole file as "encrypted".
 //
 // The identification is done here, at export time, rather than left to the
 // device. Both front-ends already refuse a container they cannot open, but they
@@ -33,11 +41,11 @@ enum class GuestContainer {
   VitaElf,   // ET_SCE_RELEXEC ARM ELF32 — what a .velf/eboot.elf is
   VitaSelf,  // SCE\0 wrapper, unencrypted, version 3 header type 1
   VitaVpk,   // ZIP carrying eboot.bin
-  VitaPkg,   // PSN package: encrypted, needs a zRIF/work.bin licence
+  VitaPkg,   // PSN package: opened here; its PFS layer needs a licence
   // Horizon.
   HorizonNro,
   HorizonNso,
-  HorizonNsp,  // PFS0 archive of NCAs: encrypted
+  HorizonNsp,  // PFS0 archive of NCAs: opened here; the NCAs need a key file
   HorizonXci,  // cartridge dump: encrypted
 };
 
@@ -51,16 +59,29 @@ struct GuestAppDescription {
   SystemKind system{ SystemKind::Vita };
   GuestContainer container{ GuestContainer::Unknown };
   QString containerName;   // "SELF", "VPK", "NRO0", "PFS0 (NSP)", …
-  QString suggestedTitle;  // from the file name; these containers carry no
-                           // reliable display title outside their metadata
-  qint64 size{ 0 };
+  QString suggestedTitle;  // the container's own title where it carries one,
+                           // otherwise the file name
+  qint64 size{ 0 };        // of the selected file
   GuestArch arch{ GuestArch::Unknown };
   // Empty when the front-end can open this image. Otherwise the reason, naming
   // the format that was found and what the front-end does accept.
   QString refusal;
-  // Evidence for the refusal where the container could be walked without
-  // decrypting it — the PFS0 entry list, the VPK entry list.
+  // What the container holds — the package item list, the PFS0 entry list, the
+  // VPK entry list. Present whether or not the image was loadable.
   QStringList contents;
+
+  // Metadata the container states about itself: param.sfo for a Vita package,
+  // the .cnmt.xml for an NSP. Empty for a bare module, which carries none.
+  QString containerTitle;
+  QString containerTitleId;
+  // What was read and what was not — the key file that was used, the layer that
+  // was open. Informational; a refusal is a refusal and lives above.
+  QStringList notes;
+
+  // Set when the guest image is inside the container and `stageGuestApp` has to
+  // take it out: `executableName` is the entry it will extract.
+  bool requiresExtraction{ false };
+  QString executableName;
 
   bool loadable() const { return refusal.isEmpty(); }
 };
@@ -73,14 +94,31 @@ struct GuestCatalogEntry {
 
 QString guestArchName(GuestArch arch);
 
-/* Reads only the container headers: nothing here decrypts, and nothing here
- * loads or relocates. `error` is set when the file cannot be read at all;
- * a file that reads fine but holds a container the front-end will not open
- * returns true with `description.refusal` populated. */
+/* Identifies the container and, for a distribution package, opens it: the item
+ * table, the metadata, and enough of the guest image to say whether the
+ * front-end can load it. Nothing is written and nothing is relocated.
+ *
+ * `error` is set when the file cannot be read at all; a file that reads fine
+ * but holds an image the front-end will not open returns true with
+ * `description.refusal` populated. */
 bool inspectGuestApp(SystemKind system,
                      const QString& path,
                      GuestAppDescription& description,
                      QString& error);
+
+/* Produces the image the front-end loads, at `<destinationDirectory>/executable`.
+ * For a bare module that is a copy; for a package it is the extraction, and the
+ * files the package carried alongside the module are written to
+ * `<destinationDirectory>/container/` so the export keeps what it read.
+ *
+ * `log` receives one line per file written. Only valid for a description whose
+ * `loadable()` is true. */
+bool stageGuestApp(const GuestAppDescription& description,
+                   const QString& sourcePath,
+                   const QString& destinationDirectory,
+                   QString& stagedExecutable,
+                   QStringList& log,
+                   QString& error);
 
 /* The file-dialog filter for the containers `system`'s front-end accepts. */
 QString guestAppFileFilter(SystemKind system);

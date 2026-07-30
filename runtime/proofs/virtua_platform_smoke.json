@@ -164,24 +164,59 @@
       "horizon_servctl_command_match": "13_of_13"
     },
     "payload_staging": {
+      "note": "Studio opens both distribution containers (studio/src/VitaPkg.cpp, studio/src/SwitchNsp.cpp) rather than refusing them by extension. Each entry below records the layer that was read and the one that stopped it.",
       "vita": {
         "source": "branding/vita/terraria.pkg",
         "source_sha256": "da7fb890f5e67d783a3838819c0ce62427cbf59a09c8869d77f76bccc7ec3f97",
+        "read": {
+          "layer": "PKG (AES-128-CTR under package key 2, derived from the package's own pkg_data_riv)",
+          "items": 103,
+          "data_bytes": 33415808,
+          "content_id": "EP4040-PCSB00405_00-TERRARIA00000001",
+          "param_sfo": { "title": "Terraria", "title_id": "PCSB00405", "category": "gd", "app_ver": "01.00" }
+        },
+        "blocked_at": {
+          "layer": "PFS",
+          "evidence": "the package's own sce_pfs/pflist lists eboot.bin without the `nenc` mark; 78 of its files carry that mark",
+          "key_source": "the licence (zRIF / work.bin), which the package does not contain — sce_sys/package/temp.bin is a placeholder"
+        },
         "executed": false
       },
       "horizon": {
         "source": "branding/switch/Undertale.nsp",
         "source_sha256": "ccd1851c55ab97e2f358705bbf44de9480b3415102db6a855663a3660ed05fba",
-        "executed": false,
-        "note": "An NSP is an encrypted archive. horizon2mvii loads NRO/NSO and does not open it."
+        "read": {
+          "layer": "PFS0 + the plaintext .tik and .cnmt.xml",
+          "entries": 7,
+          "title_id": "0x010080b00ad66000",
+          "patch_id": "0x010080b00ad66800",
+          "content_meta_type": "Application",
+          "program_nca": "eddd7cfa3cdca6623f31cf2f20e9257e.nca",
+          "rights_id": "010080b00ad660000000000000000005",
+          "encrypted_title_key": "e569d60de352c21297da0e66cfdfd08f"
+        },
+        "blocked_at": {
+          "layer": "NCA header (AES-128-XTS)",
+          "missing_keys": ["header_key"],
+          "searched": ["$PSXRECOMP_SWITCH_KEYS", "branding/switch/prod.keys", "~/.switch/prod.keys"],
+          "note": "No prod.keys exists on this machine, so the keyed tier is unverified here. The module would be AArch64 in any case, which the Cortex-A7 cannot decode."
+        },
+        "executed": false
       }
     }
   },
 
-  "orphaned_pending_user_decision": {
-    "note": "Left in the tree, not deleted. Nothing includes or builds either: extra/virtua/native is a standalone CMake project no parent adds, and its only source is the launcher gba-to-mvii replaced.",
+  "not_orphaned_correction": {
+    "note": "Corrects an earlier entry that listed extra/virtua/native/ as orphaned. VirtuaArmApp.cmake:25 compiles native/minimal_arm_runtime.c into every Virtua ARM app, so the directory is load-bearing.",
     "paths": [
-      "extra/virtua/native/",
+      "extra/virtua/native/minimal_arm_runtime.c"
+    ]
+  },
+
+  "orphaned_pending_user_decision": {
+    "note": "Left in the tree, not deleted. Nothing includes or builds either: gba_native_main.c is the launcher gba-to-mvii replaced, and native_bridge.h is its header.",
+    "paths": [
+      "extra/virtua/native/gba_native_main.c",
       "extra/virtua/include/native_bridge.h"
     ]
   }

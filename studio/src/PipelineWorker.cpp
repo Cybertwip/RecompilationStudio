@@ -5324,12 +5324,16 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
   // The front-end refuses this too, but only after the package has been built,
   // copied to the device and launched. Refusing here costs nothing and names
   // the format that was actually found.
+  // What the container said about itself, whether or not it turns out to be
+  // loadable: a package that is refused is refused at one named layer, and the
+  // layers above it were read.
+  for (const QString& note : app.notes) emit logLine(note);
+  if (!app.contents.isEmpty()) {
+    emit logLine(QStringLiteral("%1 contains:").arg(app.containerName));
+    for (const QString& entry : app.contents)
+      emit logLine(QStringLiteral("  %1").arg(entry));
+  }
   if (!app.loadable()) {
-    if (!app.contents.isEmpty()) {
-      emit logLine(QStringLiteral("%1 contains:").arg(app.containerName));
-      for (const QString& entry : app.contents)
-        emit logLine(QStringLiteral("  %1").arg(entry));
-    }
     fail(QStringLiteral("%1 cannot load this file. %2").arg(frontEnd, app.refusal));
     return;
   }
@@ -5398,15 +5402,20 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
       }
     }
   }
-  const QString imageSha256 = sha256File(request.romPath, error);
-  if (imageSha256.isEmpty()) {
-    fail(error.isEmpty() ? QStringLiteral("The guest image could not be hashed.") : error);
+  // Two hashes when the image comes out of a package, and they are different
+  // things: this one identifies the file that was selected, and the one taken
+  // after staging identifies the module that will actually be loaded.
+  const QString containerSha256 = sha256File(request.romPath, error);
+  if (containerSha256.isEmpty()) {
+    fail(error.isEmpty() ? QStringLiteral("The selected file could not be hashed.") : error);
     return;
   }
+  QString imageSha256;
   emit logLine(QStringLiteral("%1 application: %2 · %3 · %4 bytes")
                  .arg(systemName, app.containerName, guestArchName(app.arch))
                  .arg(app.size));
-  emit logLine(QStringLiteral("SHA-256: %1").arg(imageSha256));
+  emit logLine(QStringLiteral("SHA-256 (%1): %2")
+                 .arg(QFileInfo(request.romPath).fileName(), containerSha256));
   emit logLine(QStringLiteral("Execution: direct — the guest is ARMv7 and so is the device, so its instructions are not translated. %1 supplies the guest's operating system.")
                  .arg(frontEnd));
   if (app.arch == GuestArch::Unknown) {
@@ -5462,17 +5471,40 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
                            QDir(frameworkExtra).filePath(frontEndDir), error) ||
       !copySourceDirectory(virtuaRoot,
                            QDir(frameworkExtra).filePath(QStringLiteral("virtua")), error) ||
-      !copyFileReplacing(request.romPath,
-                         QDir(inputsDir).filePath(QStringLiteral("executable")), error) ||
       !createPngIcon(iconSourcePath,
                      QDir(projectDir).filePath(QStringLiteral("AppIcon.png")), error)) {
     fail(error);
     return;
   }
+  // The guest image. A bare module is staged as it stands; a package is opened
+  // and the module is taken out of it, with what the package carried alongside
+  // written to package_inputs/container so the extraction can be checked
+  // against its source.
+  QString stagedExecutable;
+  QStringList stageLog;
+  if (!stageGuestApp(app, request.romPath, inputsDir, stagedExecutable, stageLog, error)) {
+    fail(error);
+    return;
+  }
+  for (const QString& line : stageLog)
+    emit logLine(QStringLiteral("  %1").arg(line));
+  imageSha256 = sha256File(stagedExecutable, error);
+  if (imageSha256.isEmpty()) {
+    fail(error.isEmpty() ? QStringLiteral("The guest image could not be hashed.") : error);
+    return;
+  }
+  if (app.requiresExtraction) {
+    emit logLine(QStringLiteral("Guest image: %1 out of the %2 · %3 bytes · SHA-256 %4")
+                   .arg(app.executableName, app.containerName)
+                   .arg(QFileInfo(stagedExecutable).size())
+                   .arg(imageSha256));
+  }
 
   nextStage(QStringLiteral("Finalize %1 CMake repository").arg(frontEnd));
   QJsonArray containerContents;
   for (const QString& entry : app.contents) containerContents.append(entry);
+  QJsonArray containerNotes;
+  for (const QString& note : app.notes) containerNotes.append(note);
   const QJsonObject identificationProof{
     { QStringLiteral("schema"), 1 },
     { QStringLiteral("system"), systemKindKey(request.system) },
@@ -5488,10 +5520,22 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
     { QStringLiteral("architecture_signal"),
       QStringLiteral("entry branch encoding; the front-end additionally reads "
                      ".dynamic and refuses when the two disagree") },
-    { QStringLiteral("image_bytes"), static_cast<double>(app.size) },
+    { QStringLiteral("container_title"), app.containerTitle },
+    { QStringLiteral("container_title_id"), app.containerTitleId },
+    { QStringLiteral("container_bytes"), static_cast<double>(app.size) },
+    { QStringLiteral("container_sha256"), containerSha256 },
+    { QStringLiteral("container_contents"), containerContents },
+    { QStringLiteral("container_notes"), containerNotes },
+    // The image the front-end loads. Equal to the container above when the
+    // selected file was already the module; otherwise this is what came out of
+    // it, and `extracted_entry` is the entry it came from.
+    { QStringLiteral("extracted_from_container"), app.requiresExtraction },
+    { QStringLiteral("extracted_entry"),
+      app.requiresExtraction ? app.executableName : QString() },
+    { QStringLiteral("image_bytes"),
+      static_cast<double>(QFileInfo(stagedExecutable).size()) },
     { QStringLiteral("image_sha256"), imageSha256 },
     { QStringLiteral("image_staged_as"), QStringLiteral("executable") },
-    { QStringLiteral("container_contents"), containerContents },
   };
   if (!writeText(QDir(projectDir).filePath(QStringLiteral("CMakeLists.txt")),
                  generatedGuestAppProjectCMake(request, app, bundleName), error) ||
@@ -5681,7 +5725,7 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
   // altered in transit there would be nothing else in the package to notice.
   if (sha256File(packagedImage, error) != imageSha256) {
     fail(error.isEmpty()
-      ? QStringLiteral("The packaged guest image does not match the selected application.")
+      ? QStringLiteral("The packaged guest image does not match the one staged for it.")
       : error);
     return;
   }
@@ -5779,7 +5823,12 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
     { QStringLiteral("target_architecture"), QStringLiteral("armv7a-none-eabi (Cortex-A7)") },
     { QStringLiteral("guest_architecture"), guestArchName(app.arch) },
     { QStringLiteral("guest_container"), app.containerName },
+    { QStringLiteral("guest_container_sha256"), containerSha256 },
     { QStringLiteral("guest_image"), QStringLiteral("executable") },
+    { QStringLiteral("guest_image_source"),
+      app.requiresExtraction
+        ? QStringLiteral("%1, extracted from the %2").arg(app.executableName, app.containerName)
+        : QStringLiteral("the selected file, staged verbatim") },
     { QStringLiteral("guest_image_sha256"), imageSha256 },
     { QStringLiteral("host_runtime"),
       QStringLiteral("%1 on MVII devices, over the shared virtua-wine guest-OS layer")

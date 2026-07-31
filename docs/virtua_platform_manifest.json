@@ -33,13 +33,27 @@
       "ET_SCE_RELEXEC ELF32",
       "SELF (version 3, header type 1)",
       "VPK (zip)",
-      "PKG (PSN package)"
+      "PKG (PSN package)",
+      "unpacked title directory (the eboot.bin + sce_sys/ tree of a dumped title)"
     ],
-    "container_reader": "studio/src/VitaPkg.{h,cpp} with studio/src/GuestCrypto.{h,cpp}",
+    "container_reader": "studio/src/VitaPkg.{h,cpp} and studio/src/VitaPfs.{h,cpp} with studio/src/GuestCrypto.{h,cpp}",
     "pkg_reader": "header, metadata records and item table are decrypted with the format's own published key: key type at 0xE4, types 2-4 derive the AES-128-CTR key by ECB-encrypting the package riv, type 1 uses the key directly. The key is only accepted when the decrypted item table is self-consistent (offsets inside the data area, printable ASCII names). Yields the item list, sce_sys/param.sfo and the plaintext sce_pfs/pflist.",
-    "pkg_blocked_at": "sce_pfs — a file whose pflist mark is empty is stored PFS-encrypted, and the PFS key comes from the licence (work.bin / zRIF), which a package does not contain. The refusal names pflist as the evidence and eboot.bin as the file it wanted.",
-    "sample": "branding/vita/terraria.pkg",
-    "sample_result": "opens: 103 items, content id EP4040-PCSB00405_00-TERRARIA00000001, param.sfo Terraria / PCSB00405 / gd / 01.00, 78 PFS-protected files; blocked at sce_pfs because eboot.bin is one of them"
+    "pfs_reader": "the second layer. Keyed by the title's own 16-byte klicensee, read from a NoNpDrm work.bin, a .rif or a zRIF (SceNpDrmLicense, 0x200 bytes; content id at 0x10, key at 0x50). Decryption runs through the vendored psvpfsparser in extra/vita2hos/external/Vita3K/external/psvpfstools.",
+    "licence_is_per_title": true,
+    "licence_verification": "before any decryption, the candidate klicensee is checked against the title's own sce_pfs/files.db: the secret is derived with scePfsUtilGetSecret from the header's files_salt, image_spec and key_id, and HMAC-SHA1 over the header with header_icv and rsa_sig0 zeroed must reproduce header_icv. A licence for another title derives a different signature and is rejected by name, so a wrong licence can never silently decrypt to garbage and the search order is a matter of speed only.",
+    "licence_search": [
+      "$PSXRECOMP_VITA_LICENSE (a file)",
+      "$PSXRECOMP_VITA_ZRIF (a zRIF string)",
+      "<title>/sce_sys/package/work.bin",
+      "work.bin, license.rif, <TITLEID>.rif, <TITLEID>.zrif, *.rif, *.zrif beside the container and one level up",
+      "<dir>/*/<TITLEID>/sce_sys/package/work.bin",
+      "sce_sys/package/temp.bin inside a package (recognised, and refused as the placeholder it is)"
+    ],
+    "staging": "the whole decrypted title is written as data/, the PFS metadata and the licence as container/, and eboot.bin additionally as executable. The staged module is re-read and re-classified after decryption, so a truncated or mis-assembled PFS extraction is caught rather than packaged.",
+    "samples": {
+      "branding/vita/pkg/terraria.pkg": "opens: 103 items, content id EP4040-PCSB00405_00-TERRARIA00000001, param.sfo Terraria / PCSB00405 / gd / 01.00, 78 PFS-protected files. No licence for PCSB00405 exists on this machine, so it is refused by title and by the list of places searched. Given the PCSE00317 licence instead, the refusal becomes a signature mismatch naming both digests — which is the per-title check working, not failing.",
+      "branding/vita/standard/PCSE00317/": "an already-decrypted dump, accepted whether the directory or its eboot.bin is selected: no sce_pfs, so no licence is wanted, and the whole title stages as data/ (67 files, 33,564,888 bytes)."
+    }
   },
   "horizon": {
     "mode": "direct-execution",
@@ -55,19 +69,32 @@
     ],
     "container_reader": "studio/src/SwitchNsp.{h,cpp} with studio/src/GuestCrypto.{h,cpp}",
     "nsp_reader_unkeyed": "the outer PFS0 partition, the .cnmt.xml content list and the ticket parse with no key at all: title id, content meta type, every NCA in the package, the ticket rights id and title key",
-    "nsp_reader_keyed": "the NCA header is AES-128-XTS under header_key with Nintendo's big-endian sector tweak; with a prod.keys present Studio decrypts it, walks the FS headers to the ExeFS PFS0 and stages main",
+    "nsp_reader_keyed": "the NCA header is AES-128-XTS under header_key with Nintendo's big-endian sector tweak; with a prod.keys present Studio decrypts it and walks the FS headers to both program sections — the ExeFS PFS0 and the RomFS",
     "nsp_key_search": [
+      "$PSXRECOMP_SWITCH_KEYS",
       "<package directory>/prod.keys",
       "~/.switch/prod.keys"
     ],
-    "nsp_blocked_at": "header_key, which Nintendo does not publish and which is not in this repo. The refusal names the key and lists the paths searched, after having read the whole unkeyed tier.",
+    "nsp_key_miss": "with no prod.keys the unkeyed tier still reads in full and the refusal names header_key and lists the paths searched, rather than calling the whole package encrypted.",
+    "staging": "the whole program is written as data/: every ExeFS entry under data/exefs/ (main, main.npdm, rtld, sdk, subsdk0..n), the decrypted RomFS image verbatim as data/romfs.bin, and the Control NCA icon as data/control/. The ticket, cert and .cnmt.xml go to container/, and the ExeFS main additionally to executable. RomFS is staged as an image rather than unpacked: its names are UTF-8 and case-sensitive and the host filesystem here is neither, so an unpack would be a re-encoding rather than a copy.",
+    "arch_source": "the ExeFS main.npdm — the process manifest Horizon's own loader reads. Its flags byte states the instruction set outright. The entry-instruction probe is kept as a second, independent reading and a disagreement is reported, but it cannot always answer: an NSO .text is LZ4 and need not open with a branch.",
     "sample": "branding/switch/Undertale.nsp",
-    "sample_result": "opens unkeyed: 7 entries, title id 010080b00ad66000, meta type Application, Program/Control/LegalInformation/Meta contents, rights id 010080b00ad660000000000000000005; blocked at the NCA header for want of header_key. The keyed tier is unverified here because no prod.keys exists on this machine.",
+    "sample_result": "opens completely with branding/switch/prod.keys: 7 entries, title id 010080b00ad66000, meta type Application, patch id 010080b00ad66800, rights id 010080b00ad660000000000000000005, NCA3 at master key revision 4. ExeFS main 2,708,936 / main.npdm 1,476 / rtld 7,112 / sdk 4,409,751 / subsdk0 11,491,034 / subsdk1 3,277,207. RomFS 157,904,376 bytes, 216 files. control.nacp: Undertale - 8-4, Ltd. Staged: data/ 8 files, 179,808,865 bytes.",
+    "sample_refused_because": "Undertale's main.npdm declares 64-bit instructions and a 64-bit address space, so it is AArch64 and is refused at identification. The package reads completely first; the refusal is about the instruction set, not about the container or the keys. branding/ carries no 32-bit Horizon title, so no end-to-end Switch export can succeed from the samples in this repo.",
     "aarch64_supported": false,
-    "aarch64_note": "refused by name; a Cortex-A7 cannot execute AArch64 at all",
+    "aarch64_note": "refused by name, for a loose NSO0/NRO0 and for an NSP alike; a Cortex-A7 cannot execute AArch64 at all",
     "ipc": "HIPC/CMIF transport complete; sm: implemented, no device services yet",
     "svc_abi_32bit": "derived from the AArch64 ABI, documented as D1/D2/D3 in extra/horizon2mvii/include/horizon_svc.h",
     "provenance": "extra/horizon2mvii/REFERENCE_PROVENANCE.json"
+  },
+  "package_launch": {
+    "argv": "MVII launches an application by its .virtua and passes that path as argv[0] and nothing else; argc is 1. There is no command line on the device.",
+    "guest_image": "dirname(argv[0]) + '/executable'",
+    "guest_data_root": "dirname(argv[0]) + '/data'",
+    "resolver": "vwine_package_resolve_image in extra/virtua/wine/source/vwine_package.c, shared by both front-ends",
+    "explicit_path": "a path given on the command line still wins, for bring-up; the package is consulted only when none was given",
+    "was_broken": "both front-ends read argv[1], so every dashboard launch printed a usage line and exited. Fixed 2026-07-30 after the device console showed exactly that for Terraria and Undertale.",
+    "export_check": "`executable` is re-hashed in the built package and again in the delivered export, because it is the one file the front-end opens"
   },
   "proof": "runtime/proofs/virtua_platform_smoke.json",
   "dependencies": {

@@ -661,6 +661,30 @@ bool readSwitchNsp(const QString& path, SwitchNspInfo& info, QString& error) {
     readSection(main->offset,
                 static_cast<qint64>(std::min<quint64>(main->size, 0x1000u)),
                 info.mainModuleHead);
+
+    // The process manifest, read here because it is what the console's own
+    // loader reads and because `main`'s first instruction cannot always be
+    // decoded (its .text may be LZ4 and may not open with a branch).
+    const auto npdm = std::find_if(exeFs.cbegin(), exeFs.cend(), [](const Pfs0Entry& e) {
+      return e.name == QStringLiteral("main.npdm");
+    });
+    if (npdm != exeFs.cend() && npdm->size >= 0x80u) {
+      QByteArray meta;
+      readSection(npdm->offset,
+                  static_cast<qint64>(std::min<quint64>(npdm->size, 0x100u)), meta);
+      if (meta.size() >= 0x40 && meta.left(4) == QByteArrayLiteral("META")) {
+        const quint8 flags = static_cast<quint8>(meta.at(0x0C));
+        info.npdmPresent = true;
+        info.npdmIs64Bit = (flags & 0x01u) != 0u;
+        info.npdmAddressSpace = static_cast<int>((flags >> 1u) & 0x07u);
+        // A fixed-width, NUL-padded field, so it is trimmed at the first NUL
+        // rather than taken whole.
+        const QByteArray name = meta.mid(0x20, 0x10);
+        info.npdmName = QString::fromLatin1(name.left(name.indexOf('\0') < 0
+                                                        ? name.size()
+                                                        : name.indexOf('\0')));
+      }
+    }
     info.programDecrypted = true;
     break;
   }

@@ -39,6 +39,7 @@
 
 #include "minos_user_abi.h"
 #include "vwine/vwine_log.h"
+#include "vwine/vwine_package.h"
 #include "vwine/vwine_registry.h"
 
 // Defined by R-Dash and filled in by Dash/armv7/crt.s from the vtable MVII
@@ -106,12 +107,24 @@ int main(int argc, char** argv)
         return EXIT_ABI_UNAVAILABLE;
     }
 
-    if (argc < 2 || !argv || !argv[1] || !argv[1][0]) {
+    // The guest image. On the device there is never a command line: MVII starts
+    // an application by its `.virtua` and passes that path as argv[0] and
+    // nothing else, so reading argv[1] here is what made every dashboard launch
+    // print a usage line and exit. The guest is the `executable` Studio stages
+    // beside the `.virtua` -- for a Switch package, the ExeFS `main`. An
+    // explicit path still wins, for bring-up.
+    char image_storage[512];
+    char data_root[512];
+    if (!vwine_package_resolve_image("horizon2mvii", argc, argv, image_storage,
+                                     sizeof(image_storage), data_root,
+                                     sizeof(data_root))) {
         vwine_logf("horizon2mvii: usage: horizon2mvii <program.nro | program.nso> "
-                   "[heap-size-bytes]\n");
+                   "[heap-size-bytes], or launch a staged package that carries "
+                   "its own `executable`\n");
         return EXIT_NO_IMAGE;
     }
-    const char* image_path = argv[1];
+    const char* image_path = image_storage;
+    if (data_root[0]) vwine_logf("horizon2mvii: title data root %s\n", data_root);
 
     size_t heap_reserve = HORIZON_DEFAULT_HEAP;
     if (argc >= 3 && argv[2] && argv[2][0]) {

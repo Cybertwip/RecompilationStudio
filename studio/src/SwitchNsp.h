@@ -89,6 +89,16 @@ struct SwitchNspInfo {
   QString mainModule;             // "main", when the ExeFS carries one
   QByteArray mainModuleHead;      // its first bytes, for the architecture probe
 
+  // From the ExeFS `main.npdm`, the process manifest Horizon's own loader reads
+  // to decide how to create the process. Its flags byte is the authority on the
+  // module's instruction set — an NSO can begin with a word that is not a branch
+  // in either encoding, and Undertale's does, so probing the entry instruction
+  // cannot always answer and this can.
+  bool npdmPresent{ false };
+  bool npdmIs64Bit{ false };
+  int npdmAddressSpace{ -1 };  // 0=32-bit, 1=64-bit (legacy), 2=32-bit no-reserved, 3=64-bit
+  QString npdmName;            // the process name the manifest declares
+
   // What the extraction functions need to read the sections out again.
   quint64 programNcaOffset{ 0 };  // the NCA's offset in the NSP file
   quint64 mainOffset{ 0 };        // `main`'s offset within the NCA

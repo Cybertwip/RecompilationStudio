@@ -26,6 +26,7 @@ add_library(virtua-wine STATIC
     "${CMAKE_CURRENT_LIST_DIR}/source/vwine_mem.c"
     "${CMAKE_CURRENT_LIST_DIR}/source/vwine_elf.c"
     "${CMAKE_CURRENT_LIST_DIR}/source/vwine_registry.c"
+    "${CMAKE_CURRENT_LIST_DIR}/source/vwine_package.c"
     "${CMAKE_CURRENT_LIST_DIR}/source/vwine_log.c")
 
 target_include_directories(virtua-wine PUBLIC

@@ -770,6 +770,18 @@ GuestArch probeNsoArch(const QByteArray& module) {
   return archFromEntryBranch(entryWord);
 }
 
+/* The NPDM's address-space field, which is separate from its 32/64 instruction
+ * flag: a 32-bit process can be given the legacy or the no-reserved map. */
+QString switchAddressSpaceName(int addressSpace) {
+  switch (addressSpace) {
+    case 0: return QStringLiteral("32-bit");
+    case 1: return QStringLiteral("64-bit (legacy)");
+    case 2: return QStringLiteral("32-bit, no reserved region");
+    case 3: return QStringLiteral("64-bit");
+    default: return QStringLiteral("unrecognised (%1)").arg(addressSpace);
+  }
+}
+
 /* Opens the submission package. The PFS0 table, the ticket and the `.cnmt.xml`
  * are read with no key at all; the NCA and its ExeFS need `prod.keys`, and when
  * that file is absent the refusal names the keys it wanted and the paths it
@@ -889,9 +901,60 @@ void inspectHorizonPackage(const QString& path, GuestAppDescription& description
       "module horizon2mvii loads. It holds: %1.").arg(exeFs.join(QStringLiteral(", ")));
     return;
   }
-  description.arch = probeNsoArch(package.mainModuleHead);
+  /* Architecture. Two sources, and the manifest is the one that decides.
+   *
+   * `main.npdm` is what Horizon's own loader reads to create the process, and
+   * its flags byte states the instruction set outright. The entry-instruction
+   * probe is a decode of one word out of a possibly-LZ4 .text and it reports
+   * Unknown whenever that word is not a branch — which is not a rare case:
+   * Undertale's `main` begins 00 00 00 00 08 00 00 00 'MOD0', a null word and a
+   * MOD0 offset rather than a branch. Reading the manifest is what turns "this
+   * might be AArch64" into a refusal at identification time instead of a 180 MB
+   * export that fails on the device. */
+  const GuestArch probed = probeNsoArch(package.mainModuleHead);
+  if (package.npdmPresent) {
+    description.arch = package.npdmIs64Bit ? GuestArch::AArch64 : GuestArch::Arm32;
+    description.notes.append(
+      QStringLiteral("main.npdm: %1, %2 address space%3.")
+        .arg(package.npdmIs64Bit ? QStringLiteral("AArch64") : QStringLiteral("ARM32"),
+             switchAddressSpaceName(package.npdmAddressSpace),
+             package.npdmName.isEmpty() ? QString()
+                                        : QStringLiteral(", process \"%1\"").arg(package.npdmName)));
+    // Two independent readings of the same fact, so a disagreement is reported
+    // rather than resolved silently in favour of whichever was consulted last.
+    if (probed != GuestArch::Unknown && probed != description.arch) {
+      description.notes.append(
+        QStringLiteral("The manifest says %1 but `main`'s entry instruction decodes as "
+                       "%2. The manifest is what the console acts on, so that is what "
+                       "is reported; the module and its manifest disagreeing is itself "
+                       "worth knowing.")
+          .arg(guestArchName(description.arch), guestArchName(probed)));
+    }
+  } else {
+    description.arch = probed;
+    description.notes.append(QStringLiteral(
+      "The ExeFS carries no readable main.npdm, so the architecture is the one "
+      "decoded from `main`'s entry instruction."));
+  }
   description.requiresExtraction = true;
   description.executableName = package.mainModule;
+
+  /* And the same refusal a loose NSO0 gets, for the same reason. A package
+   * whose `main` is AArch64 cannot run on an ARMv7-A Cortex-A7 no matter how
+   * completely it was read, and saying so here rather than after a 180 MB
+   * export is the whole point of having read the manifest. Everything above
+   * still stands — the notes, the ExeFS listing, the RomFS inventory — because
+   * the reader is not what failed. */
+  if (description.arch == GuestArch::AArch64) {
+    description.refusal = QStringLiteral(
+      "The package opened completely, and its `main` is AArch64: %1's own "
+      "main.npdm declares 64-bit instructions. The MVII device is an ARMv7-A "
+      "Cortex-A7 and cannot decode a single AArch64 instruction, so this is a "
+      "different project rather than a harder case. horizon2mvii runs 32-bit "
+      "(AArch32) Horizon modules.")
+        .arg(description.containerTitle.isEmpty() ? QStringLiteral("this title")
+                                                  : description.containerTitle);
+  }
 }
 
 void inspectHorizon(const QByteArray& head, const QString& path,
@@ -1487,8 +1550,11 @@ QString generatedGuestAppReadme(const PipelineRequest& request,
     "for Virtua ARM alone. A macOS, Windows or Linux build would be an x86_64 "
     "loader with nothing it could branch to.\n\n"
     "## Layout\n\n"
-    "%7 It is staged beside the runtime as `executable`, which is the path "
-    "`%2` reads from `argv[1]`.\n"
+    "%7 It is staged beside the runtime as `executable`, and that name is load-"
+    "bearing: MVII launches an application by its `.virtua` and passes that path "
+    "as `argv[0]` and nothing else, so `%2` resolves its guest as `executable` "
+    "in the same directory. An explicit path on the command line still wins "
+    "during bring-up, but the device never supplies one.\n"
     "- `framework/extra/%5/` — the front-end: the loader, the relocator and the "
     "guest-OS reimplementation.\n"
     "- `framework/extra/virtua/` — the shared guest-OS layer (`virtua-wine`: the "

@@ -5783,6 +5783,20 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
   // nothing to load. The build was supposed to copy package_inputs/data beside
   // the runtime; this is where that is established rather than assumed, by
   // re-hashing what arrived against what was staged.
+  //
+  // `executable` gets the same treatment for the same reason: it is not a
+  // convenience copy, it is what the front-end opens. MVII launches a package
+  // by its `.virtua` and passes no arguments, so vwine_package_resolve_image
+  // reads the guest out of `executable` beside it — a package that lost that
+  // file starts and immediately reports that it has no guest to run.
+  const QString packagedImageHash = sha256File(packagedImage, error);
+  if (packagedImageHash.isEmpty()) {
+    fail(error.isEmpty()
+      ? QStringLiteral("The guest image in the built %1 package could not be read.")
+          .arg(frontEnd) : error);
+    return;
+  }
+
   quint64 packagedDataBytes = 0;
   for (const QJsonValue& value : stagedData) {
     const QJsonObject entry = value.toObject();
@@ -5934,6 +5948,10 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
     // in the staging directory it was copied from.
     { QStringLiteral("package_guest_data_files"), stagedData.size() },
     { QStringLiteral("package_guest_data_bytes"), static_cast<double>(packagedDataBytes) },
+    { QStringLiteral("package_guest_image_sha256"), packagedImageHash },
+    { QStringLiteral("package_guest_image_resolved_by"),
+      QStringLiteral("vwine_package_resolve_image reads `executable` beside the "
+                     ".virtua; MVII launches a package with no arguments") },
     { QStringLiteral("package_guest_data_verified"),
       QStringLiteral("every file re-hashed in build/steganos-package after the "
                      "build, against package_inputs/data") },
@@ -5968,6 +5986,20 @@ void PipelineWorker::runGuestApp(const PipelineRequest& request) {
     if (sha256File(deliveredExecutable, error) != sealedExecutableHash) {
       fail(error.isEmpty()
         ? QStringLiteral("The delivered %1 executable changed during publication.").arg(frontEnd)
+        : error);
+      return;
+    }
+    // The guest image, re-hashed rather than sized, because it is the one file
+    // the front-end resolves and opens on the device with nothing else to fall
+    // back to.
+    if (sha256File(QDir(output).filePath(QStringLiteral("executable")), error) !=
+        packagedImageHash) {
+      fail(error.isEmpty()
+        ? QStringLiteral(
+            "The delivered %1 package has no usable `executable` beside its "
+            ".virtua. That is the file the front-end loads when the device "
+            "launches the package, so it would start and find no guest.")
+            .arg(frontEnd)
         : error);
       return;
     }

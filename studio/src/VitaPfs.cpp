@@ -483,6 +483,19 @@ bool verifyVitaLicenseHeader(const QByteArray& filesDbHeader,
     return false;
   }
 
+  // The image spec selects which crypto engine the secret is derived with, and
+  // psvpfsparser throws a bare "Invalid index" on anything outside 1..4. That
+  // reads as a licence problem when it is a files.db problem, so it is caught
+  // by name here instead.
+  if (header.image_spec == 0 || header.image_spec > 4) {
+    error = QStringLiteral(
+      "This files.db states image spec %1, and the PFS layer defines 1 "
+      "(gamedata), 2 (savedata), 3 (ADDCONT) and 4 (DLC). The file is damaged "
+      "or is not the one that describes this title; no licence can be checked "
+      "against it.").arg(header.image_spec);
+    return false;
+  }
+
   // The secret the header is signed with, derived from the klicensee and the
   // title's own salt — which is why a licence for another title fails here.
   auto cryptops = makeCryptoOperations();

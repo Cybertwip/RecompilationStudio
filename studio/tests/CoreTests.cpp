@@ -7,6 +7,7 @@
 #include "PipelineSupport.h"
 #include "PipelineWorker.h"
 #include "SwitchNsp.h"
+#include "VitaPfs.h"
 #include "VitaPkg.h"
 
 #include "quazip.h"
@@ -171,6 +172,76 @@ QByteArray makeVitaModule() {
   putLe16(elf, 18, 40u);      // EM_ARM
   putLe32(elf, 20, 1u);
   return elf;
+}
+
+/* A 0x200-byte SceNpDrmLicense, laid out at the offsets rif.h gives: version at
+ * 0x00, aid at 0x08, content_id at 0x10 and the klicensee at 0x50. `key` empty
+ * writes the all-zero key a licence never has; `version` 0xFFFF with no account
+ * is the placeholder a package's own temp.bin carries. */
+QByteArray makeVitaLicense(const QByteArray& contentId,
+                           const QByteArray& key,
+                           quint16 version = 1,
+                           quint64 accountId = 0x0123456789ABCDEFull) {
+  QByteArray rif(0x200, 0);
+  qToLittleEndian<quint16>(version, rif.data());
+  qToLittleEndian<quint64>(accountId, rif.data() + 0x08);
+  std::memcpy(rif.data() + 0x10, contentId.constData(),
+              static_cast<size_t>(std::min<qsizetype>(contentId.size(), 0x30)));
+  if (!key.isEmpty()) {
+    std::memcpy(rif.data() + 0x50, key.constData(),
+                static_cast<size_t>(std::min<qsizetype>(key.size(), 0x10)));
+  }
+  return rif;
+}
+
+/* An unpacked title directory: what a dumped Vita application looks like on
+ * disk. `encrypted` gives it the sce_pfs layer — the shape whose files cannot be
+ * read without the title's licence — and `licence` puts one beside it. */
+bool makeVitaTitleDirectory(const QString& directory,
+                            bool encrypted,
+                            const QByteArray& licence,
+                            QString& error) {
+  const QByteArray psf = makeSonyPsf({
+    { "TITLE", "Studio Test Vita Dump" }, { "TITLE_ID", "PCST00002" },
+    { "CATEGORY", "gd" }, { "APP_VER", "01.00" },
+  });
+  QList<QPair<QString, QByteArray>> files{
+    { QStringLiteral("eboot.bin"), makeVitaModule() },
+    { QStringLiteral("sce_sys/param.sfo"), psf },
+    { QStringLiteral("sce_module/libc.suprx"), QByteArray(64, '\x11') },
+    { QStringLiteral("data.vfs"), QByteArray(4096, '\x22') },
+  };
+  if (encrypted) {
+    // A files.db head that is well-formed as far as the licence check reads it:
+    // the magic, an image spec of 1 (gamedata, which is what a game is) and a
+    // salt, so that a licence checked against it is rejected on the header
+    // signature — the behaviour under test — rather than on a malformed field.
+    QByteArray filesDb(0x400, 0);
+    std::memcpy(filesDb.data(), "SCENGPFS", 8);
+    putLe32(filesDb, 0x08, 5u);           // version
+    putLe16(filesDb, 0x0C, 1u);           // image spec: gamedata
+    putLe16(filesDb, 0x0E, 0u);           // key id
+    putLe32(filesDb, 0x10, 0x400u);       // page size
+    putLe32(filesDb, 0x1C, 0x5EEDF00Du);  // files salt
+    // A header_icv no derived secret will reproduce, which is the point.
+    std::memset(filesDb.data() + 0x4C, 0x5A, 0x14);
+    files.append({ QStringLiteral("sce_pfs/files.db"), filesDb });
+    files.append({ QStringLiteral("sce_pfs/unicv.db"), QByteArray(0x400, 0) });
+    files.append({ QStringLiteral("sce_pfs/pflist"), QByteArray("eboot.bin\t0\t\t2\t256\t0\n") });
+  }
+  if (!licence.isEmpty())
+    files.append({ QStringLiteral("sce_sys/package/work.bin"), licence });
+
+  for (const auto& file : files) {
+    const QString path = QDir(directory).filePath(file.first);
+    if (!QDir().mkpath(QFileInfo(path).absolutePath()) ||
+        !psxstudio::writeBytes(path, file.second, error)) {
+      if (error.isEmpty())
+        error = QStringLiteral("the test title directory could not be written");
+      return false;
+    }
+  }
+  return true;
 }
 
 /* A PSN package built the way a real one is: an item table, a name region and
@@ -516,6 +587,115 @@ int main(int argc, char** argv) {
         error.isEmpty() ? QStringLiteral("Vita batch scan separates the openable package")
                         : error);
 
+  // The other shape a Vita title arrives in: unpacked, as a directory. Studio
+  // takes it whether the directory or its eboot.bin is selected, and stages the
+  // whole title rather than the module alone — a Vita game is its sce_module
+  // libraries and its asset archives as much as its eboot.
+  const QString plainTitle = QDir(temp.path()).filePath(QStringLiteral("vita-dump-plain"));
+  check(makeVitaTitleDirectory(plainTitle, /*encrypted=*/false, {}, error), error);
+  for (const QString& selected : { plainTitle,
+                                   QDir(plainTitle).filePath(QStringLiteral("eboot.bin")) }) {
+    psxstudio::GuestAppDescription dump;
+    check(psxstudio::inspectGuestApp(psxstudio::SystemKind::Vita, selected, dump, error),
+          error.isEmpty() ? QStringLiteral("unpacked title inspection") : error);
+    check(dump.loadable() &&
+            dump.container == psxstudio::GuestContainer::VitaAppDir &&
+            dump.arch == psxstudio::GuestArch::Arm32 &&
+            dump.containerTitle == QStringLiteral("Studio Test Vita Dump") &&
+            dump.containerTitleId == QStringLiteral("PCST00002") &&
+            dump.requiresExtraction &&
+            dump.executableName == QStringLiteral("eboot.bin"),
+          QStringLiteral("an unpacked title is taken whether the directory or its "
+                         "eboot.bin is selected (%1)").arg(QFileInfo(selected).fileName()));
+    const QString stage = QDir(temp.path()).filePath(
+      QStringLiteral("vita-dump-stage-%1").arg(QFileInfo(selected).fileName()));
+    QString stagedDump;
+    QStringList dumpLog;
+    check(psxstudio::stageGuestApp(dump, selected, stage, stagedDump, dumpLog, error),
+          error.isEmpty() ? QStringLiteral("unpacked title staging") : error);
+    auto stagedFile = [&](const char* relative) {
+      return QFileInfo(QDir(stage).filePath(QString::fromLatin1(relative)));
+    };
+    QFile stagedModule(stagedDump);
+    check(stagedModule.open(QIODevice::ReadOnly) &&
+            stagedModule.readAll() == makeVitaModule() &&
+            stagedFile("data/eboot.bin").isFile() &&
+            stagedFile("data/sce_module/libc.suprx").size() == 64 &&
+            stagedFile("data/data.vfs").size() == 4096 &&
+            stagedFile("data/sce_sys/param.sfo").isFile(),
+          QStringLiteral("staging an unpacked title writes the whole title as data/, "
+                         "not the module alone"));
+    stagedModule.close();
+  }
+
+  // The same directory with its PFS layer and no licence anywhere. The klicensee
+  // is per title and ships only with the licence, so this must be refused by
+  // naming the title and where Studio looked — never opened with a guessed key.
+  const QString sealedTitle = QDir(temp.path()).filePath(QStringLiteral("vita-dump-sealed"));
+  check(makeVitaTitleDirectory(sealedTitle, /*encrypted=*/true, {}, error), error);
+  psxstudio::GuestAppDescription sealedDump;
+  check(psxstudio::inspectGuestApp(psxstudio::SystemKind::Vita, sealedTitle,
+                                   sealedDump, error),
+        error.isEmpty() ? QStringLiteral("sealed title inspection") : error);
+  check(!sealedDump.loadable() &&
+          sealedDump.container == psxstudio::GuestContainer::VitaAppDir &&
+          sealedDump.refusal.contains(QStringLiteral("PCST00002")) &&
+          sealedDump.refusal.contains(QStringLiteral("klicensee")) &&
+          sealedDump.refusal.contains(QStringLiteral("Studio looked in:")) &&
+          sealedDump.refusal.contains(sealedTitle),
+        QStringLiteral("a PFS title with no licence is refused by title and by where "
+                       "the licence was looked for"));
+
+  // A licence that is not this title's is found and then rejected at the header
+  // rather than used, which is what stops a wrong key producing megabytes of
+  // plausible garbage. The fixture's files.db is not really signed, so no
+  // licence can pass it — that every candidate is rejected on the signature is
+  // exactly the assertion.
+  const QByteArray strangerKey = QByteArray::fromHex("8fbcd6dc5431bcef411e61901efb5641");
+  const QString wrongTitle = QDir(temp.path()).filePath(QStringLiteral("vita-dump-wrong"));
+  check(makeVitaTitleDirectory(
+          wrongTitle, /*encrypted=*/true,
+          makeVitaLicense("UP0000-PCST99999_00-SOMEOTHERTITLE00", strangerKey), error),
+        error);
+  psxstudio::GuestAppDescription wrongDump;
+  check(psxstudio::inspectGuestApp(psxstudio::SystemKind::Vita, wrongTitle,
+                                   wrongDump, error),
+        error.isEmpty() ? QStringLiteral("wrong-licence title inspection") : error);
+  check(!wrongDump.loadable() &&
+          wrongDump.refusal.contains(QStringLiteral("none of them opens PCST00002")) &&
+          std::any_of(wrongDump.notes.cbegin(), wrongDump.notes.cend(),
+                      [](const QString& note) {
+                        return note.contains(QStringLiteral("rejected")) &&
+                               note.contains(QStringLiteral("PCST99999"));
+                      }),
+        QStringLiteral("a licence for another title is read, checked against this "
+                       "title's files.db header, and rejected by content id"));
+
+  // The two forms that are not licences at all, refused by name rather than
+  // carried forward as sixteen bytes that fail three steps later.
+  psxstudio::VitaLicense parsed;
+  check(!psxstudio::readVitaLicenseBlob(
+          makeVitaLicense("EP0000-PCST00003_00-PLACEHOLDER00000", {}, 0xFFFF, 0),
+          QStringLiteral("temp.bin"), parsed, error) &&
+          error.contains(QStringLiteral("placeholder")),
+        QStringLiteral("a package's temp.bin placeholder is refused as a placeholder"));
+  check(!psxstudio::readVitaLicenseBlob(
+          makeVitaLicense("EP0000-PCST00003_00-NOKEY00000000000", {}),
+          QStringLiteral("empty.rif"), parsed, error) &&
+          error.contains(QStringLiteral("all-zero key")),
+        QStringLiteral("an all-zero klicensee is refused"));
+  check(psxstudio::readVitaLicenseBlob(
+          makeVitaLicense("UP4040-PCST00002_00-STUDIOTEST000000", strangerKey),
+          QStringLiteral("work.bin"), parsed, error) &&
+          parsed.isValid() && parsed.klicensee == strangerKey &&
+          parsed.contentId == QStringLiteral("UP4040-PCST00002_00-STUDIOTEST000000") &&
+          parsed.fakeAccount,
+        QStringLiteral("a NoNpDrm work.bin is read: key, content id and marker account"));
+  check(!psxstudio::verifyVitaLicenseHeader(QByteArray(0x400, 0), parsed, error) &&
+          error.contains(QStringLiteral("not a files.db")),
+        QStringLiteral("a licence checked against something that is not a files.db "
+                       "is refused for that, not for the key"));
+
   const QString nspPath = QDir(guestDir).filePath(QStringLiteral("studio-test.nsp"));
   check(makeTestNsp(nspPath, error), error);
   psxstudio::SwitchNspInfo nsp;
@@ -547,6 +727,29 @@ int main(int argc, char** argv) {
           psxstudio::guestAppFileFilter(psxstudio::SystemKind::Horizon)
             .contains(QStringLiteral("*.nsp")),
         QStringLiteral("the file dialogs offer the distribution containers"));
+
+  // The generated project has to carry the target that copies the staged data
+  // beside the runtime, and guest-runtime has to depend on it. Without that the
+  // export is correct on disk and the built package still ships a loader with
+  // nothing behind it — a Switch `main` is under 2% of its title.
+  for (const psxstudio::SystemKind guestSystem : { psxstudio::SystemKind::Vita,
+                                                   psxstudio::SystemKind::Horizon }) {
+    psxstudio::PipelineRequest guestRequest;
+    guestRequest.system = guestSystem;
+    guestRequest.targetPlatform = psxstudio::TargetPlatform::VirtuaArm;
+    guestRequest.windowTitle = QStringLiteral("Studio Guest");
+    const QString guestCmake = psxstudio::generatedGuestAppProjectCMake(
+      guestRequest, vitaPackage, QStringLiteral("StudioGuest"));
+    check(guestCmake.contains(QStringLiteral("package_inputs/data")) &&
+            guestCmake.contains(QStringLiteral(
+              "copy_directory \"${_GUEST_DATA}\" \"${_GUEST_STAGE}/data\"")) &&
+            guestCmake.contains(QStringLiteral("add_custom_target(guest-data")) &&
+            guestCmake.contains(QStringLiteral("add_dependencies(guest-runtime guest-data)")) &&
+            guestCmake.contains(QStringLiteral("add_dependencies(guest-runtime %1-stage)")
+                                  .arg(psxstudio::systemFrontEndName(guestSystem))),
+          QStringLiteral("the generated %1 project stages package_inputs/data as data/")
+            .arg(psxstudio::systemFrontEndName(guestSystem)));
+  }
 
   // An export that produced no translation must stop the build rather than
   // quietly ship an executable with nothing recompiled in it.

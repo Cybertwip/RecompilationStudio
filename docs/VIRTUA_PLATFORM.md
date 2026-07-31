@@ -22,8 +22,8 @@ by the guest's instruction set, not by preference:
 |---|---|
 | PlayStation | Static MIPS→C output linked to the MVII runtime. Video uses the complete software renderer through `/dev/fb0`, audio queued PCM through `/dev/dac0`, input from `/dev/input0`. |
 | Game Boy Advance | Static recompilation via `extra/gbarecomp`; the recompiled cartridge units and BIOS are linked into `extra/gba-to-mvii`, which builds the emulation half of gbarecomp against MVII's devices. Studio drives this automatically — there is no "Native" checkbox. |
-| PlayStation Vita | `extra/vita2hos` builds `vita2mvii.virtua`: loads the SELF/VPK, relocates it, binds each import to a host reimplementation of the Vita's kernel API, and branches. Studio accepts a `.pkg` directly and unpacks the module out of it — see below. |
-| Nintendo Horizon | `extra/horizon2mvii` builds `horizon2mvii.virtua`: loads an NRO/NSO, relocates it, and runs it against a reimplementation of Horizon's kernel, SVC layer and HIPC/CMIF IPC. 32-bit only — see below. Studio accepts a `.nsp` directly and unpacks the ExeFS `main` out of it — see below. |
+| PlayStation Vita | `extra/vita2hos` builds `vita2mvii.virtua`: loads the SELF/VPK, relocates it, binds each import to a host reimplementation of the Vita's kernel API, and branches. Studio accepts a `.pkg` or an unpacked title directory and stages the whole title out of it, decrypting PFS with the title's own licence — see below. |
+| Nintendo Horizon | `extra/horizon2mvii` builds `horizon2mvii.virtua`: loads an NRO/NSO, relocates it, and runs it against a reimplementation of Horizon's kernel, SVC layer and HIPC/CMIF IPC. 32-bit only — see below. Studio accepts a `.nsp` directly and stages the whole ExeFS and RomFS out of it — see below. |
 
 Both direct-execution front-ends are **ARMv7-only** and their CMake files refuse
 any other `CMAKE_SYSTEM_PROCESSOR`. That guard is load-bearing rather than
@@ -56,11 +56,19 @@ the guest module — each is a container with the module somewhere inside — so
 Studio reads the container itself rather than telling the user to go find a
 loose `eboot.bin` or `main`. `studio/src/VitaPkg.{h,cpp}` and
 `studio/src/SwitchNsp.{h,cpp}` are the readers; `studio/src/GuestCrypto.{h,cpp}`
-is the AES-128 ECB/CTR/XTS they share. `stageGuestApp` in
-`studio/src/GuestAppSupport.cpp` is what actually unpacks the selected entry
-into `project/package_inputs/executable`, and the pipeline hashes the container
-and the extracted image separately (`container_sha256` and the image's own
-SHA-256 both land in the identification proof).
+is the AES-128 ECB/CTR/XTS they share, and `studio/src/VitaPfs.{h,cpp}` is the
+licence reader and PFS decryption front. `stageGuestApp` in
+`studio/src/GuestAppSupport.cpp` is what actually unpacks the container, and it
+writes three things into `project/package_inputs/`: the whole guest title as
+`data/`, the container's own metadata as `container/`, and the module that is
+branched to as `executable`. That last one is a small fraction of a title — a
+Switch `main` is under 2% of its package — so `data/` is not an extra, it is the
+program. The pipeline hashes the container and the extracted image separately
+(`container_sha256` and the image's own SHA-256 both land in the identification
+proof), records a SHA-256 for every staged data file, and then **re-hashes all of
+them in the built package and checks them again in the delivered export**, so a
+package that shipped without its data fails the export instead of succeeding
+quietly.
 
 **Vita `.pkg`.** The header, the metadata records, and the item table are read
 under the format's own published key. The package names its key type at 0xE4;
@@ -69,38 +77,121 @@ the corresponding public key, type 1 uses the key directly. The chosen key has
 to prove itself: the item table is only accepted when its offsets land inside
 the data area and its names are printable ASCII. From there the item list, the
 `sce_sys/param.sfo` (title, title id, category, version) and the plaintext
-`sce_pfs/pflist` are all readable. Studio shows the item list and stages
-`eboot.bin` when `pflist` marks it `nenc` or absent from PFS.
+`sce_pfs/pflist` are all readable.
+
+That is only the outer layer. A `pflist` entry with an empty mark is stored
+behind PFS, and PFS is keyed by a **klicensee that belongs to one title** — a
+licence for the same game in another region does not open it, and the key is
+neither in the container nor derivable from it. Studio reads that key from a
+NoNpDrm `work.bin`, a `.rif`, or a zRIF string (all three are the same 0x200-byte
+`SceNpDrmLicense`: content id at 0x10, key at 0x50), and it looks in
+`PSXRECOMP_VITA_LICENSE`, `PSXRECOMP_VITA_ZRIF`, the title's own
+`sce_sys/package/work.bin`, the usual `.rif`/`.zrif` names beside the container
+and one level up, and `*/<TITLEID>/sce_sys/package/work.bin`.
+
+**A candidate licence is verified before it is used.** The title's own
+`sce_pfs/files.db` header is the oracle: the secret is derived with
+`scePfsUtilGetSecret` from that header's `files_salt`, `image_spec` and `key_id`,
+and `HMAC-SHA1` over the header — with `header_icv` and `rsa_sig0` zeroed —
+has to reproduce `header_icv`. A licence for another title derives a different
+signature and is rejected by content id. This is why search *order* is only a
+matter of speed: a wrong licence cannot silently decrypt a title to garbage.
+Decryption itself runs through the vendored psvpfsparser under
+`extra/vita2hos/external/Vita3K/external/psvpfstools`.
+
+Studio also takes an **already-unpacked title** — the `eboot.bin` + `sce_sys/`
+tree of a dumped title — selected either as the directory or as its `eboot.bin`.
+No `sce_pfs` means no licence is wanted, and Studio says so rather than asking
+for one.
 
 **Switch `.nsp`.** The outer PFS0 partition, the `.cnmt.xml` content list and the
 ticket all parse with no key at all, so Studio can name the title id, the content
 meta type, every NCA in the package and the ticket's rights id and title key
 before it needs anything. The NCA header is AES-128-XTS under `header_key`,
-which Nintendo does not publish and which is not in the repo; Studio looks for a
-`prod.keys` next to the package and in `~/.switch/`, and when it finds one it
-decrypts the program NCA header, walks the FS headers to the ExeFS, and stages
-`main`.
+which Nintendo does not publish and which is not in this repo; Studio looks in
+`PSXRECOMP_SWITCH_KEYS`, next to the package, and in `~/.switch/`. With a
+`prod.keys` it decrypts the program NCA header and walks the FS headers to
+**both** program sections — the ExeFS and the RomFS.
+
+The architecture comes from the ExeFS `main.npdm`, the process manifest the
+console's own loader reads; its flags byte states the instruction set outright.
+The entry-instruction probe is kept as a second, independent reading and a
+disagreement between the two is reported, but it cannot always answer on its
+own: an NSO's `.text` is LZ4 and need not begin with a branch.
 
 The point of both readers is that a refusal names the layer it stopped at rather
-than the file extension. The two samples in `branding/` are exactly the two
-interesting cases:
+than the file extension. The samples in `branding/` are the interesting cases:
 
-- `branding/vita/terraria.pkg` opens completely — 103 items, content id
+- `branding/vita/pkg/terraria.pkg` opens completely — 103 items, content id
   `EP4040-PCSB00405_00-TERRARIA00000001`, `Terraria` / `PCSB00405` / `gd` /
   `01.00` from `param.sfo` — and then stops, because `sce_pfs/pflist` marks 78
-  files including `eboot.bin` as PFS-encrypted. The PFS key comes from the
-  licence (`work.bin` / zRIF), which a package does not contain, so the refusal
-  says so and names `pflist` as the evidence. That is a missing input, not an
-  unimplemented reader.
-- `branding/switch/Undertale.nsp` opens through its whole unkeyed tier — 7
-  entries, title id `010080b00ad66000`, meta type `Application`, the Program /
-  Control / LegalInformation / Meta contents, rights id
-  `010080b00ad660000000000000000005` — and then stops at the NCA header, naming
-  `header_key` as the key it wanted and listing the paths it searched. With a
-  `prod.keys` present that tier continues to the ExeFS and stages `main`. What
-  that `main` turns out to be has not been checked here, because no `prod.keys`
-  exists on this machine — and if it is AArch64, as nearly all Switch software
-  is, it meets the separate refusal below.
+  files including `eboot.bin` as PFS-encrypted. No licence for `PCSB00405` exists
+  on this machine, so the refusal names the title and lists every place it
+  looked. Pointed at the `PCSE00317` licence instead — the same game, the US
+  region — the refusal changes to a signature mismatch quoting both digests
+  (`files.db` signs its header as `a13b754e…`; that licence derives
+  `9594fd52…`). That is the per-title check working, not failing.
+- `branding/vita/standard/PCSE00317/` is that US title already decrypted. It is
+  accepted whichever way it is selected, wants no licence, and stages as 67
+  files / 33,564,888 bytes of `data/`.
+- `branding/switch/Undertale.nsp` opens completely with the `prod.keys` beside
+  it: 7 entries, title id `010080b00ad66000`, patch id `010080b00ad66800`, NCA3
+  at master key revision 4, ExeFS `main` (2,708,936) / `main.npdm` / `rtld` /
+  `sdk` / `subsdk0` / `subsdk1`, a 157,904,376-byte RomFS of 216 files, and
+  `Undertale` — `8-4, Ltd.` from `control.nacp`. It is then **refused for its
+  architecture**: its own `main.npdm` declares 64-bit instructions and a 64-bit
+  address space, so it is AArch64 and meets the refusal below. Everything above
+  is read first, so the refusal is about the instruction set and not about the
+  container or the keys.
+
+`branding/` therefore carries no 32-bit Horizon title, and no end-to-end Switch
+export can succeed from the samples in this repo. The staging path itself is
+exercised against Undertale's real 180 MB payload with the architecture gate
+lifted, which is what keeps "the export carries the whole title" a tested claim
+rather than an assumed one.
+
+## How the device starts a package, and what that means for argv
+
+MVII launches a Virtua application **by its `.virtua` file, passing that path as
+`argv[0]` and nothing else**. `argc` is 1. There is no command line on the
+device, and selecting an application on the dashboard is not a special case to
+be handled — it is the only way an application is ever started there.
+
+Both front-ends originally read their guest image out of `argv[1]`, so every
+dashboard launch printed its usage line and exited. The device console showed
+exactly that, and nothing else, for both systems:
+
+```
+| vita2mvii: usage: vita2mvii <eboot.bin | .self | .vpk>
+| Virtua process ended without an exit code: pid=1 file=…/Terraria.virtua
+| horizon2mvii: usage: horizon2mvii <program.nro | program.nso> [heap-size-bytes]
+| Virtua process ended without an exit code: pid=2 file=…/Undertale.virtua
+```
+
+The guest is not inside the `.virtua`. Studio stages a package directory, and
+the `.virtua` is one file in it, beside the guest:
+
+```
+Undertale-Virtua-ARM/
+  Undertale.virtua      <- argv[0]; the front-end ELF, wrapped
+  executable            <- the guest module the front-end loads
+  data/                 <- the rest of the title, staged whole
+  game.manifest.json, README.md, AppIcon.png, PSXRecomp-Proof.zip
+```
+
+So the guest is `dirname(argv[0]) + "/executable"` and the guest's data root is
+`dirname(argv[0]) + "/data"`. Both front-ends need the same two answers, so the
+resolver is one function in the shared layer —
+`vwine_package_resolve_image` in `extra/virtua/wine/source/vwine_package.c` —
+rather than a copy in each. An explicit path on the command line still wins, so
+a module can be pointed at directly during bring-up; the package is only
+consulted when no path was given, which is the case the device always produces.
+
+A package that lost its `executable` is refused by name, quoting the directory
+it looked in — not with a usage line, which describes a command line that does
+not exist there. The exporter checks the same file: it is re-hashed in the built
+package and again in the delivered export, because it is the one file the
+front-end opens with nothing to fall back to.
 
 ## What the front-ends refuse, and why that is the design
 
@@ -108,7 +199,10 @@ interesting cases:
   Cortex-A7 cannot execute one AArch64 instruction, so that is a different
   project, not a harder case. `horizon_image_probe_arch` requires two independent
   signals — the entry branch encoding and the shape of `.dynamic` — to agree, and
-  refuses when they do not.
+  refuses when they do not. Studio refuses earlier and on better evidence: for an
+  NSP it reads `main.npdm`, the manifest the console's own loader acts on, so a
+  64-bit title is named as such at identification rather than after a
+  180-megabyte export. Undertale is exactly this case.
 - **Address aliasing** (`svcMapMemory`, `svcMapSharedMemory` and friends). MVII
   runs a flat 1:1 identity map with no per-process page tables
   (`mt6592_mmu.c`), so there is no second mapping to make. Copying instead would
